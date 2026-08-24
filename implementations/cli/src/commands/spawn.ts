@@ -39,7 +39,6 @@ import {
   agentSentinelCredsKey,
   authDir,
   credsFlag,
-  defaultAgentOverride,
   defaultAgentType,
   defaultPersonaOverride,
   defaultPersonaRef,
@@ -213,7 +212,18 @@ export const spawnFlags = [
 export function spawnRequiredExtensions(args: ParsedArgs): readonly ExtensionRef[] {
   const v = args.values as FlagValues<typeof spawnFlags>;
   if (v.file || v.detach) return [];
-  return [{ kind: "connector", name: v.agent ?? defaultAgentType("claude") }];
+  if (v.agent) return [{ kind: "connector", name: v.agent }];
+  // The published CLI must materialize the connector before `spawn()` runs. Resolve the same target
+  // persona cheaply here so its first-class `agent:` selector participates in lazy extension loading;
+  // a missing/invalid persona is reported by spawn itself, after the ordinary default is available.
+  try {
+    const target = resolveMeshTarget(process.cwd(), { space: v.space, server: v.server });
+    const ref = spawnPersonaRef(v.config, args.positionals);
+    const personaAgent = loadAgentFile(agentFilePath(target.root, ref)).agent;
+    return [{ kind: "connector", name: personaAgent ?? defaultAgentType("claude") }];
+  } catch {
+    return [{ kind: "connector", name: defaultAgentType("claude") }];
+  }
 }
 
 /** Comma-list flag → string[] (shared by both spawn modes). */
@@ -247,7 +257,9 @@ async function spawnDetached(
     name: ref,
     identity: values.name,
     role: values.role,
-    agent: values.agent ?? defaultAgentOverride(),
+    // Omit an absent flag: the manager owns persona-agent > environment-default precedence. Sending
+    // COTAL_DEFAULT_AGENT here would make the environment look like an explicit override.
+    agent: values.agent,
     config: managerConfigRef,
     model: values.model,
     variant: values.variant,
@@ -401,7 +413,7 @@ export async function spawn(args: ParsedArgs): Promise<void> {
   if (target.source === "registry" || target.source === "current")
     console.error(c.dim(`→ joining mesh ${space} (${server}) as ${name}`));
 
-  const agentType = values.agent ?? defaultAgentType("claude");
+  const agentType = values.agent ?? def.agent ?? defaultAgentType("claude");
   let connector: Connector;
   try {
     connector = registry.resolve<Connector>("connector", agentType);

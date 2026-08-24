@@ -30,6 +30,7 @@ const def: AgentDef = {
   subscribe: ["general", "ops"],
   allowSubscribe: ["general", "ops"],
   allowPublish: ["ops"],
+  agent: "codex",
   model: "opus",
   variant: "high",
   launchOptions: { temperature: "0.2", reasoning: "high", verbose: true, retries: 3 },
@@ -40,7 +41,8 @@ const def: AgentDef = {
 const p = join(dir, "builder.md");
 saveAgentFile(p, def);
 const back = loadAgentFile(p);
-ok("round-trips name/role/model/variant", back.name === "builder" && back.role === "builder" && back.model === "opus" && back.variant === "high");
+ok("round-trips name/role/agent/model/variant", back.name === "builder" && back.role === "builder" && back.agent === "codex" && back.model === "opus" && back.variant === "high");
+ok("agent is a first-class field, not opaque meta", back.meta?.agent === undefined, back.meta);
 ok("round-trips tricky description with : and #", back.description === "handles: config, deploy # careful", back.description);
 ok("round-trips list fields", JSON.stringify(back.subscribe) === JSON.stringify(["general", "ops"]) && JSON.stringify(back.allowPublish) === JSON.stringify(["ops"]));
 ok("round-trips launchOptions map (typed values preserved)", JSON.stringify(back.launchOptions) === JSON.stringify({ temperature: "0.2", reasoning: "high", verbose: true, retries: 3 }), back.launchOptions);

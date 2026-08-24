@@ -10,6 +10,7 @@
  *   subscribe: [general]       # channels this agent actively reads at boot (the live set)
  *   allowSubscribe: [general]  # read ACL — channels it MAY read; omit ⇒ same as `subscribe`
  *   allowPublish: [general]    # post ACL — channels it may publish to; omit ⇒ DENY (default-deny)
+ *   agent: codex               # optional connector/harness; explicit spawn option still wins
  *   model: opus                # optional CLI/model override
  *   variant: high              # optional connector-defined model variant
  *   capabilities: [spawn]  # control-plane capabilities (spawn → may start/despawn others)
@@ -55,6 +56,8 @@ export interface AgentDef {
   /** Per-channel attention DEFAULT: channels dropped on receive (incl. `@`-mentions) — "don't receive
    *  this channel". Same one-way default semantics as {@link quiet}. */
   muted?: string[];
+  /** Connector / agent harness used when the spawn call does not select one explicitly. */
+  agent?: string;
   /** Model override handed to the agent CLI (e.g. `claude --model`). */
   model?: string;
   /** Connector-defined model variant handed to the launcher (e.g. OpenCode reasoning effort). */
@@ -197,7 +200,7 @@ export function loadAgentFile(path: string): AgentDef {
 
   // Sweep every scalar frontmatter key we don't model into meta, verbatim — connector launcher
   // hints ride here so core stays ignorant of surface-specific keys.
-  const known = new Set(["name", "role", "kind", "description", "tags", "subscribe", "allowSubscribe", "allowPublish", "quiet", "muted", "model", "variant", "launchOptions", "capabilities", "owner"]);
+  const known = new Set(["name", "role", "kind", "description", "tags", "subscribe", "allowSubscribe", "allowPublish", "quiet", "muted", "agent", "model", "variant", "launchOptions", "capabilities", "owner"]);
   const meta: Record<string, string> = {};
   for (const [k, v] of Object.entries(fm)) if (!known.has(k) && v !== null && typeof v !== "object") meta[k] = String(v);
 
@@ -212,6 +215,7 @@ export function loadAgentFile(path: string): AgentDef {
     allowPublish,
     quiet,
     muted,
+    agent: str("agent"),
     model: str("model"),
     variant: str("variant"),
     launchOptions,
@@ -260,6 +264,7 @@ export function saveAgentFile(path: string, def: AgentDef): void {
   if (def.allowPublish) fm.allowPublish = def.allowPublish;
   if (def.quiet?.length) fm.quiet = def.quiet;
   if (def.muted?.length) fm.muted = def.muted;
+  if (def.agent) fm.agent = def.agent;
   if (def.model) fm.model = def.model;
   if (def.variant) fm.variant = def.variant;
   if (def.launchOptions && Object.keys(def.launchOptions).length) fm.launchOptions = def.launchOptions;

@@ -15,6 +15,7 @@ tags: [edit, test]      # → card.tags ("what it can do")
 subscribe: [general, team.backend]     # channels it reads at boot
 allowSubscribe: [general, team.>]      # read ACL (omit = same as subscribe)
 allowPublish: [general, team.backend]  # post ACL (omit = none, default-deny)
+agent: codex            # optional connector/harness; explicit --agent wins
 model: opus             # optional model override
 variant: high           # optional connector-defined model variant
 capabilities: [spawn]   # control-plane capabilities (may start/despawn teammates)
@@ -43,12 +44,13 @@ Authoritative shape: [`agent-file.ts`](../packages/core/src/agent-file.ts).
 | `allowPublish` | string[] | The **post ACL**: channels it may publish to. **Omitted ⇒ deny**; posting is the dangerous capability, declare it explicitly. |
 | `quiet` | string[] | Per-channel attention *default*: ambient stays buffered and pull-only until `cotal_inbox`; `@mention`s remain automatic. Concrete channels within the read ACL. |
 | `muted` | string[] | Per-channel attention *default*: dropped on receive, `@mentions` included. |
+| `agent` | string | Connector/harness used when the spawn does not pass one explicitly (`claude`, `codex`, `opencode`, …). |
 | `model` | string | Model override handed to the agent CLI (Claude: `opus` / full id; OpenCode: `provider/model`). |
 | `variant` | string | Connector-defined model variant (e.g. an OpenCode variant, see `cotal models`). |
 | `launchOptions` | map | Opaque per-connector launch options forwarded **raw** to the harness (Claude flags, OpenCode agent config; Hermes and pi have no option surface and fail loud). A CLI `--opt key=value` overrides a key set here. See [run a mesh](run-a-mesh.md#spawning-agents). |
 | `capabilities` | string[] | Control-plane capabilities minted into the cred. `spawn` grants the privileged control subject (spawn / named stop / persona definition), default-deny when absent, enforced by the broker, not a handler. On a per-user-auth mesh, `role:<r>` additionally lets the agent delegate role `r` when spawning ([identity & auth](identity-and-auth.md)); `admin` is never a persona capability. |
 | `owner` | string | **Policy, not content**: set once by `definePersona` (owner = creator); only the owner (or admin) may redefine the file over the wire. Never write it by hand. |
-| *(any other key)* | string | Kept verbatim in `meta` so a connector can read its own launcher hints without core knowing them. The connector-owned keys are the exception: `connector`, `model`, `variant`, and `host` (the machine the session runs on) are overlaid from the live session, so a file cannot declare a harness or a host it is not on. |
+| *(any other key)* | string | Kept verbatim in `meta` so a connector can read its own launcher hints without core knowing them. Live presence still overlays the connector/model/variant/host actually in use, so a file cannot misreport what a running session uses. |
 
 The three channel verbs on one card, with the common recipes:
 [Channels & permissions](channels-and-permissions.md). Attention semantics (`quiet` /
@@ -64,8 +66,8 @@ The three channel verbs on one card, with the common recipes:
   `COTAL_LINK` carries the *where*; the joined session reads its card straight from the
   file. Individual `COTAL_*` vars still override it ([config](config.md)).
 - **Defaults.** A bare `cotal spawn` uses the `default` persona
-  (`COTAL_DEFAULT_PERSONA` changes the fallback); the harness comes from `--agent` /
-  `COTAL_DEFAULT_AGENT`, else Claude. An explicit flag always wins over the file
+  (`COTAL_DEFAULT_PERSONA` changes the fallback); the harness comes from `--agent`, then the
+  persona's `agent:`, then `COTAL_DEFAULT_AGENT`, else Claude. An explicit flag always wins over the file
   ([run a mesh](run-a-mesh.md)).
 
 Every launcher consumes the file the same way; they differ only in how they run the spec:

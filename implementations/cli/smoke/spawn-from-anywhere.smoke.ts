@@ -52,6 +52,7 @@ let saveSpaceAuth!: typeof import("@cotal-ai/workspace").saveSpaceAuth;
 let setCurrent!: typeof import("@cotal-ai/workspace").setCurrent;
 let spawnComplete!: typeof import("../src/commands/spawn.js").spawnComplete;
 let spawnPersonaRef!: typeof import("../src/commands/spawn.js").spawnPersonaRef;
+let spawnRequiredExtensions!: typeof import("../src/commands/spawn.js").spawnRequiredExtensions;
 let listPersonas!: typeof import("../src/lib/personas.js").listPersonas;
 let pruneStaleMeshes!: typeof import("../src/lib/meshes.js").pruneStaleMeshes;
 try {
@@ -69,7 +70,7 @@ try {
     saveSpaceAuth,
     setCurrent,
   } = await import("@cotal-ai/workspace"));
-  ({ spawnComplete, spawnPersonaRef } = await import("../src/commands/spawn.js"));
+  ({ spawnComplete, spawnPersonaRef, spawnRequiredExtensions } = await import("../src/commands/spawn.js"));
   ({ listPersonas } = await import("../src/lib/personas.js"));
   ({ pruneStaleMeshes } = await import("../src/lib/meshes.js"));
 } catch (e) { cleanScratch(e); }
@@ -86,7 +87,7 @@ function project(label: string, personas: string[]): string {
   const root = mkdtempSync(join(tmpdir(), `cotal-${label}-`));
   const dir = join(root, ".cotal", "agents");
   mkdirSync(dir, { recursive: true });
-  for (const p of personas) writeFileSync(join(dir, `${p}.md`), `# ${p}\n`);
+  for (const p of personas) writeFileSync(join(dir, `${p}.md`), `---\nname: ${p}\nsubscribe: []\n---\n# ${p}\n`);
   return root;
 }
 
@@ -122,11 +123,22 @@ try {
 
   // 1 mesh → used automatically (source 'registry'), with its root + personas.
   recordMesh(entry("teamA", projA));
+  writeFileSync(join(projA, ".cotal", "agents", "reviewer.md"), "---\nname: reviewer\nsubscribe: []\nagent: opencode\n---\n");
   check("default persona: product fallback is default", spawnPersonaRef(undefined, [], {}) === "default");
   check("default persona: blank env is ignored", spawnPersonaRef(undefined, [], { COTAL_DEFAULT_PERSONA: "  " }) === "default");
   check("default persona: env overrides product fallback", spawnPersonaRef(undefined, [], { COTAL_DEFAULT_PERSONA: "reviewer" }) === "reviewer");
   check("default persona: positional wins over env", spawnPersonaRef(undefined, ["researcher"], { COTAL_DEFAULT_PERSONA: "reviewer" }) === "researcher");
   check("default persona: --config wins over positional/env", spawnPersonaRef("builder", ["researcher"], { COTAL_DEFAULT_PERSONA: "reviewer" }) === "builder");
+  const previousCwd = process.cwd();
+  process.chdir(neutral);
+  try {
+    const personaNeed = spawnRequiredExtensions({ positionals: ["reviewer"], values: {} } as Parameters<typeof spawnRequiredExtensions>[0]);
+    check("foreground lazy-load selects the persona's connector", personaNeed[0]?.name === "opencode", personaNeed);
+    const explicitNeed = spawnRequiredExtensions({ positionals: ["reviewer"], values: { agent: "codex" } } as Parameters<typeof spawnRequiredExtensions>[0]);
+    check("foreground lazy-load explicit connector overrides persona", explicitNeed[0]?.name === "codex", explicitNeed);
+  } finally {
+    process.chdir(previousCwd);
+  }
   // Hardening: the registry dir is 0700 — its filenames are space names, so it must not be
   // world-traversable even though the file contents are already 0600.
   check(

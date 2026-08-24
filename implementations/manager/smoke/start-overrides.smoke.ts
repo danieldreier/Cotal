@@ -11,7 +11,7 @@
  *      spawn loudly (no silent drop).
  *   4. RESOLVED GUARD — a manifest launch (`resolved`) REJECTS imperative overrides.
  *   5. allowSubscribe default follows an overridden subscribe (override → creds source is one).
- *   6. COTAL_DEFAULT_AGENT picks the manager's default harness when opts.agent is absent.
+ *   6. CONNECTOR PRECEDENCE — opts.agent > persona agent > COTAL_DEFAULT_AGENT.
  * Run: pnpm smoke:start-overrides
  */
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
@@ -32,6 +32,10 @@ const workspaceRoot = mkdtempSync(join(tmpdir(), "cotal-start-ov-"));
 const agentsDir = join(workspaceRoot, ".cotal", "agents");
 mkdirSync(agentsDir, { recursive: true });
 writeFileSync(join(agentsDir, "plain.md"), "---\nname: plain\n---\n");
+writeFileSync(
+  join(agentsDir, "typed.md"),
+  "---\nname: typed\nagent: smoke-persona\nvariant: high\n---\n",
+);
 writeFileSync(
   join(agentsDir, "team.md"),
   "---\nname: team\nsubscribe: [team]\nallowSubscribe: [team, team.>]\nallowPublish: [team]\n---\n",
@@ -78,6 +82,22 @@ const recCon: Connector = {
   buildLaunch: (o) => { lastOpts = o; return { command: "true", args: [], env: {} }; },
 };
 registry.register(recCon);
+const personaCon: Connector = {
+  kind: "connector",
+  name: "smoke-persona",
+  requires: ["node"],
+  supportsModelVariant: true,
+  buildLaunch: (o) => { lastOpts = o; return { command: "true", args: [], env: {} }; },
+};
+registry.register(personaCon);
+const explicitCon: Connector = {
+  kind: "connector",
+  name: "smoke-explicit",
+  requires: ["node"],
+  supportsModelVariant: true,
+  buildLaunch: (o) => { lastOpts = o; return { command: "true", args: [], env: {} }; },
+};
+registry.register(explicitCon);
 
 const j = (v: unknown) => JSON.stringify(v);
 
@@ -169,11 +189,23 @@ const j = (v: unknown) => JSON.stringify(v);
   check("resolved + identity rejected", r3.ok === false && /rejects imperative overrides/.test(r3.error ?? ""), r3);
 }
 
-// 8 — COTAL_DEFAULT_AGENT supplies the manager-side default harness.
+// 8 — Connector precedence: explicit spawn arg > persona file > manager environment. The persona
+// variant makes this the regression witness for a typed Codex persona accidentally falling through
+// to a default connector that does not support variants: selection must happen before that preflight.
 {
   const prev = process.env.COTAL_DEFAULT_AGENT;
   process.env.COTAL_DEFAULT_AGENT = "smoke-ov";
   try {
+    resetOpts();
+    const typed = await mgr.startAgent({ name: "typed" });
+    check("persona agent overrides COTAL_DEFAULT_AGENT", typed.ok === true && (typed.data as { agent?: string })?.agent === "smoke-persona", JSON.stringify(typed));
+    check("persona-selected connector receives its variant", lastOpts?.variant === "high", lastOpts?.variant);
+
+    resetOpts();
+    const explicit = await mgr.startAgent({ name: "typed", agent: "smoke-explicit" });
+    check("explicit agent overrides persona agent", explicit.ok === true && (explicit.data as { agent?: string })?.agent === "smoke-explicit", explicit);
+    check("explicit connector still receives persona variant", lastOpts?.variant === "high", lastOpts?.variant);
+
     resetOpts();
     const r = await mgr.startAgent({ name: "plain" });
     check("COTAL_DEFAULT_AGENT spawn succeeds", r.ok === true, r);

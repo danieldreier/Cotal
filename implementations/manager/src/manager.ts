@@ -373,7 +373,8 @@ export interface StartAgentOpts {
    *  `.cotal/agents/<name>.md`. NOT the mesh identity: the spawned peer presents under the file's
    *  own `name:` (auto-numbered on collision). The file must exist (no silent default-ACL fallback). */
   name: string;
-  /** Connector / agent type — resolved from the registry. Defaults to `COTAL_DEFAULT_AGENT`, else `"cotal"`. */
+  /** Connector / agent type — resolved from the registry. Overrides the persona file's `agent:`;
+   *  absent in both places defaults to `COTAL_DEFAULT_AGENT`, else the product default. */
   agent?: string;
   role?: string;
   /** Explicit agent-file path that overrides the `name` ref for *which file to load* (identity still
@@ -3290,7 +3291,33 @@ export class Manager {
       const refErr = this.nameError(ref);
       if (refErr) return { ok: false, error: refErr };
     }
-    const agent = opts.agent ?? defaultAgentType(DEFAULT_CONNECTOR);
+    // Resolve the persona file (fail loud — NO silent default-ACL fallback). A missing persona used
+    // to mint DEFAULT creds (read `general` only, default-deny publish, no capabilities), so a
+    // typo'd / renamed / spawned-by-display-name agent became live with silently-wrong ACLs — a
+    // behavioral/security bug. Fail loud instead, matching `cotal spawn` (loadAgentFile throws).
+    let configPath: string;
+    if (opts.config) {
+      configPath = agentFilePath(this.workspaceRoot, opts.config);
+      if (!existsSync(configPath)) return { ok: false, error: `agent file not found: ${configPath}` };
+    } else {
+      configPath = agentFilePath(this.workspaceRoot, ref);
+      if (!existsSync(configPath))
+        return { ok: false, error: `no persona "${ref}" - ${configPath} not found; create it or pass --config (see \`cotal personas list\`)` };
+    }
+
+    // An imperative persona can select its connector. Load it before connector resolution so the
+    // precedence is one-way and explicit: spawn arg > persona `agent:` > manager environment/product
+    // default. A resolved manifest remains its own launch authority and already carries its connector
+    // in opts.agent; its transient persona is not consulted for launch selection.
+    let personaDef: AgentDef | undefined;
+    if (!opts.resolved) {
+      try {
+        personaDef = loadAgentFile(configPath);
+      } catch (e) {
+        return { ok: false, error: (e as Error).message };
+      }
+    }
+    const agent = opts.agent ?? personaDef?.agent ?? defaultAgentType(DEFAULT_CONNECTOR);
 
     // Materialize the requested connector up front — the ONE async step in the spawn path (a lazy
     // `cotal ext` manifest import on the published binary). It runs BEFORE the capacity/reserve span
@@ -3305,26 +3332,12 @@ export class Manager {
     }
 
     // Capacity check first (cheap, fail-fast). Everything from here to the reserve below is
-    // SYNCHRONOUS (existsSync / registry / accessSync / readFileSync — no await), so the gate stays
-    // atomic: the capacity snapshot and the reserve land in one tick (P4a/P4c), and two concurrent
-    // spawns can't overshoot the ceiling or pick the same name.
+    // SYNCHRONOUS (registry / accessSync / readFileSync — no await), so the gate stays atomic: the
+    // capacity snapshot and the reserve land in one tick (P4a/P4c), and two concurrent spawns can't
+    // overshoot the ceiling or pick the same name.
     const cooling = this.coolingCount(); // prune expired stamps, then count live cooling slots
     if (this.agents.size + this.reserved.size + cooling >= MAX_AGENTS)
       return { ok: false, error: `at capacity (${MAX_AGENTS} agents incl. in-flight + cooling); despawn one or wait` };
-
-    // Resolve the persona file (fail loud — NO silent default-ACL fallback). A missing persona used
-    // to mint DEFAULT creds (read `general` only, default-deny publish, no capabilities), so a
-    // typo'd / renamed / spawned-by-display-name agent became live with silently-wrong ACLs — a
-    // behavioral/security bug. Fail loud instead, matching `cotal spawn` (loadAgentFile throws).
-    let configPath: string;
-    if (opts.config) {
-      configPath = agentFilePath(this.workspaceRoot, opts.config);
-      if (!existsSync(configPath)) return { ok: false, error: `agent file not found: ${configPath}` };
-    } else {
-      configPath = agentFilePath(this.workspaceRoot, ref);
-      if (!existsSync(configPath))
-        return { ok: false, error: `no persona "${ref}" - ${configPath} not found; create it or pass --config (see \`cotal personas list\`)` };
-    }
 
     // Harness preflight before reserving a slot or minting — a missing `claude`/`opencode` binary
     // fails here with a clear name, not obscurely at process spawn. No fallback. All synchronous, so
@@ -3375,12 +3388,9 @@ export class Manager {
       personaPrompt = r.body;
 
     } else {
-      let def: AgentDef;
-      try {
-        def = loadAgentFile(configPath);
-      } catch (e) {
-        return { ok: false, error: (e as Error).message };
-      }
+      // Loaded before connector resolution so this file's `agent:` can select the connector. The
+      // non-resolved branch is the only branch that creates personaDef.
+      const def = personaDef!;
       // Identity: the `--name` override wins over the file's `name:` — foreground parity (there,
       // `requested = values.name ?? def.name`). The override is minted into the creds and rides
       // COTAL_NAME below, so the presence identity and its credential can't diverge.
