@@ -901,9 +901,21 @@ export class MeshAgent extends EventEmitter {
    *  the agent and operator spawn doors share one control-op contract. (Session `resume` is
    *  intentionally NOT forwarded here: forking a host-local `~/.claude` transcript is an
    *  operator-local intent, kept off the peer-facing spawn door — see #159.) */
-  async spawn(name: string, role?: string, opts?: { agent?: string; model?: string; variant?: string; launchOptions?: Record<string, unknown>; cwd?: string }): Promise<ControlReply> {
+  async spawn(name: string, role?: string, opts?: {
+    agent?: string;
+    model?: string;
+    variant?: string;
+    launchOptions?: Record<string, unknown>;
+    cwd?: string;
+    /** A one-shot assignment for an external runtime. It is carried on the manager's existing
+     *  initial-prompt rail, so ordinary local runtimes retain their established first-turn behavior. */
+    task?: string;
+  }): Promise<ControlReply> {
     this.assertConnected();
-    const args = { name, role, agent: opts?.agent, model: opts?.model, variant: opts?.variant, launchOptions: opts?.launchOptions, cwd: opts?.cwd };
+    const args = {
+      name, role, agent: opts?.agent, model: opts?.model, variant: opts?.variant,
+      launchOptions: opts?.launchOptions, cwd: opts?.cwd, prompt: opts?.task,
+    };
     // P2 item 2 (2b): spawn is an ACTION — follow the acceptance to the terminal so cotal_spawn
     // stays synchronous (the MCP reply carries the live outcome, not the pre-launch acceptance).
     return this.managerInvoke("spawn", args, { deadlineMs: SPAWN_TIMEOUT_MS, follow: true });

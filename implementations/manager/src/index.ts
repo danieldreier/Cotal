@@ -23,4 +23,4 @@ export {
   type ResumeControlArgs,
 } from "./resume.js";
 export { createRuntime } from "./runtime/index.js";
-export type { Runtime, AgentHandle, AttachSession, RuntimeKind, RuntimeMode } from "./runtime/index.js";
+export type { Runtime, AgentHandle, AttachSession, RuntimeKind, RuntimeMode, RuntimeSpawnContext } from "./runtime/index.js";

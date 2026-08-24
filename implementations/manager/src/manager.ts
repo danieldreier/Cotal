@@ -511,6 +511,8 @@ interface ManagedAgent {
 /** Runtime hooks the spawn-as-action serve path (P2 item 2) injects into {@link Manager.startAgent}.
  *  Roster boot and the blocking callers pass none (unchanged behavior). */
 export interface SpawnHooks {
+  /** Manager action id for a remote runtime's launcher receipt. */
+  correlationId?: string;
   /** Fires synchronously AFTER the incarnation identity (nkey + lifecycleUid) is minted but BEFORE
    *  any provision/side-effect — the accept seam: it binds the goal and replies the acceptance. A
    *  THROW here aborts the spawn before provisioning (the existing catch returns the failure and the
@@ -2101,7 +2103,9 @@ export class Manager {
       }),
       // P2 item 2: `spawn` is an ACTION - accept a goal + reply the acceptance floor payload, drive
       // progress + terminal off-handler (no ~30s block). The blocking reply path is gone (pin 8).
-      spawn: (ctx) => this.serveGated(ctx, () => this.serveSpawnGoal(ctx, (h) => this.opStart(args(ctx), callerOf(ctx), h))),
+      spawn: (ctx) => this.serveGated(ctx, () => this.serveSpawnGoal(ctx, (h) => this.opStart(args(ctx), callerOf(ctx), h, {
+        principal: callerOf(ctx), lifecycleUid: ctx.subject.caller.uid,
+      }))),
       despawn: (ctx) => this.serveGated(ctx, async () => {
         const a = targetAgent(ctx);
         const denied = await this.authorizeNamed(a, callerOf(ctx), await this.epAnyModeAdmin(ctx));
@@ -2907,7 +2911,14 @@ export class Manager {
           continueSession: sessionId,
         };
         const spec = connector.buildLaunch(opts);
-        const handle = this.runtime.spawn(a.name, spec, a.launch.cwd);
+        const handle = await this.runtime.spawn(a.name, spec, a.launch.cwd, {
+          persona: a.launch.source.kind === "persona" ? a.launch.source.ref : a.launch.source.requested,
+          agent: a.agent,
+          model: a.launch.model,
+          variant: a.launch.variant,
+          parent: { principal: a.spawner },
+          child: { principal: a.id, lifecycleUid: a.lifecycleUid },
+        });
         replacement = handle;
         restart.sessionStatePath = spec.sessionStatePath ?? restart.sessionStatePath;
         await this.awaitRecoveredSession(a, sessionId, handle, spec.control);
@@ -3022,7 +3033,12 @@ export class Manager {
   }
 
   /** Parse an untyped control-plane `start` request into {@link StartAgentOpts}. */
-  private opStart(args: Record<string, unknown>, caller: string, hooks?: SpawnHooks): Promise<ControlReply> {
+  private opStart(
+    args: Record<string, unknown>,
+    caller: string,
+    hooks?: SpawnHooks,
+    parent?: { principal: string; lifecycleUid?: string },
+  ): Promise<ControlReply> {
     // `resume`, when present, must be a non-empty session id. An empty/whitespace value is a
     // malformed request, not an implicit "spawn fresh" (no fallbacks). The CLI surfaces reject it,
     // but a raw control message could otherwise slip an empty value through and silently start fresh.
@@ -3071,6 +3087,7 @@ export class Manager {
       },
       caller,
       hooks,
+      parent,
     );
   }
 
@@ -3239,17 +3256,27 @@ export class Manager {
    *  `spawner` is the authenticated id of the peer that requested the spawn (`req.from.id`),
    *  defaulting to the manager's own id for roster/pre-spawn — recorded for the spawner
    *  ledger (own-children despawn + reap-on-parent-exit). */
-  async startAgent(opts: StartAgentOpts, spawner?: string, hooks?: SpawnHooks): Promise<ControlReply> {
+  async startAgent(
+    opts: StartAgentOpts,
+    spawner?: string,
+    hooks?: SpawnHooks,
+    parent?: { principal: string; lifecycleUid?: string },
+  ): Promise<ControlReply> {
     const release = this.beginLifecycle();
     if (!release) return { ok: false, error: this.maintenanceError() };
     try {
-      return await this.startAgentActive(opts, spawner, hooks);
+      return await this.startAgentActive(opts, spawner, hooks, parent);
     } finally {
       release();
     }
   }
 
-  private async startAgentActive(opts: StartAgentOpts, spawner?: string, hooks?: SpawnHooks): Promise<ControlReply> {
+  private async startAgentActive(
+    opts: StartAgentOpts,
+    spawner?: string,
+    hooks?: SpawnHooks,
+    parent?: { principal: string; lifecycleUid?: string },
+  ): Promise<ControlReply> {
     // The spawn argument is a persona REF — a filename in `.cotal/agents` (the unique spawn KEY), or
     // a path via `--config`. It is NOT the mesh identity: the identity comes from inside the file
     // (`name:`), so a persona can be filed descriptively (review-critic.md) yet present under a
@@ -3658,7 +3685,18 @@ export class Manager {
         workspaceRoot: this.workspaceRoot,
       };
       const spec = connector.buildLaunch(launchOpts);
-      const handle = this.runtime.spawn(name, spec, cwd);
+      const handle = await this.runtime.spawn(name, spec, cwd, {
+        persona: ref,
+        task: prompt,
+        agent,
+        model,
+        variant,
+        correlationId: hooks?.correlationId,
+        // The service path supplies the broker-authenticated caller triple. Operator/pre-spawn
+        // paths are manager-owned, so they are explicitly attributed to this manager incarnation.
+        parent: parent ?? { principal: spawner ?? this.ep.ref().id, lifecycleUid: this.managerLifecycleUid },
+        child: { principal: userLaunch ? principalKey(userLaunch.owner, name).key : identity.id, lifecycleUid },
+      });
       hooks?.onLaunched?.(); // P2 item 2: the "launched" progress edge (process spawned, pre-presence)
       const managed: ManagedAgent = {
         name,
@@ -3763,7 +3801,11 @@ export class Manager {
       // canonicalJson (undefined never coerces to null, SPEC 13.6), so a role-less spawn would
       // otherwise fail its succeeded terminal. The CLI/connector already render an absent role as
       // "no role", so dropping the key preserves the reply (P2 item 2, surfaced by readiness:live).
-      const okData = { name, agent, id: managed.id, mode: handle.kind, lifecycleUid, ...(role !== undefined ? { role } : {}) };
+      const okData = {
+        name, agent, id: managed.id, mode: handle.kind, lifecycleUid,
+        ...(handle.remote ? { remote: handle.remote } : {}),
+        ...(role !== undefined ? { role } : {}),
+      };
       await hooks?.onOutcome?.({ kind: "succeeded", data: okData });
       return { ok: true, data: okData };
     } catch (e) {
@@ -4178,7 +4220,17 @@ export class Manager {
         if (adoptedSeed === undefined)
           console.error(`! resume ${entry.name}: the adopted credential carries no readable nkey seed - the manager cannot renew it (it dies loud at its exp)`);
       }
-      const handle = this.runtime.spawn(entry.name, prepared.spec, entry.launch.cwd);
+      const handle = await this.runtime.spawn(entry.name, prepared.spec, entry.launch.cwd, {
+        persona: entry.launch.source.kind === "persona" ? entry.launch.source.ref : entry.launch.source.requested,
+        agent: entry.launch.connector,
+        model: entry.launch.model,
+        variant: entry.launch.variant,
+        parent: { principal: entry.spawner },
+        child: {
+          principal: entry.identity.mode === "user" ? principalKey(entry.identity.owner, entry.identity.actor).key : entry.identity.id,
+          lifecycleUid: entry.identity.lifecycleUid,
+        },
+      });
       const managed: ManagedAgent = {
         name: entry.name,
         role: entry.role,
@@ -5314,6 +5366,7 @@ export class Manager {
     };
 
     const bg = run({
+      correlationId: goalId,
       onAccepted: async ({ name, agentTriple }) => {
         // must-5 Q-B: record the goal in the reconcile index BEFORE the bind (index-CAS-before-bind),
         // so a successor incarnation finds + settles this goal if we crash before its terminal. A

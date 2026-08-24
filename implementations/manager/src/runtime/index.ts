@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { registry, type Runtime, type RuntimeKind, type RuntimeProvider } from "@cotal-ai/core";
 import { PtyRuntime } from "./pty.js";
 
-export type { Runtime, RuntimeKind, AgentHandle, AttachSession } from "@cotal-ai/core";
+export type { Runtime, RuntimeKind, AgentHandle, AttachSession, RuntimeSpawnContext } from "@cotal-ai/core";
 
 /** How a manager picks its backend. `auto` is the deterministic default — always `pty`. External
  *  runtimes are never auto-selected; choose one explicitly, which resolves

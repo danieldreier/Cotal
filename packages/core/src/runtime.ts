@@ -33,6 +33,10 @@ export interface AgentHandle {
   /** OS pid of the spawned child, when the backend owns a real process (pty/host); absent for
    *  backends that don't (tmux/cmux attach to an externally-owned process). */
   readonly pid?: number;
+  /** An external runtime's authoritative launch receipt. This is deliberately small and free of
+   *  credentials: managers surface it in the spawn outcome so a caller can correlate a remote
+   *  job with its mesh child without receiving the runtime's control credential. */
+  readonly remote?: { id: string; status: string; taskId?: string };
   status(): "running" | "exited";
   /** Tear the agent down. `graceful` (default) signals a clean exit (so the session
    *  leaves the mesh on its own) before ensuring the process/tab is gone; otherwise
@@ -62,7 +66,26 @@ export interface AgentHandle {
  *  can delegate to an external terminal or process surface. */
 export interface Runtime {
   readonly kind: RuntimeKind;
-  spawn(name: string, spec: LaunchSpec, cwd: string): AgentHandle;
+  /** A runtime may need to await an external scheduler's admission before it can hand the manager
+   *  a handle. Existing workstation runtimes remain synchronous. */
+  spawn(name: string, spec: LaunchSpec, cwd: string, context?: RuntimeSpawnContext): AgentHandle | Promise<AgentHandle>;
+}
+
+/** Manager-owned context for a runtime launch. It is not agent-controlled launch options: the
+ * manager derives it after authenticating the caller and allocating the child incarnation. Remote
+ * runtimes use it to preserve parent/child lineage without parsing credentials or local paths. */
+export interface RuntimeSpawnContext {
+  persona: string;
+  task?: string;
+  /** Manager-resolved connector and model selectors; remote runtimes never reverse-engineer these
+   * from a command line or child environment. */
+  agent: string;
+  model?: string;
+  variant?: string;
+  /** Action request id when this was accepted through the manager service. */
+  correlationId?: string;
+  parent: { principal: string; lifecycleUid?: string };
+  child: { principal: string; lifecycleUid: string };
 }
 
 /**
