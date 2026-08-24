@@ -2917,7 +2917,7 @@ export class Manager {
           model: a.launch.model,
           variant: a.launch.variant,
           parent: { principal: a.spawner },
-          child: { principal: a.id, lifecycleUid: a.lifecycleUid },
+          child: { principal: a.id, lifecycleUid: a.lifecycleUid, role: a.role },
         });
         replacement = handle;
         restart.sessionStatePath = spec.sessionStatePath ?? restart.sessionStatePath;
@@ -3701,7 +3701,7 @@ export class Manager {
         // The service path supplies the broker-authenticated caller triple. Operator/pre-spawn
         // paths are manager-owned, so they are explicitly attributed to this manager incarnation.
         parent: parent ?? { principal: spawner ?? this.ep.ref().id, lifecycleUid: this.managerLifecycleUid },
-        child: { principal: userLaunch ? principalKey(userLaunch.owner, name).key : identity.id, lifecycleUid },
+        child: { principal: userLaunch ? principalKey(userLaunch.owner, name).key : identity.id, lifecycleUid, role },
       });
       hooks?.onLaunched?.(); // P2 item 2: the "launched" progress edge (process spawned, pre-presence)
       const managed: ManagedAgent = {
@@ -4235,6 +4235,7 @@ export class Manager {
         child: {
           principal: entry.identity.mode === "user" ? principalKey(entry.identity.owner, entry.identity.actor).key : entry.identity.id,
           lifecycleUid: entry.identity.lifecycleUid,
+          role: entry.role,
         },
       });
       const managed: ManagedAgent = {

@@ -93,7 +93,9 @@ export interface RuntimeSpawnContext {
   /** Action request id when this was accepted through the manager service. */
   correlationId?: string;
   parent: { principal: string; lifecycleUid?: string };
-  child: { principal: string; lifecycleUid: string };
+  /** The manager-resolved role for this incarnation. It is policy allocated by the manager, never
+   * inferred by a remote runtime from a persona or a launcher default. */
+  child: { principal: string; lifecycleUid: string; role?: string };
 }
 
 /**

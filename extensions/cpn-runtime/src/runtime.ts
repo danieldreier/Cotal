@@ -54,7 +54,7 @@ export interface CpnLaunchRequest {
   persona_prompt: string;
   correlation_id: string;
   parent: { principal_id: string; lifecycle_uid?: string };
-  child: { name: string; principal_id: string; lifecycle_uid: string; bootstrap_creds: string };
+  child: { name: string; principal_id: string; lifecycle_uid: string; bootstrap_creds: string; role?: string };
 }
 
 /** The launcher admission receipt that Cotal returns through the spawn goal's terminal outcome. */
@@ -404,6 +404,7 @@ export class CpnRuntime implements Runtime {
         principal_id: childPrincipal,
         lifecycle_uid: context.child.lifecycleUid,
         bootstrap_creds: bootstrapCredential(spec),
+        ...(context.child.role === undefined ? {} : { role: context.child.role }),
       },
     }));
     return new CpnRemoteHandle(name, this.launcher, remote, this.#pollIntervalMs);

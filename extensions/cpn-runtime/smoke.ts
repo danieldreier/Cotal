@@ -66,7 +66,7 @@ try {
     variant: "high",
     correlationId: "goal-17",
     parent: { principal: "parent-principal", lifecycleUid: "parent-uid" },
-    child: { principal: childNkey, lifecycleUid: "child-uid" },
+    child: { principal: childNkey, lifecycleUid: "child-uid", role: "helper" },
   });
   check("does not execute LaunchSpec.command", client.request?.profile === "codex-terra");
   check("uses a manager-selected profile", client.request?.profile === "codex-terra");
@@ -74,6 +74,7 @@ try {
   check("carries the manager-resolved persona body", client.request?.persona_prompt === "You are a supervised helper. Report status and finish the assigned task.");
   check("carries authenticated parent lineage", client.request?.parent.principal_id === "parent-principal" && client.request?.parent.lifecycle_uid === "parent-uid");
   check("canonicalizes the manager's static child nkey as a Cotal principal", client.request?.child.principal_id === `local.${childNkey}` && client.request?.child.lifecycle_uid === "child-uid");
+  check("carries the manager-allocated child role", client.request?.child.role === "helper");
   check("carries manager-issued bootstrap credential", client.request?.child.bootstrap_creds === "manager-minted-child-credential\n");
   check("carries goal correlation", client.request?.correlation_id === "goal-17");
   check("returns remote job identity and status", handle.remote?.id === "job-17" && handle.remote.taskId === "task-17" && handle.remote.status === "queued");
