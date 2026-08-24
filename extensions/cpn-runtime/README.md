@@ -1,21 +1,28 @@
 # CPN runtime
 
 `@cotal-ai/cpn-runtime` is a Cotal `RuntimeProvider` for a Kubernetes-backed CPN launcher.
-Importing it registers runtime `cpn`; the trusted manager composition must call
-`configureCpnLauncher()` with its server-side launcher client before selecting that runtime.
+Importing it registers runtime `cpn`. A production manager configures the provider with
+`COTAL_CPN_LAUNCHER_URL`, `COTAL_CPN_LAUNCHER_TOKEN_FILE`, and
+`COTAL_CPN_LAUNCHER_PROFILES`; `configureCpnLauncher()` remains a test/custom-composition seam.
 
 The provider accepts only personas listed in `COTAL_CPN_LAUNCHER_PROFILES`, for example:
 
 ```json
-[{"persona":"terra-worker","profile":"codex-terra","lane":"terra","agent":"codex"}]
+[{"persona":"codex-terra","profile":"codex-terra","lane":"terra","agent":"codex","model":"gpt-5.6-terra","variant":"high","taskClass":"general"}]
 ```
 
 The manager, not the agent, supplies the authenticated parent lifecycle, child lifecycle, resolved
-connector/model selectors, bounded task and action correlation ID. The client receives a narrow
-one-shot request and returns `{jobId, taskId, status}`; Cotal carries that receipt in the spawn goal
-outcome.
+connector/model selectors, bounded task and action correlation ID. The provider reads the manager's
+already-minted child credential from `COTAL_LAUNCH_MATERIAL` and sends it only to the launcher's
+manager-only endpoint. The client returns `{jobId, taskId, status}`; Cotal carries that receipt in
+the spawn goal outcome.
 
-The trusted composition owns launcher authentication and the child enrollment secret. A launcher
-must preserve the manager-issued Cotal child lifecycle through server-side enrollment or an immutable
-per-job Kubernetes Secret. Do not give launcher credentials or child bootstrap material to ordinary
-Cotal agents.
+The manager bearer is read from the configured file, never an environment value. The client polls
+`GET /v1/manager/jobs/<task-id>` and uses `DELETE` on the same route for authoritative lifecycle
+control. A terminal or absent Job resolves `AgentHandle.waitForExit()` and fires late or live exit
+subscribers, so Cotal can reap hierarchy and credentials correctly. Ordinary agents receive neither
+the manager bearer nor child bootstrap material.
+
+CPN personas are one-shot worker personas: `cotal_spawn` must include a task. Host-session resume,
+interactive terminal input, and interrupt are deliberately unsupported; stop and Job exit are
+supported and authoritative.

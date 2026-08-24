@@ -175,6 +175,15 @@ importers:
         specifier: ^4.22.4
         version: 4.22.4
 
+  extensions/cpn-runtime:
+    devDependencies:
+      '@cotal-ai/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      tsx:
+        specifier: ^4.22.4
+        version: 4.22.4
+
   extensions/connector-claude-code:
     devDependencies:
       '@cotal-ai/connector-core':
