@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import {
+  DEV_OWNER,
   LAUNCH_MATERIAL_ENV,
+  principalKey,
   readLaunchMaterial,
   registry,
   type AgentHandle,
@@ -386,6 +388,10 @@ export class CpnRuntime implements Runtime {
     if (!personaPrompt) throw new Error("cpn runtime: the selected Kubernetes worker persona requires a non-empty persona body");
     if (Buffer.byteLength(personaPrompt, "utf8") > MAX_PERSONA_BYTES)
       throw new Error(`cpn runtime: persona body exceeds the ${MAX_PERSONA_BYTES}-byte limit`);
+    // Static manager contexts carry the child's bare NKey (`identity.id`). The
+    // launcher's lineage and adoption contract uses Cotal's canonical
+    // owner+actor principal, so translate it at this runtime boundary.
+    const childPrincipal = principalKey(DEV_OWNER, context.child.principal).key;
     const remote = receipt(await this.launcher.launch({
       profile: selected.profile,
       task_class: selected.taskClass ?? "general",
@@ -395,7 +401,7 @@ export class CpnRuntime implements Runtime {
       parent: { principal_id: context.parent.principal, ...(context.parent.lifecycleUid ? { lifecycle_uid: context.parent.lifecycleUid } : {}) },
       child: {
         name,
-        principal_id: context.child.principal,
+        principal_id: childPrincipal,
         lifecycle_uid: context.child.lifecycleUid,
         bootstrap_creds: bootstrapCredential(spec),
       },

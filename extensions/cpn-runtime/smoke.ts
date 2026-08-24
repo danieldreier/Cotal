@@ -44,6 +44,7 @@ const creds = join(temp, "child.creds");
 writeFileSync(creds, "manager-minted-child-credential\n", { mode: 0o600 });
 const launchMaterial = writeLaunchMaterial({ creds });
 const spec = { command: "must-not-run", args: [], env: { [LAUNCH_MATERIAL_ENV]: launchMaterial } };
+const childNkey = `U${"A".repeat(55)}`;
 
 try {
   const config = loadCpnRuntimeConfig({
@@ -65,14 +66,14 @@ try {
     variant: "high",
     correlationId: "goal-17",
     parent: { principal: "parent-principal", lifecycleUid: "parent-uid" },
-    child: { principal: "child-principal", lifecycleUid: "child-uid" },
+    child: { principal: childNkey, lifecycleUid: "child-uid" },
   });
   check("does not execute LaunchSpec.command", client.request?.profile === "codex-terra");
   check("uses a manager-selected profile", client.request?.profile === "codex-terra");
   check("carries a bounded general task", client.request?.task_class === "general" && client.request?.task === "Review the new scheduler boundary.");
   check("carries the manager-resolved persona body", client.request?.persona_prompt === "You are a supervised helper. Report status and finish the assigned task.");
   check("carries authenticated parent lineage", client.request?.parent.principal_id === "parent-principal" && client.request?.parent.lifecycle_uid === "parent-uid");
-  check("carries manager-issued child lineage", client.request?.child.principal_id === "child-principal" && client.request?.child.lifecycle_uid === "child-uid");
+  check("canonicalizes the manager's static child nkey as a Cotal principal", client.request?.child.principal_id === `local.${childNkey}` && client.request?.child.lifecycle_uid === "child-uid");
   check("carries manager-issued bootstrap credential", client.request?.child.bootstrap_creds === "manager-minted-child-credential\n");
   check("carries goal correlation", client.request?.correlation_id === "goal-17");
   check("returns remote job identity and status", handle.remote?.id === "job-17" && handle.remote.taskId === "task-17" && handle.remote.status === "queued");

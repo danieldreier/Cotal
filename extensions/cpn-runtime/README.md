@@ -14,7 +14,9 @@ The provider accepts only personas listed in `COTAL_CPN_LAUNCHER_PROFILES`, for 
 The manager, not the agent, supplies the authenticated parent lifecycle, child lifecycle, resolved
 connector/model selectors, bounded task and action correlation ID. The provider reads the manager's
 already-minted child credential from `COTAL_LAUNCH_MATERIAL` and sends it only to the launcher's
-manager-only endpoint. It also carries the manager-resolved persona body because a remote worker
+manager-only endpoint. For a static mesh it converts the manager's bare child NKey into the
+canonical `local.<NKey>` principal used by launcher lineage and adoption. It also carries the
+manager-resolved persona body because a remote worker
 cannot dereference the manager's local `.cotal/agents` path. The client returns
 `{jobId, taskId, status}`; Cotal carries that receipt in
 the spawn goal outcome.
