@@ -3329,7 +3329,9 @@ export class Manager {
     // Harness preflight before reserving a slot or minting — a missing `claude`/`opencode` binary
     // fails here with a clear name, not obscurely at process spawn. No fallback. All synchronous, so
     // the reserve gate stays atomic. (The connector itself was resolved up top, before the capacity gate.)
-    const missing = (connector.requires ?? []).filter((bin) => !resolveOnPath(bin));
+    const missing = this.runtime.requiresLocalHarness === false
+      ? []
+      : (connector.requires ?? []).filter((bin) => !resolveOnPath(bin));
     if (missing.length)
       return { ok: false, error: `${agent} harness needs ${missing.join(", ")} on PATH - not found` };
     // Resume is a connector capability: reject an unsupported resume HERE, before the reserve/mint, so

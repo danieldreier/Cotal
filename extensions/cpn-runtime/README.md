@@ -27,4 +27,6 @@ the manager bearer nor child bootstrap material.
 
 CPN personas are one-shot worker personas: `cotal_spawn` must include a task. Host-session resume,
 interactive terminal input, and interrupt are deliberately unsupported; stop and Job exit are
-supported and authoritative.
+supported and authoritative. The manager does not require the model client's executable locally:
+it resolves the connector and builds its identity/persona material, while the reviewed Kubernetes
+worker image owns the actual Codex, Claude Code, or OpenCode executable.

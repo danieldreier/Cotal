@@ -360,6 +360,7 @@ function bootstrapCredential(spec: LaunchSpec): string {
 /** Runtime backed by the CPN launcher adapter. It never starts a local child process. */
 export class CpnRuntime implements Runtime {
   readonly kind = "cpn" as const;
+  readonly requiresLocalHarness = false;
   readonly #profiles = new Map<string, CpnProfile>();
   readonly #pollIntervalMs: number;
 

@@ -66,6 +66,10 @@ export interface AgentHandle {
  *  can delegate to an external terminal or process surface. */
 export interface Runtime {
   readonly kind: RuntimeKind;
+  /** Whether the manager host itself must have the connector's model-client binary. Remote
+   * runtimes still materialize the connector launch spec for identity/persona semantics, but may
+   * execute it on another host or translate it into a scheduler request. Default true. */
+  readonly requiresLocalHarness?: boolean;
   /** A runtime may need to await an external scheduler's admission before it can hand the manager
    *  a handle. Existing workstation runtimes remain synchronous. */
   spawn(name: string, spec: LaunchSpec, cwd: string, context?: RuntimeSpawnContext): AgentHandle | Promise<AgentHandle>;
