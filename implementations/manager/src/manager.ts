@@ -3353,6 +3353,7 @@ export class Manager {
     let variant = opts.variant;
     let launchOptions = opts.launchOptions;
     let prompt = opts.prompt;
+    let personaPrompt: string | undefined;
     if (opts.resolved) {
       // A manifest launch is the access + identity authority: imperative overrides arriving
       // alongside `resolved` are a caller contract error, not something to merge (no fallbacks).
@@ -3369,6 +3370,7 @@ export class Manager {
       variant = opts.variant ?? r.variant;
       launchOptions = mergeLaunchOptions(r.launchOptions, opts.launchOptions);
       prompt = r.prompt; // the guard above rejected an imperative prompt — one source
+      personaPrompt = r.body;
 
     } else {
       let def: AgentDef;
@@ -3398,6 +3400,7 @@ export class Manager {
       model = opts.model ?? def.model;
       variant = opts.variant ?? def.variant;
       launchOptions = mergeLaunchOptions(def.launchOptions, opts.launchOptions);
+      personaPrompt = def.persona;
     }
     // #651: an empty or whitespace-only model string is not a pin. Coerce it to undefined here, at
     // the single point every path (persona, manifest, imperative) has resolved `model`, so it
@@ -3687,6 +3690,7 @@ export class Manager {
       const spec = connector.buildLaunch(launchOpts);
       const handle = await this.runtime.spawn(name, spec, cwd, {
         persona: ref,
+        personaPrompt,
         task: prompt,
         agent,
         model,

@@ -12,6 +12,7 @@ import {
 } from "@cotal-ai/core";
 
 const MAX_TASK_BYTES = 12_000;
+const MAX_PERSONA_BYTES = 12_000;
 const MAX_BOOTSTRAP_BYTES = 64 << 10;
 const MAX_RESPONSE_BYTES = 64 << 10;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
@@ -48,6 +49,7 @@ export interface CpnLaunchRequest {
   profile: string;
   task_class: CpnTaskClass;
   task: string;
+  persona_prompt: string;
   correlation_id: string;
   parent: { principal_id: string; lifecycle_uid?: string };
   child: { name: string; principal_id: string; lifecycle_uid: string; bootstrap_creds: string };
@@ -379,10 +381,15 @@ export class CpnRuntime implements Runtime {
     const task = context.task?.trim();
     if (!task) throw new Error("cpn runtime: cotal_spawn requires a one-shot task");
     if (Buffer.byteLength(task, "utf8") > MAX_TASK_BYTES) throw new Error(`cpn runtime: task exceeds the ${MAX_TASK_BYTES}-byte limit`);
+    const personaPrompt = context.personaPrompt?.trim();
+    if (!personaPrompt) throw new Error("cpn runtime: the selected Kubernetes worker persona requires a non-empty persona body");
+    if (Buffer.byteLength(personaPrompt, "utf8") > MAX_PERSONA_BYTES)
+      throw new Error(`cpn runtime: persona body exceeds the ${MAX_PERSONA_BYTES}-byte limit`);
     const remote = receipt(await this.launcher.launch({
       profile: selected.profile,
       task_class: selected.taskClass ?? "general",
       task,
+      persona_prompt: personaPrompt,
       correlation_id: context.correlationId ?? `${context.child.principal}:${context.child.lifecycleUid}`,
       parent: { principal_id: context.parent.principal, ...(context.parent.lifecycleUid ? { lifecycle_uid: context.parent.lifecycleUid } : {}) },
       child: {

@@ -76,6 +76,10 @@ export interface Runtime {
  * runtimes use it to preserve parent/child lineage without parsing credentials or local paths. */
 export interface RuntimeSpawnContext {
   persona: string;
+  /** Manager-resolved persona body. Remote runtimes need the content because a remote host cannot
+   * dereference the manager's local agent-file path; it must preserve the same system prompt the
+   * local connector would have applied. */
+  personaPrompt?: string;
   task?: string;
   /** Manager-resolved connector and model selectors; remote runtimes never reverse-engineer these
    * from a command line or child environment. */

@@ -58,6 +58,7 @@ try {
 
   const handle = await runtime.spawn("worker-17", spec, "/not-used", {
     persona: "terra-worker",
+    personaPrompt: "You are a supervised helper. Report status and finish the assigned task.",
     task: "Review the new scheduler boundary.",
     agent: "codex",
     model: "gpt-5.6-terra",
@@ -69,6 +70,7 @@ try {
   check("does not execute LaunchSpec.command", client.request?.profile === "codex-terra");
   check("uses a manager-selected profile", client.request?.profile === "codex-terra");
   check("carries a bounded general task", client.request?.task_class === "general" && client.request?.task === "Review the new scheduler boundary.");
+  check("carries the manager-resolved persona body", client.request?.persona_prompt === "You are a supervised helper. Report status and finish the assigned task.");
   check("carries authenticated parent lineage", client.request?.parent.principal_id === "parent-principal" && client.request?.parent.lifecycle_uid === "parent-uid");
   check("carries manager-issued child lineage", client.request?.child.principal_id === "child-principal" && client.request?.child.lifecycle_uid === "child-uid");
   check("carries manager-issued bootstrap credential", client.request?.child.bootstrap_creds === "manager-minted-child-credential\n");
@@ -109,7 +111,7 @@ try {
 
   const stopClient = new FakeClient(false);
   const stopHandle = await new CpnRuntime(stopClient, { ...config, pollIntervalMs: 5 }).spawn("worker-stop", spec, "/", {
-    persona: "terra-worker", task: "Stop lifecycle test.", agent: "codex", model: "gpt-5.6-terra", variant: "high",
+    persona: "terra-worker", personaPrompt: "You are a supervised helper.", task: "Stop lifecycle test.", agent: "codex", model: "gpt-5.6-terra", variant: "high",
     parent: { principal: "p", lifecycleUid: "parent-uid" }, child: { principal: "c", lifecycleUid: "child-uid" },
   });
   stopHandle.stop();
@@ -123,11 +125,14 @@ try {
     persona: "terra-worker", agent: "codex", model: "gpt-5.6-terra", variant: "high", parent: { principal: "p" }, child: { principal: "c", lifecycleUid: "u" },
   }), /requires a one-shot task/);
   await rejects("refuses an agent not reviewed for the profile", () => runtime.spawn("x", spec, "/", {
-    persona: "terra-worker", task: "x", agent: "claude", model: "gpt-5.6-terra", variant: "high", parent: { principal: "p" }, child: { principal: "c", lifecycleUid: "u" },
+    persona: "terra-worker", personaPrompt: "helper", task: "x", agent: "claude", model: "gpt-5.6-terra", variant: "high", parent: { principal: "p" }, child: { principal: "c", lifecycleUid: "u" },
   }), /approved for codex/);
   await rejects("refuses a mismatched model before launch", () => runtime.spawn("x", spec, "/", {
-    persona: "terra-worker", task: "x", agent: "codex", model: "gpt-5.6-sol", variant: "high", parent: { principal: "p" }, child: { principal: "c", lifecycleUid: "u" },
+    persona: "terra-worker", personaPrompt: "helper", task: "x", agent: "codex", model: "gpt-5.6-sol", variant: "high", parent: { principal: "p" }, child: { principal: "c", lifecycleUid: "u" },
   }), /expected "gpt-5.6-terra"/);
+  await rejects("refuses a CPN persona with no body", () => runtime.spawn("x", spec, "/", {
+    persona: "terra-worker", task: "x", agent: "codex", model: "gpt-5.6-terra", variant: "high", parent: { principal: "p" }, child: { principal: "c", lifecycleUid: "u" },
+  }), /requires a non-empty persona body/);
 } finally {
   rmSync(launchMaterial, { force: true });
   rmSync(temp, { recursive: true, force: true });
