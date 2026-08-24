@@ -72,6 +72,9 @@ importers:
       '@cotal-ai/core':
         specifier: workspace:*
         version: link:../packages/core
+      '@cotal-ai/cpn-runtime':
+        specifier: workspace:*
+        version: link:../extensions/cpn-runtime
       '@cotal-ai/delivery':
         specifier: workspace:*
         version: link:../implementations/delivery

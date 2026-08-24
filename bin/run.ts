@@ -16,6 +16,10 @@ import { runCli } from "@cotal-ai/cli"; // self-registers the base surface incl.
 import "@cotal-ai/manager"; // self-registers `supervise` — the agent-supervisor daemon
 import "@cotal-ai/delivery"; // self-registers `deliver` — the server-side Plane-3 delivery daemon
 import "@cotal-ai/auth"; // self-registers login / logout — per-user IdP sessions (device-code sign-in)
+// CPN's production control image is a deliberate composition root for the Kubernetes runtime.
+// The provider remains unavailable unless its manager-only URL, token file, and persona/profile
+// allowlist are configured; ordinary Cotal processes receive none of those values.
+import "@cotal-ai/cpn-runtime";
 // Self-registers the `ag-ui.frame` part renderer, so `cotal console` and `cotal join` draw an event
 // frame instead of `[unrenderable part kind "ag-ui.frame"]`.
 //
