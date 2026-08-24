@@ -141,8 +141,10 @@ The guarantees, at a glance, each enforced by the broker per
 ## Prompt-facing data
 
 Channel `description` and `instructions`, presence `activity`, message bodies, and free-form
-metadata may reach models. Writers that can set channel registry text are privileged, and
-registry text is length-bounded, but clients MUST still render all of it as attributed,
+metadata may reach models. Direct channel-registry writers are privileged. An authenticated agent
+may supply only the bounded `description` of a new, in-ACL channel through the create-only registrar;
+it cannot overwrite a card or set `instructions` through that path. Registry text is length-bounded,
+but clients MUST still render all of it as attributed,
 advisory data, never as trusted system instruction. This is the indirect-prompt-injection
 surface common to agent protocols (MCP tool descriptions, A2A agent cards): Cotal's position is
 that the reading client, not the wire, is the trust boundary for model-facing text.

@@ -845,6 +845,45 @@ export function cotalToolSpecs(config: AgentConfig, source = "connector"): Cotal
       },
     },
     {
+      name: "cotal_channel_create",
+      title: "Cotal: create and join a channel",
+      description:
+        "Create a concrete channel if it does not exist, then join it. Use this when coordination needs a new project/shared channel. " +
+        "The channel must be within both your read and post ACLs. Creation is immutable: an existing channel card is never overwritten.",
+      schema: {
+        channel: z.string().describe("Concrete channel to create and join (e.g. project.cpn or ci-infrastructure)."),
+        description: z
+          .string()
+          .optional()
+          .describe("Optional one-line purpose for channel discovery (max 200 characters)."),
+      },
+      async run(
+        agent,
+        _config,
+        { channel, description }: { channel: string; description?: string },
+      ) {
+        if (!isConcreteChannel(channel))
+          return err(`Can't create #${channel}: channel creation requires a concrete name, not a wildcard.`);
+        if (!channelInAllow(config.allowSubscribe, channel))
+          return err(
+            `Can't create #${channel}: it's outside your read ACL (allowSubscribe: ${config.allowSubscribe.map((c) => `#${c}`).join(", ")}).`,
+          );
+        if (!channelInAllow(config.allowPublish, channel))
+          return err(
+            `Can't create #${channel}: it's outside your post ACL (allowPublish: ${config.allowPublish.map((c) => `#${c}`).join(", ") || "none"}).`,
+          );
+        try {
+          const registered = await agent.registerChannel(channel, description);
+          const joined = await agent.joinChannel(channel);
+          const verb = registered.created ? "Created" : "Found existing";
+          const join = joined.joined ? "joined" : "already joined";
+          return ok(`${verb} #${channel}; ${join}.`);
+        } catch (e) {
+          return err(`Couldn't create #${channel}: ${(e as Error).message}`);
+        }
+      },
+    },
+    {
       name: "cotal_channel_info",
       title: "Cotal: what a channel is for",
       description:

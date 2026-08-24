@@ -15,7 +15,7 @@ normative is the [§4](../SPEC.md#4-delivery-modes) guarantee it upholds (`durab
 at-least-once for current members within retention) and the [§9](../SPEC.md#9-nats--jetstream-security-and-authorization)
 read checks it must apply. A conformant deployment may realize the backstop differently.
 
-## The three pieces
+## The four pieces
 
 - **Fan-out writer.** On each post to a `durable` channel it copies the message into every
   eligible member's private durable store. For an `@mention` on a *`live`* channel it also writes
@@ -30,6 +30,9 @@ read checks it must apply. A conformant deployment may realize the backstop diff
   channel, carrying per-member join and leave cursors so a post concurrent with a join or leave
   orders deterministically ([SPEC §7](../SPEC.md#7-channels)). It is broker-known truth, not
   self-reported: an agent cannot assert its own membership.
+- **Channel registrar.** It accepts an authenticated agent's create request, re-reads that caller's
+  durable read ACL, and creates a channel card only when the concrete name is authorized. It never
+  overwrites an existing card and never exposes the registry writer credential to the agent.
 
 ## Why a *trusted* reader
 

@@ -2118,8 +2118,15 @@ function deliveryPermissions(space: string, pr: MintPrincipal): Record<string, u
     `$JS.API.CONSUMER.DELETE.${INBOX}.${INBOX_READER_DURABLE}`,
     `$JS.ACK.${INBOX}.${INBOX_READER_DURABLE}.>`,
     "$JS.FC.>", // ordered-consumer flow control
-    // Reads: presence (@mention resolve) + channel registry (delivery class) + members + ACL (re-auth).
+    // Reads: presence (@mention resolve) + channel registry (delivery class / registration
+    // create-CAS) + members + ACL (re-auth).
     ...kvRead(PKV), ...kvRead(CHKV), ...kvRead(MKV), ...kvRead(AKV),
+    // Self-service channel registrar: the daemon mediates an authenticated agent request, re-checks
+    // the durable read ACL, and calls KV.create only. The agent credential gets NO registry write.
+    // DIRECT.GET is the conflict/read-before-create form used by the KV client; value writes stay
+    // confined to this one bucket. Runtime code never put/update/delete through this grant.
+    `$JS.API.DIRECT.GET.${CHKV}.>`,
+    `$KV.${channelBucket(space)}.>`,
     // Members-KV WRITE — the daemon is the durable-membership authority (join/leave/activate/catch-up).
     `$KV.${membersBucket(space)}.>`,
     // Delivery lease/readiness KV: read the bucket (renew CAS) + write ONLY lease keys.

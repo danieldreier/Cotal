@@ -33,6 +33,7 @@ import {
   newIdentity,
   setupSpaceStreams,
   openMembersRegistry,
+  openChannelRegistry,
   commitMember,
   readMember,
   principalKey,
@@ -132,6 +133,7 @@ try {
   const aCreds = await provisionAgent(prov, auth, aId, {
     subscribe: ["general", "ops"],
     allowSubscribe: ["general", "ops", "review.>"],
+    allowPublish: ["review.>"],
     lifecycleUid: uidA,
   });
   const a = new CotalEndpoint({
@@ -256,6 +258,55 @@ try {
   // the manager no longer owns; removed with the ctl tier.)
   await dlv.startPlane3((id) => acls[id]);
   await wait(200);
+
+  // Authenticated self-service registration is mediated by the daemon. Alice's ordinary agent
+  // credential has NO direct channel-registry write, but may create a concrete channel within her
+  // own read ACL. Create is immutable/idempotent: a second request cannot rewrite the first card.
+  const createdProject = await a.registerChannel("review.project", {
+    description: "Project coordination",
+  });
+  check("non-admin agent registers an in-ACL channel", createdProject.created === true, createdProject);
+  const existingProject = await a.registerChannel("review.project", {
+    description: "must not overwrite",
+  });
+  check("repeat registration is create-only (existing card is not overwritten)", existingProject.created === false, existingProject);
+  check(
+    "creator's original channel card remains authoritative",
+    await until(() => a.getChannelConfig("review.project")?.description === "Project coordination"),
+    a.getChannelConfig("review.project"),
+  );
+
+  let outOfAclRegisterDenied = false;
+  try { await a.registerChannel("secret", { description: "outside ACL" }); }
+  catch { outOfAclRegisterDenied = true; }
+  check("registration outside the caller's read ACL is refused", outOfAclRegisterDenied);
+
+  // Broker confinement remains meaningful: the same agent credential cannot bypass the mediator
+  // and write a registry value itself.
+  const rawAgentNc = await connect({
+    servers: SERVERS,
+    authenticator: credsAuthenticator(new TextEncoder().encode(aCreds)),
+    inboxPrefix: `_INBOX_${aId.id}`,
+    maxReconnectAttempts: 0,
+    timeout: 1500,
+  });
+  const rawChannelKv = await openChannelRegistry(rawAgentNc, space);
+  let directRegistryWriteDenied = false;
+  try { await rawChannelKv.put("review.bypass", new TextEncoder().encode("{}")); }
+  catch { directRegistryWriteDenied = true; }
+  check("agent credential cannot write the channel registry directly", directRegistryWriteDenied);
+  await rawAgentNc.close();
+
+  // One connector session can register/join several project/shared channels. All host adapters use
+  // this same endpoint/MeshAgent path, so this is not a Claude-only or OpenCode-only special case.
+  await a.registerChannel("review.prs", { description: "Pull request coordination" });
+  const projectJoin = await a.joinChannel("review.project");
+  const prsJoin = await a.joinChannel("review.prs");
+  check(
+    "one agent joins multiple newly registered channels",
+    projectJoin.joined && prsJoin.joined && a.joinedChannels().includes("review.project") && a.joinedChannels().includes("review.prs"),
+    a.joinedChannels(),
+  );
 
   got.length = 0;
   gotDurable.length = 0;

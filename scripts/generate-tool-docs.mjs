@@ -66,6 +66,13 @@ const ANNOTATIONS = {
   },
   cotal_channel_info: { effect: "read-only", availability: "always" },
   cotal_channels: { effect: "read-only", availability: "always" },
+  cotal_channel_create: {
+    effect: "registers a new channel and subscribes you to it",
+    availability:
+      "always, for concrete channels within both your read ACL (`allowSubscribe`) and post ACL (`allowPublish`)",
+    notes:
+      "Creation is idempotent and create-only: an existing channel is left unchanged, and registering a name never widens your ACLs.",
+  },
   cotal_channel_mode: {
     effect: "sets your own per-channel receive preference (quiet / muted / normal)",
     availability: "always",

@@ -9,7 +9,12 @@
  */
 import { Kvm, type KV } from "@nats-io/kv";
 import { connect, type NatsConnection } from "@nats-io/transport-node";
-import { channelBucket, CHANNEL_DEFAULTS_KEY } from "./subjects.js";
+import {
+  assertValidChannel,
+  channelBucket,
+  CHANNEL_DEFAULTS_KEY,
+  isConcreteChannel,
+} from "./subjects.js";
 import { standaloneConnectOpts } from "./streams.js";
 import type { ChannelConfig, ChannelDefaults, DeliveryClass } from "./types.js";
 import { liveKvEntries } from "./kv-scan.js";
@@ -131,6 +136,39 @@ export async function writeChannelConfig(
   validateChannelConfig(patch);
   const merged: ChannelConfig = { ...(await readChannelConfig(kv, channel)), ...patch };
   await kv.put(channel, JSON.stringify(merged));
+}
+
+/**
+ * Register a concrete channel without granting the caller an overwrite primitive.
+ *
+ * This is the write used by the authenticated self-service registrar. It is intentionally
+ * create-only: a peer may make a new channel discoverable, but an existing channel card remains
+ * operator/creator-owned and is never rewritten by a racing or later request. The broker-side
+ * registrar checks the caller's read ACL before reaching this helper.
+ *
+ * Returns `true` when this call created the entry and `false` when a live entry already exists.
+ */
+export async function createChannelConfig(
+  kv: KV,
+  channel: string,
+  config: ChannelConfig = {},
+): Promise<boolean> {
+  assertValidChannel(channel);
+  if (!isConcreteChannel(channel))
+    throw new Error(`channel "${channel}" must be concrete (wildcards are ACL/subscription patterns, not registry keys)`);
+  validateChannelConfig(config);
+  const data = new TextEncoder().encode(JSON.stringify(config));
+  try {
+    await kv.create(channel, data);
+    return true;
+  } catch (e) {
+    // A create race is the normal idempotent case. Re-read after the failed CAS: only a LIVE entry
+    // proves another creator won. An absent/deleted entry means a real broker error or a concurrent
+    // delete and must surface rather than being reported as an existing channel.
+    const existing = await kv.get(channel);
+    if (existing && existing.operation !== "DEL" && existing.operation !== "PURGE") return false;
+    throw e;
+  }
 }
 
 /** Privileged write of the space-wide defaults (merged over any existing). Validated before the

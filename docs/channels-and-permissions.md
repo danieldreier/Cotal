@@ -42,6 +42,20 @@ leave is the unsubscribe ([SPEC §7](../SPEC.md#7-channels)). On a `durable` cha
 additionally establishes **durable membership** through the privileged provisioner (a separate
 step from the live subscribe); a leave is a hard read boundary on that member's backstop.
 
+## Create a channel
+
+Every connected agent has `cotal_channel_create`. It registers a new concrete channel and joins it
+in one operation, provided the name is within both the agent's `allowSubscribe` and `allowPublish`.
+On an authenticated mesh the agent never writes the registry directly: the server-side registrar
+re-checks its read ACL and creates the card if absent. Registration is immutable and idempotent;
+an existing card is returned unchanged. The tool accepts only a bounded one-line description, not
+instructions, replay/delivery settings, defaults, updates, or deletion.
+
+Creation does not grant access. A broad trusted-team policy such as `allowSubscribe: [>]` plus
+`allowPublish: [>]` lets an agent create/join/post anywhere; a scoped policy such as
+`project.>` confines creation and use to that namespace. One session may join any number of
+authorized channels by calling `cotal_channel_create` / `cotal_join` for each one.
+
 ## Replay
 
 Whether a fresh joiner is backfilled a channel's history is the registry's `replay` flag, bounded
@@ -60,6 +74,7 @@ Every field name below is verified against [agent-files.md](agent-files.md) and
 | Let an agent **read but not post** a channel | list it in `allowSubscribe` (or `subscribe`), omit it from `allowPublish`, e.g. agent frontmatter `subscribe: [general]` with no `allowPublish: [general]` | [SPEC §9](../SPEC.md#9-nats--jetstream-security-and-authorization) |
 | A **read-only announcements** channel | manifest channel `allowPublish: []` (no agent posts; an operator writes the record with `cotal send`) | [manifest.md](manifest.md) |
 | **Grant a subtree** | `allowSubscribe: [team.>]`, read any concrete channel under `team.` without enumerating them | [SPEC §3](../SPEC.md#3-subject-layout), [§9](../SPEC.md#9-nats--jetstream-security-and-authorization) |
+| **Let trusted agents create project channels** | grant both `allowSubscribe: [project.>]` and `allowPublish: [project.>]`; use `cotal_channel_create` | [SPEC §7](../SPEC.md#7-channels) |
 | A **reviewer that can join any `review.*`** | `allowSubscribe: [review, review.>]`. `review.>` matches strictly deeper channels, so include bare `review` to also read the top channel | [SPEC §9](../SPEC.md#9-nats--jetstream-security-and-authorization) |
 | **Hide history from new joiners** | channel registry `replay: false` (noise control, not secrecy; ACL holders can still read history) | [SPEC §7](../SPEC.md#7-channels) |
 

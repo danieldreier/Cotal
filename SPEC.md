@@ -366,6 +366,16 @@ A channel is addressable as soon as it is published to. Channel config is option
 in the per-space registry bucket `cotal_channels_<space>`, keyed by the concrete channel
 token.
 
+An authenticated instance MAY register a new concrete channel through the server-side channel
+registrar when the channel is within both its current read ACL and its mint-time read ceiling.
+Registration is **create-only**: an existing channel entry MUST NOT be overwritten by this path.
+The instance credential MUST NOT gain a direct channel-registry write grant; the registrar derives
+the caller from the authenticated request subject, re-reads the durable ACL record, and performs the
+create under its scoped host credential. Registration does not widen `allowSubscribe` or
+`allowPublish`: join and publish remain independently broker-enforced. A registration MAY carry a
+bounded `description`; the reference agent tool does not accept `instructions`, replay, delivery
+class, defaults, update, or delete through this path.
+
 `ChannelConfig`:
 
 | Field | Type | Notes |
@@ -3787,7 +3797,10 @@ single-function profiles, each granting only the verbs its function needs and no
   is the manager endpoint's serve credential (§13.9) and the ONLY holder of the capabilities for
   the delivery endpoint's admin commands (below).
 - `delivery`: the server-side Plane-3 infra: fan-out, trusted-reader re-authorization, and the
-  membership/ACL records the durable backstop authorizes against (§7). It is the `delivery`
+  membership/ACL records the durable backstop authorizes against (§7), plus the create-only
+  channel registrar above. The registrar's runtime path performs only `KV.create` after fresh ACL
+  authorization; its scoped host credential necessarily holds value-write authority on the channel
+  bucket, while agent credentials retain read-only registry access. It is the `delivery`
   endpoint's serve credential (§13.9); its admin commands, `reloadCreds`, the explicit adoption
   step of standing credential renewal (the daemon re-reads its re-signed creds file, pins the
   identity, swaps its connection, and reconnects the membership feed's rw connection, replying

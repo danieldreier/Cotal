@@ -463,6 +463,11 @@ smoke:jcode-route-identity
 
 smoke:orientation
 
+# Every connector renders one shared create-and-join tool. It must register before joining and
+# refuse names outside either the read or post ACL before either effect.
+smoke:channel-create-tool
+smoke:channel-register:auth
+
 # A signing key must not expire unattended. The manager minted its session key once at boot with a
 # flat 24h window and handed back that frozen anchor forever, so any manager with >24h uptime lost
 # its session plane: every attach failed closed with "outside its validity window", recoverable only

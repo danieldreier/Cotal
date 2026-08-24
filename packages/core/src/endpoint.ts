@@ -82,6 +82,7 @@ import {
   effectiveReplay,
   effectiveReplayWindowMs,
   effectiveDeliveryClass,
+  createChannelConfig,
   readChannelConfig,
   readChannelDefaults,
 } from "./channels.js";
@@ -1914,6 +1915,41 @@ export class CotalEndpoint extends EventEmitter {
   }
 
   /**
+   * Make a concrete channel discoverable in the registry, without overwriting an existing card.
+   * Authenticated agents request the server-side registrar, which re-checks the caller's durable
+   * read ACL and performs the create under its scoped writer credential. Open mode creates locally.
+   */
+  async registerChannel(
+    channel: string,
+    opts: { description?: string } = {},
+  ): Promise<{ channel: string; created: boolean }> {
+    assertValidChannel(channel);
+    if (!isConcreteChannel(channel))
+      throw new Error(`channel "${channel}" must be concrete (wildcards are ACL/subscription patterns, not channels to create)`);
+    if (opts.description !== undefined && !opts.description.trim())
+      throw new Error("registerChannel: description must be non-blank when provided");
+
+    if (!this.authed) {
+      const created = await createChannelConfig(
+        await this.channelRegistry(),
+        channel,
+        opts.description === undefined ? {} : { description: opts.description.trim() },
+      );
+      return { channel, created };
+    }
+
+    const reply = await this.requestDelivery("registerChannel", {
+      channel,
+      ...(opts.description === undefined ? {} : { description: opts.description.trim() }),
+    });
+    if (!reply.ok) throw new Error(reply.error ?? "channel registration rejected");
+    const data = reply.data as { channel?: unknown; created?: unknown } | undefined;
+    if (data?.channel !== channel || typeof data.created !== "boolean")
+      throw new Error("registerChannel: the registrar returned a malformed result");
+    return { channel, created: data.created };
+  }
+
+  /**
    * Join a channel mid-session: open a native core subscription (manager-free live read, broker-
    * confirmed against `sub.allow`), capture the stream frontier as the join watermark, backfill its
    * history if replay is on, and — for a `durable`-class channel when a delivery daemon is present —
@@ -2688,6 +2724,15 @@ export class CotalEndpoint extends EventEmitter {
     return this.aclKv;
   }
 
+  /** Lazily open the channel registry for the server-side self-service registrar. The bucket is
+   *  pre-created on an authenticated mesh; open mode may create it just like the normal endpoint
+   *  startup path. */
+  private async channelRegistry(): Promise<KV> {
+    if (!this.nc) throw new Error("endpoint not started");
+    this.channelKv ??= await openChannelRegistry(this.nc, this.space, { create: !this.authed });
+    return this.channelKv;
+  }
+
   /** Privileged ({@link DurableProvisioner}): record an agent's read ACL in the durable registry at
    *  provision/mint time — the same act as baking it into the JWT, persisted so the server-side
    *  delivery daemon can re-authorize the agent's durable entries and validate its runtime
@@ -3121,6 +3166,7 @@ export class CotalEndpoint extends EventEmitter {
     if (req.op === "durableJoin") return this.deliveryJoin(caller, args);
     if (req.op === "durableLeave") return this.deliveryLeave(caller, args);
     if (req.op === "readHistory") return this.deliveryReadHistory(caller, args);
+    if (req.op === "registerChannel") return this.deliveryRegisterChannel(caller, args);
     if (req.op === "listMemberships") {
       if (typeof args.lifecycleUid !== "string")
         return { ok: false, error: "listMemberships: the caller's lifecycleUid is required (membership rows are lifecycle-keyed, SPEC 13.1)" };
@@ -3130,6 +3176,52 @@ export class CotalEndpoint extends EventEmitter {
       return { ok: true, data: { memberships: await this.ownerMemberships(caller, uid) } };
     }
     return { ok: false, error: `op "${req.op}" not supported on the delivery control service` };
+  }
+
+  /**
+   * Authenticated self-service channel registration. The delivery daemon is the narrow mediator:
+   * the agent credential never gains channel-registry write access, the caller identity comes from
+   * the broker-confined control subject, and the durable ACL registry is re-read for every request.
+   * Registration is create-only; an existing channel card is never overwritten.
+   */
+  private async deliveryRegisterChannel(
+    caller: string,
+    args: Record<string, unknown>,
+  ): Promise<ControlReply> {
+    const channel = this.checkDurableChannelArg(args, "registerChannel");
+    if (typeof channel !== "string") return channel;
+    let acl: { allowSubscribe: string[]; issuedAllowSubscribe: string[]; lifecycleUid: string } | undefined;
+    try { acl = await this.aclForAlias(caller); }
+    catch (e) { return { ok: false, error: (e as Error).message }; }
+    if (!acl)
+      return { ok: false, error: `registerChannel: no read ACL on record for ${caller} - not permitted` };
+    // Require both the live ACL and the mint-time ceiling. A registry-only ACL widen must not grant
+    // a channel registration the caller's effective broker credential cannot actually read.
+    if (
+      !channelInAllow(acl.allowSubscribe, channel) ||
+      !channelInAllow(acl.issuedAllowSubscribe, channel)
+    )
+      return {
+        ok: false,
+        error: `registerChannel: channel "${channel}" is not within your read ACL [${acl.allowSubscribe.join(", ")}] - refused`,
+      };
+
+    let description: string | undefined;
+    if (args.description !== undefined) {
+      if (typeof args.description !== "string" || !args.description.trim())
+        return { ok: false, error: "registerChannel: description must be a non-blank string when provided" };
+      description = args.description.trim();
+    }
+    try {
+      const created = await createChannelConfig(
+        await this.channelRegistry(),
+        channel,
+        description === undefined ? {} : { description },
+      );
+      return { ok: true, data: { channel, created } };
+    } catch (e) {
+      return { ok: false, error: `registerChannel: ${(e as Error).message}` };
+    }
   }
 
   /** Validate the channel ARG shape only — non-blank, valid, concrete (NO ACL check, that is op-specific).

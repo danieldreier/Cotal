@@ -1138,6 +1138,18 @@ export class MeshAgent extends EventEmitter {
     return this.ep.joinedChannels();
   }
 
+  /** Register a new discoverable channel card through the authenticated server-side registrar.
+   *  Create-only: an existing card is never overwritten. */
+  async registerChannel(
+    channel: string,
+    description?: string,
+  ): Promise<{ channel: string; created: boolean }> {
+    this.assertConnected();
+    return this.ep.registerChannel(channel, {
+      ...(description === undefined ? {} : { description }),
+    });
+  }
+
   /** Discoverable channel list: every channel with traffic or a registry entry, tagged with
    *  its one-line description, replay policy, and whether WE are subscribed (self only — never
    *  other peers' membership). The companion to cotal_join. */
