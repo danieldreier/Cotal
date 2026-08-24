@@ -122,6 +122,26 @@ pipe, which is what lets Codex's own TUI attach to the very thread the mesh is d
   (`<workspace>/.cotal/codex/<space>-<name>-<hash>/host.log`; the handoff line prints the exact
   path, and `ls -t .cotal/codex/*/host.log` finds it after the fact). Attached, a failure is also
   reported on the terminal; detached, that report goes to the pty, so the file is the durable copy.
+
+  A laptop wrapper can append ordinary Codex TUI/resume options, or an initial prompt, with a
+  JSON array. Each array item is one argv token, so spaces are preserved without shell parsing:
+
+  ```bash
+  COTAL_CODEX_TUI=1 \
+  COTAL_CODEX_TUI_ARGS_JSON='["--no-alt-screen", "inspect this workspace"]' \
+  cotal spawn --agent codex
+  ```
+
+  These tokens are appended **after** Cotal's managed thread id. Cotal always owns the `resume`
+  command, loopback `--remote` endpoint, auth-token environment name, and thread identity. Arguments
+  that select a session (`--last`, `--all`, `--resume`, and related selectors) or replace the
+  endpoint/token are refused loudly. The JSON value is scrubbed from both Codex child environments;
+  only the managed capability token is supplied to the TUI by its environment name. For a detached
+  spawn, set this variable in the manager's environment, just like `COTAL_CODEX_TUI`.
+
+  Exit status follows the surface you invoked: an authenticated manager/control shutdown exits
+  cleanly with `0`; a TUI that exits with a numeric status returns that status unchanged; and a host
+  interrupted directly by `SIGINT`/`SIGTERM` returns the conventional `130`/`143`.
 - **Presence from events.** working/idle/waiting are derived from the app-server event stream;
   the model id is reported from the started thread.
 

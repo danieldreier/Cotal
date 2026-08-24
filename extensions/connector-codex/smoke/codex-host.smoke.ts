@@ -82,6 +82,7 @@ interface LogEntry {
   httpStatus?: number;
   mcpTokenPresent?: boolean;
   cotalLeak?: string[];
+  tuiCotalLeak?: string[];
 }
 function logEntries(): LogEntry[] {
   if (!existsSync(LOG)) return [];
@@ -157,6 +158,7 @@ try {
       COTAL_MODEL: "fake-model",
       COTAL_VARIANT: "high",
       COTAL_CODEX_CONFIG: JSON.stringify({ sandbox_mode: '"read-only"' }),
+      COTAL_CODEX_TUI_ARGS_JSON: JSON.stringify(["--no-alt-screen", "wrapper prompt"]),
     },
     // No tty: this host runs HEADLESS (no TUI), which is the container / `deploy/` shape. The
     // TUI-attached shape is covered by its own spawn below (COTAL_CODEX_TUI=1).
@@ -838,7 +840,7 @@ try {
     new Promise<number | null>((r) => shutLaunch.on("exit", (code) => r(code))),
     sleep(30_000).then(() => "timeout" as const),
   ]);
-  check("a shutdown during the launch exits cleanly, not fatally", shutLaunchExit === 0, {
+  check("a shutdown during the launch preserves the OS SIGTERM status", shutLaunchExit === 143, {
     shutLaunchExit,
     err: shutLaunchErr.slice(-300),
   });
@@ -1022,6 +1024,7 @@ try {
       COTAL_CODEX_HOME: dir,
       FAKE_CODEX_LOG: tuiLog,
       COTAL_CODEX_TUI: "1", // force the TUI path: this smoke has no tty to detect
+      COTAL_CODEX_TUI_ARGS_JSON: JSON.stringify(["--no-alt-screen", "prompt with spaces"]),
       FAKE_CODEX_TUI_EXIT: "1", // ...and the "operator quit the UI" path
     },
     stdio: ["ignore", "ignore", "inherit"],
@@ -1044,7 +1047,13 @@ try {
   );
   check(
     "the TUI resumes the host's OWN thread (not a private one)",
-    startedThread !== undefined && tuiArgv[tuiArgv.length - 1] === "t_fake",
+    startedThread !== undefined && tuiArgv[tuiArgv.indexOf("t_fake")] === "t_fake",
+    tuiArgv,
+  );
+  check(
+    "wrapper flags and prompt append after the managed thread with exact boundaries",
+    startedThread !== undefined &&
+      tuiArgv.slice(tuiArgv.indexOf("t_fake") + 1).join("\u0000") === "--no-alt-screen\u0000prompt with spaces",
     tuiArgv,
   );
   check(
@@ -1053,6 +1062,7 @@ try {
       !tuiArgv.some((a) => a === (tuiLaunch as { tokenFromEnv?: string }).tokenFromEnv),
     tuiArgv,
   );
+  check("the wrapper args env is scrubbed from the TUI child", (tuiLaunch.tuiCotalLeak ?? []).length === 0, tuiLaunch);
   check("the TUI never sits on the interactive update gate", tuiArgv.includes("check_for_update_on_startup=false"), tuiArgv);
   const tuiExit = await Promise.race([
     new Promise<number | null>((r) => tuiHost.on("exit", (code) => r(code))),
@@ -1091,7 +1101,7 @@ try {
     new Promise<number | null>((r) => crashHost.on("exit", (code) => r(code))),
     sleep(30_000).then(() => "timeout" as const),
   ]);
-  check("a CRASHED TUI exits nonzero, not as a clean retirement", crashExit === 1, { crashExit, err: crashErr.slice(-300) });
+  check("a CRASHED TUI preserves its numeric exit status", crashExit === 3, { crashExit, err: crashErr.slice(-300) });
   check(
     "the operator is told on the TERMINAL that the UI died, and where the log went",
     /TUI exited unexpectedly/.test(crashErr) && /host\.log/.test(crashErr),
@@ -1159,7 +1169,7 @@ try {
   await sleep(700); // let the departure propagate to the operator
   operator.off("presence", onBye);
   check("shutdown: the child really did die first (ordering pinned)", !!shutEntries().find((e) => e.ev === "died"));
-  check("cooperative shutdown exits cleanly (0)", shutdownExit === 0, shutdownExit);
+  check("an OS SIGTERM keeps its conventional exit status (143)", shutdownExit === 143, shutdownExit);
   check(
     "cooperative shutdown leaves the mesh while STILL ALIVE (child death never short-circuits it)",
     offlineWhileAlive,
@@ -1198,7 +1208,7 @@ try {
   ]);
   check(
     "shutdown with the broker gone still exits promptly (bounded, no wait-for-SIGKILL)",
-    hangExit === 0 && Date.now() - hangStart < 15_000,
+    hangExit === 143 && Date.now() - hangStart < 15_000,
     { hangExit, ms: Date.now() - hangStart },
   );
 

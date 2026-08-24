@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { loadAgentFile, registry, type Connector, type LaunchOpts, type LaunchSpec, type ModelCatalog, type ModelInfo } from "@cotal-ai/core";
 import { aclEnv, connectorLaunchOptions, controlEndpoint, eventChannel, launchEnv, materialEnv } from "@cotal-ai/connector-core";
+import { parseCodexTuiArgs, CODEX_TUI_ARGS_ENV } from "./tui-args.js";
 
 /** The bundled host loop (self-contained — core + connector-core inlined, see package.json's
  *  bundle script) run with this same node; from SOURCE (dev), the `.ts` entry through tsx. */
@@ -182,6 +183,14 @@ export const codexConnector: Connector = {
     // documented in docs/connect-codex.md rather than half-wired.
     const tuiPref = process.env.COTAL_CODEX_TUI?.trim();
     if (tuiPref) env.COTAL_CODEX_TUI = tuiPref;
+    // A laptop wrapper may provide exact Codex TUI/resume argv tokens as a JSON array. Validate
+    // here so a bad or conflicting value fails at spawn, then preserve the raw JSON for the host
+    // to decode without ever shell-splitting or re-encoding its boundaries.
+    const tuiArgsJson = process.env[CODEX_TUI_ARGS_ENV];
+    if (tuiArgsJson !== undefined) {
+      parseCodexTuiArgs(tuiArgsJson);
+      env[CODEX_TUI_ARGS_ENV] = tuiArgsJson;
+    }
 
     // Where the host roots the per-agent CODEX_HOME (`.cotal/codex/<name>`): the manager's
     // workspace, or the launch dir for a standalone spawn — never the per-agent cwd, which can

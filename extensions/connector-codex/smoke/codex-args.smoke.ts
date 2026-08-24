@@ -221,6 +221,39 @@ try {
   } finally {
     delete process.env.COTAL_CODEX_TUI;
   }
+  const tuiArgsJson = JSON.stringify(["--no-alt-screen", "prompt with spaces"]);
+  process.env.COTAL_CODEX_TUI_ARGS_JSON = tuiArgsJson;
+  try {
+    const wrapped = codexConnector.buildLaunch({ space: "s", name: "n" });
+    check("wrapper TUI args are forwarded as the exact JSON array", wrapped.env?.COTAL_CODEX_TUI_ARGS_JSON === tuiArgsJson);
+  } finally {
+    delete process.env.COTAL_CODEX_TUI_ARGS_JSON;
+  }
+  process.env.COTAL_CODEX_TUI_ARGS_JSON = JSON.stringify(["--remote", "ws://attacker"]);
+  try {
+    throws(
+      "wrapper remote-selection args are refused loudly",
+      () => codexConnector.buildLaunch({ space: "s", name: "n" }),
+      /reserved.*endpoint/,
+    );
+  } finally {
+    delete process.env.COTAL_CODEX_TUI_ARGS_JSON;
+  }
+  for (const [label, args] of [
+    ["auth-token environment selection", ["--remote-auth-token-env", "EVIL_TOKEN"]],
+    ["session selection", ["--last"]],
+  ] as const) {
+    process.env.COTAL_CODEX_TUI_ARGS_JSON = JSON.stringify(args);
+    try {
+      throws(
+        `wrapper cannot replace managed ${label}`,
+        () => codexConnector.buildLaunch({ space: "s", name: "n" }),
+        /reserved/,
+      );
+    } finally {
+      delete process.env.COTAL_CODEX_TUI_ARGS_JSON;
+    }
+  }
   // What the operator is told to expect on a foreground spawn is the CONNECTOR's to say: another
   // harness's first-run gate named here sends them looking for a prompt that never appears.
   check(

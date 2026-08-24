@@ -75,6 +75,7 @@ import { createCodexMapper, type CodexMapper, type CodexRecord } from "./agui-ma
 import { waitForRollout } from "./agui-rollout.js";
 import { startCotalMcp, MCP_SERVER_NAME, MCP_TOKEN_ENV, type CotalMcpEndpoint } from "./mcp.js";
 import { launchTui } from "./tui.js";
+import { parseCodexTuiArgs } from "./tui-args.js";
 
 const ERROR_RETRY_INITIAL_MS = 1_000;
 const ERROR_RETRY_MAX_MS = 30_000;
@@ -86,6 +87,8 @@ const MAX_RESTARTS = 3;
 const STATUS_FLUSH_MS = 500;
 /** How long a cooperative shutdown waits for the clean mesh leave before exiting regardless. */
 const SHUTDOWN_GRACE_MS = 5_000;
+/** Conventional process exit statuses for signals that can terminate the host or its TUI. */
+const SIGNAL_EXIT_CODE: Partial<Record<NodeJS.Signals, number>> = { SIGINT: 130, SIGTERM: 143 };
 /** Looks the launch spends waiting for a thread's rollout file to appear, at 250ms each. Bounded
  *  because a caller that waits forever cannot report that it is stuck; giving up is not final,
  *  because every later turn boundary looks again (see `bindEvents`). */
@@ -348,6 +351,10 @@ export async function runCodexHost(): Promise<void> {
 
   const codexHome = prepareCodexHome(config.space, config.name);
   const codexBin = process.env.COTAL_CODEX_BIN?.trim() || undefined;
+  // Parse before anything starts listening. This is a wrapper configuration rail, not a shell
+  // fragment: each JSON item stays one argv token, and managed endpoint/session arguments fail
+  // before a peer can come online. The same immutable list is used on every app-server restart.
+  const tuiArgs = parseCodexTuiArgs(process.env.COTAL_CODEX_TUI_ARGS_JSON);
   // Validate the operator's launch config BEFORE anything is listening, so a bad launch throws
   // with nothing left behind to reap.
   const baseOverrides = configOverrides(model, variant);
@@ -1044,10 +1051,10 @@ export async function runCodexHost(): Promise<void> {
       log(`codex TUI attached to ${remote.url} thread ${threadId}`);
     }
     const gen = ++tuiGen;
-    const child = launchTui({ url: remote.url, token: remote.token, threadId, codexHome, cwd: process.cwd(), bin: codexBin });
+    const child = launchTui({ url: remote.url, token: remote.token, threadId, codexHome, cwd: process.cwd(), args: tuiArgs, bin: codexBin });
     tuiChild = child;
     child.on("error", (e: Error) => tellOperator(`codex TUI failed to launch: ${e.message} (host log: ${logPath})`));
-    child.on("exit", (code) => {
+    child.on("exit", (code, signal) => {
       if (gen !== tuiGen) return; // superseded: a restart or shutdown already owns this exit
       tuiChild = undefined;
       // Quitting the UI ends the session, matching every other connector: the pty's process
@@ -1062,13 +1069,19 @@ export async function runCodexHost(): Promise<void> {
         void shutdown();
         return;
       }
-      tellOperator(`codex TUI exited unexpectedly (${code}) — leaving the mesh; details in ${logPath}`);
-      void shutdown(1);
+      const exitCode = code ?? (signal ? SIGNAL_EXIT_CODE[signal] : undefined) ?? 1;
+      tellOperator(
+        `codex TUI exited unexpectedly (${code ?? signal ?? "unknown"}) — leaving the mesh; details in ${logPath}`,
+      );
+      // Preserve a real TUI failure (and the conventional 128+signal status) so a laptop wrapper
+      // can observe the same result it would have received from invoking Codex directly.
+      void shutdown(exitCode);
     });
   }
 
   // Cooperative shutdown: the manager's authed {op:"shutdown"} on a signal-less runtime, plus
-  // SIGINT/SIGTERM. Interrupt the live turn, leave the mesh cleanly, then exit. The interrupted
+  // SIGINT/SIGTERM. Interrupt the live turn, leave the mesh cleanly, then exit. The control frame
+  // keeps the clean 0 status; direct OS signals retain their conventional status. The interrupted
   // batch stays un-acked in the stream — but this is a RETIREMENT, not a restart: the manager
   // frees the slot and deprovisions, and a later same-name spawn is a successor with its own
   // delivery frontier, so redelivery to it is NOT promised. (Unlike the in-place app-server
@@ -1147,8 +1160,10 @@ export async function runCodexHost(): Promise<void> {
   // reader left: drop it, and the codex child and every tool it runs inherit no reference to this
   // session's credential or control token.
   scrubLaunchMaterial();
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
+  // A manager's authenticated control frame calls shutdown() with its deliberate clean default
+  // (0). An OS signal, by contrast, keeps the conventional status visible to a laptop wrapper.
+  process.on("SIGINT", () => void shutdown(130));
+  process.on("SIGTERM", () => void shutdown(143));
 
   // PATH preflight (parity with the manager's `requires` check, for a foreground `--live-only`
   // launch that bypasses it): fail with a clear message naming the binary rather than a raw

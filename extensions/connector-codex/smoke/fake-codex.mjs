@@ -34,7 +34,15 @@ journal({ ev: "argv", argv, pid: process.pid });
 // FAKE_CODEX_TUI_EXIT=1 quits instead, driving the "operator closed the UI" path.
 if (argv[0] === "resume") {
   const tokenEnv = argv[argv.indexOf("--remote-auth-token-env") + 1];
-  journal({ ev: "tui", argv, tokenFromEnv: tokenEnv ? (process.env[tokenEnv] ?? null) : null });
+  journal({
+    ev: "tui",
+    argv,
+    tokenFromEnv: tokenEnv ? (process.env[tokenEnv] ?? null) : null,
+    // The wrapper rail must not leak into Codex's child environment. The managed token-env is
+    // the one deliberate COTAL_* exception and is identified from argv rather than allow-listed
+    // by prefix, so this remains useful if another managed capability is added later.
+    tuiCotalLeak: Object.keys(process.env).filter((k) => k.startsWith("COTAL_") && k !== tokenEnv),
+  });
   if (process.env.FAKE_CODEX_TUI_EXIT === "1") setTimeout(() => process.exit(0), 300);
   // FAKE_CODEX_TUI_CRASH=1: the UI dies of its own accord. Indistinguishable from a quit at the
   // process level except for the CODE, which is the whole point — read as a quit, an operator is

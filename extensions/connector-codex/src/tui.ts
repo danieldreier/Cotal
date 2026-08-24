@@ -11,6 +11,7 @@
  * which redirects its own logging to a file for exactly this reason.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { validateCodexTuiArgs } from "./tui-args.js";
 
 /** Env var carrying the capability token to the TUI. Passed by NAME (`--remote-auth-token-env`)
  *  rather than on argv, so the token never appears in the process table. */
@@ -25,6 +26,8 @@ export interface TuiOpts {
   /** The agent's private CODEX_HOME, so the TUI reads the managed config, never the operator's. */
   codexHome: string;
   cwd: string;
+  /** Validated wrapper arguments, appended after the managed thread id. */
+  args?: readonly string[];
   bin?: string;
 }
 
@@ -33,6 +36,7 @@ export interface TuiOpts {
  * the operator quit the session, which the host treats as a cooperative shutdown.
  */
 export function launchTui(opts: TuiOpts): ChildProcess {
+  validateCodexTuiArgs(opts.args ?? []);
   const args = [
     "resume",
     "--remote",
@@ -44,6 +48,7 @@ export function launchTui(opts: TuiOpts): ChildProcess {
     "-c",
     "check_for_update_on_startup=false",
     opts.threadId,
+    ...(opts.args ?? []),
   ];
   // Same scrubbing rule as the app-server child: the TUI (and anything it spawns) has no business
   // reading this agent's mesh identity or credential.
