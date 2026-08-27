@@ -334,6 +334,31 @@ importers:
         specifier: ^4.22.4
         version: 4.23.0
 
+  extensions/mcp:
+    dependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.29.0(zod@4.4.3)
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@cotal-ai/connector-core':
+        specifier: workspace:*
+        version: link:../connector-core
+      '@cotal-ai/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@cotal-ai/smoke-kit':
+        specifier: workspace:*
+        version: link:../../packages/smoke-kit
+      '@cotal-ai/workspace':
+        specifier: workspace:*
+        version: link:../../packages/workspace
+      '@nats-io/transport-node':
+        specifier: ^3.4.0
+        version: 3.4.0
+
   extensions/orca:
     devDependencies:
       '@cotal-ai/core':

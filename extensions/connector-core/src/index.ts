@@ -14,5 +14,6 @@ export * from "./orientation.js";
 export * from "./docs.js";
 export * from "./tools.js";
 export * from "./mcp-server.js";
+export * from "./gateway-identities.js";
 export * from "./control.js";
 export * from "./relay.js";

@@ -63,6 +63,7 @@
     "smoke:lang-differential": "tsx packages/lang/smoke/differential.smoke.ts",
     "smoke:orientation": "tsx extensions/connector-core/smoke/orientation.smoke.ts",
     "smoke:mcp-server": "tsx extensions/connector-core/smoke/mcp-server.smoke.ts",
+    "smoke:mcp-gateway": "pnpm --filter @cotal-ai/core... build && pnpm --filter @cotal-ai/workspace build && pnpm --filter @cotal-ai/connector-core build && tsx extensions/mcp/smoke/gateway.smoke.ts",
     "smoke:docs": "tsx extensions/connector-core/smoke/docs.smoke.ts",
     "smoke:pi": "tsx extensions/pi/pi.smoke.ts && tsx extensions/pi/pi-sdk.smoke.ts",
     "smoke:codex-args": "tsx extensions/connector-codex/smoke/codex-args.smoke.ts",

@@ -18,7 +18,7 @@ import type { MeshAgent } from "./agent.js";
 import { type AgentConfig } from "./config.js";
 import { cotalToolSpecs } from "./tool-specs.js";
 import { buildOrientation, MESH_FIRST_STEER, ORIENTATION_BOOTSTRAP } from "./orientation.js";
-import { registerCotalTools } from "./tools.js";
+import { registerCotalTools, type CotalMcpToolSelection } from "./tools.js";
 
 export const COTAL_CONTEXT_URI = "cotal://context";
 export const COTAL_INBOX_URI = "cotal://inbox";
@@ -31,6 +31,15 @@ export interface CotalResourceRegistration {
   notify(uri: string): Promise<void>;
   /** Detach agent listeners and discard subscription state. */
   close(): void;
+}
+
+/** Optional host-owned actor selection.  This keeps the shared server transport
+ * neutral while allowing a trusted gateway to choose a different MeshAgent for
+ * each request. */
+export interface CotalMcpServerOptions {
+  selection?: CotalMcpToolSelection;
+  /** Register host-specific tools after the common Cotal surface is installed. */
+  registerAdditionalTools?: (server: McpServer) => void;
 }
 
 /** Notify one server's subscribers without requiring a transport-specific API. */
@@ -59,6 +68,7 @@ export function registerCotalResources(
   agent: MeshAgent,
   config: AgentConfig,
   source = "connector",
+  selection?: CotalMcpToolSelection,
 ): CotalResourceRegistration {
   const subscriptions = new Set<string>();
   let closed = false;
@@ -87,11 +97,14 @@ export function registerCotalResources(
       mimeType: "application/json",
       annotations: { audience: ["user"], priority: 0.8 },
     },
-    async (uri) => resourceContents(
-      uri,
-      "application/json",
-      JSON.stringify(buildOrientation(agent, config, visibleTools, Date.now())),
-    ),
+    async (uri) => {
+      const selected = selection ? await selection.select() : { agent, config };
+      return resourceContents(
+        uri,
+        "application/json",
+        JSON.stringify(buildOrientation(selected.agent, selected.config, visibleTools, Date.now())),
+      );
+    },
   );
 
   const inboxSpec = cotalToolSpecs(config, source).find((spec) => spec.name === "cotal_inbox");
@@ -105,11 +118,14 @@ export function registerCotalResources(
       mimeType: "text/plain",
       annotations: { audience: ["user"], priority: 0.9 },
     },
-    async (uri) => resourceContents(
-      uri,
-      "text/plain",
-      (await inboxSpec.run(agent, config, { peek: true })).text,
-    ),
+    async (uri) => {
+      const selected = selection ? await selection.select() : { agent, config };
+      const selectedInbox = selection
+        ? cotalToolSpecs(selected.config, source).find((spec) => spec.name === "cotal_inbox")
+        : inboxSpec;
+      if (!selectedInbox) throw new Error("cotal_inbox is missing from the selected Cotal tool surface");
+      return resourceContents(uri, "text/plain", (await selectedInbox.run(selected.agent, selected.config, { peek: true })).text);
+    },
   );
 
   // McpServer 1.29 exposes resource registration but not the two optional
@@ -166,12 +182,14 @@ export function createCotalMcpServer(
   agent: MeshAgent,
   config: AgentConfig,
   source = "connector",
+  options: CotalMcpServerOptions = {},
 ): McpServer & { cotalResources: CotalResourceRegistration } {
   const server = new McpServer(
     { name: "cotal", version: "0.0.0" },
     { instructions: `${ORIENTATION_BOOTSTRAP}\n\n${MESH_FIRST_STEER}` },
   );
-  registerCotalTools(server, agent, config, source);
-  const resources = registerCotalResources(server, agent, config, source);
+  registerCotalTools(server, agent, config, source, options.selection);
+  const resources = registerCotalResources(server, agent, config, source, options.selection);
+  options.registerAdditionalTools?.(server);
   return Object.assign(server, { cotalResources: resources });
 }
