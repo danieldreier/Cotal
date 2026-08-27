@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { CotalEndpoint, createSpaceAuth, isReachable, mintCreds, newIdentity, serverConfig, setupSpaceStreams } from "@cotal-ai/core";
 
 const REPO = join(import.meta.dirname, "..", "..");
@@ -104,6 +105,7 @@ try {
     let broker: ChildProcess | undefined; let auth: Awaited<ReturnType<typeof createSpaceAuth>> | undefined;
     let peer: CotalEndpoint | undefined; let peerPrepared: Awaited<ReturnType<typeof prepareStandaloneAgent>> | undefined;
     let client: Client | undefined; let transport: StdioClientTransport | undefined;
+    let httpChild: ChildProcess | undefined; let httpClient: Client | undefined;
     try {
       if (mode === "static") {
         auth = await createSpaceAuth(space); saveSpaceAuth(authDir(root), auth);
@@ -164,9 +166,54 @@ try {
       await client.close(); client = undefined;
       await waitFor(`${mode} installed gateway EOF cleanup`, () => offline.has(principal!));
       check(`${mode}: installed gateway EOF retires the actual child identity`, offline.has(principal!));
+
+      // ChatGPT uses this exact installed command through a Secure MCP Tunnel,
+      // not the stdio transport above. Prove its shipped composition root once
+      // here using the real Streamable HTTP SDK and the same real witness.
+      if (mode === "open") {
+        const httpPort = await freePort(); let httpStderr = "";
+        httpChild = spawn(process.execPath, [installedCotal, "mcp", "--transport", "http", "--port", String(httpPort), "--space", space, "--config", "gateway"], {
+          cwd: root, env, stdio: ["ignore", "ignore", "pipe"],
+        });
+        httpChild.stderr?.on("data", (chunk: Buffer) => { httpStderr += chunk.toString(); });
+        const httpUrl = `http://127.0.0.1:${httpPort}/mcp`;
+        await waitFor("installed HTTP gateway readiness", () => httpStderr.includes(httpUrl));
+        check("open: installed cotal mcp --transport http announces only its secret-free loopback URL", httpStderr.includes(`private HTTP gateway ready at ${httpUrl}`), httpStderr);
+        httpClient = new Client({ name: "installed-mcp-http-smoke", version: "0.0.0" });
+        await httpClient.connect(new StreamableHTTPClientTransport(new URL(httpUrl)));
+        const httpTools = await httpClient.listTools();
+        check("open: installed HTTP command exposes the trusted identity surface", httpTools.tools.some((tool) => tool.name === "cotal_identity_open") && httpTools.tools.some((tool) => tool.name === "cotal_send"));
+        const httpOpened = receipt(await httpClient.callTool({ name: "cotal_identity_open", arguments: { key: "http-operator" } }));
+        const httpIdentity = String(httpOpened.identity);
+        const httpContext = JSON.parse((await httpClient.readResource({ uri: "cotal://context" })).contents[0]?.text ?? "{}") as { identity?: { id?: string } };
+        const httpPrincipal = httpContext.identity?.id;
+        check("open: installed HTTP command provisions a distinct real actor", /^[0-9a-f-]{36}$/.test(httpIdentity) && typeof httpPrincipal === "string", httpOpened);
+        let httpWitnessed = false;
+        peer.on("message", (message: { parts: Array<{ kind: string; text?: string }> }, delivery: { ack(): void }) => {
+          if (message.parts.some((part) => part.kind === "text" && part.text === "installed-http-send")) httpWitnessed = true;
+          delivery.ack();
+        });
+        const httpSent = await httpClient.callTool({ name: "cotal_send", arguments: { channel: "general", text: "installed-http-send" } });
+        await waitFor("installed HTTP send witness", () => httpWitnessed);
+        check("open: installed HTTP command sends through the selected real actor", !httpSent.isError && text(httpSent).startsWith(`actingIdentity: ${httpIdentity}`), text(httpSent));
+        await peer.unicast(httpPrincipal!, "installed-http-inbox"); await sleep(150);
+        const httpPeekOne = await httpClient.readResource({ uri: "cotal://inbox" }); const httpPeekTwo = await httpClient.readResource({ uri: "cotal://inbox" });
+        check("open: installed HTTP inbox keeps its forced repeated peek", (httpPeekOne.contents[0]?.text ?? "").includes("installed-http-inbox") && (httpPeekTwo.contents[0]?.text ?? "").includes("installed-http-inbox"));
+        await httpClient.close(); httpClient = undefined;
+        httpChild.kill("SIGTERM");
+        await Promise.race([once(httpChild, "exit"), sleep(10_000)]);
+        await waitFor("installed HTTP gateway shutdown", () => offline.has(httpPrincipal!));
+        check("open: installed HTTP SIGTERM retires its child identity", offline.has(httpPrincipal!));
+        httpChild = undefined;
+      }
     } finally {
       await client?.close().catch(() => {});
       await transport?.close().catch(() => {});
+      await httpClient?.close().catch(() => {});
+      if (httpChild && httpChild.exitCode === null) {
+        httpChild.kill("SIGTERM");
+        await Promise.race([once(httpChild, "exit"), sleep(10_000)]);
+      }
       await peer?.stop().catch(() => {});
       await peerPrepared?.retire().catch(() => {});
       broker?.kill("SIGTERM");
@@ -253,7 +300,7 @@ try {
   await cell("open");
   await cell("static");
   if (runRealCodex) await codexCell();
-  check("every installed open/static MCP cell completed", passed === (runRealCodex ? 29 : 24), passed);
+  check("every installed open/static MCP cell completed", passed === (runRealCodex ? 35 : 30), passed);
   console.log("MCP GATEWAY INSTALLED-ARTIFACT SMOKE OK ✅");
 } finally {
   rmSync(base, { recursive: true, force: true });

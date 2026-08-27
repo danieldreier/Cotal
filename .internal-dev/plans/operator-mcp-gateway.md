@@ -101,7 +101,8 @@ coordinator after verification.
   closed schemas, lifecycle rollback, and shutdown.
 - Artifact: pack the full package closure, install into an isolated prefix, and run only installed
   binaries/exports against real open and static-auth meshes. The extension input is unpacked from
-  its packed tarball, never a checkout directory.
+  its packed tarball, never a checkout directory. The installed stdio and loopback HTTP command
+  compositions both run against real SDK clients and witnesses.
 - Codex: isolated CODEX_HOME, `codex mcp add`, real authenticated `codex exec`, then PTY TUI proof.
 - Skill: a fresh Codex session must load the installed skill marker without MCP tools configured.
 - ChatGPT: manual authorized Developer Mode acceptance through Secure MCP Tunnel, including metadata
