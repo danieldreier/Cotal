@@ -549,3 +549,4 @@ smoke:mcp-server
 smoke:standalone-agent
 smoke:mcp-gateway
 smoke:mcp-http
+smoke:mcp-gateway-installed:live

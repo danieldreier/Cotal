@@ -54,6 +54,11 @@ and open-world effects.
      connector-core.
    - Self-register the `mcp` command and managed local-process surface.
    - Implement stdio and bounded loopback Streamable HTTP adapters.
+4. Published-artifact validation
+   - Pack the complete first-party closure, install it into an empty npm prefix, add only the
+     unpacked extension artifact through the installed CLI, and run open/static real-mesh round trips.
+   - Isolate HOME, XDG_CONFIG_HOME, COTAL_HOME, and npm cache so this path cannot inherit an
+     operator's Cotal state, credentials, or source checkout.
 4. Skill and docs
    - Ship the canonical `cotal-mesh` Agent Skill through the existing cross-vendor skill installer.
    - Keep skill-discovery proof separate from MCP tool-discovery proof.
@@ -79,7 +84,8 @@ and open-world effects.
 2. `feat: add standalone identity provisioning lifecycle`
 3. `feat: add trusted multi-identity MCP gateway`
 4. `feat: add stdio and loopback HTTP operator transports`
-5. `docs: add Cotal mesh skill and client workflows`
+5. `test: prove the packed operator MCP gateway`
+6. `feat: ship Cotal mesh skill and client workflows`
 
 Each branch is based on the preceding reviewed commit, uses its own worktree, contains its focused
 tests and docs, and is independently reviewable. The integration branch is updated only by the
@@ -94,7 +100,8 @@ coordinator after verification.
 - Mutation: named mutations for identity selection, non-acking resources, auth-before-parse,
   closed schemas, lifecycle rollback, and shutdown.
 - Artifact: pack the full package closure, install into an isolated prefix, and run only installed
-  binaries/exports against a real mesh.
+  binaries/exports against real open and static-auth meshes. The extension input is unpacked from
+  its packed tarball, never a checkout directory.
 - Codex: isolated CODEX_HOME, `codex mcp add`, real authenticated `codex exec`, then PTY TUI proof.
 - Skill: a fresh Codex session must load the installed skill marker without MCP tools configured.
 - ChatGPT: manual authorized Developer Mode acceptance through Secure MCP Tunnel, including metadata
