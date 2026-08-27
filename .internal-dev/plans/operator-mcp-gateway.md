@@ -87,6 +87,7 @@ and open-world effects.
 4. `feat: add stdio and loopback HTTP operator transports`
 5. `test: prove the packed operator MCP gateway`
 6. `feat: ship Cotal mesh skill and client workflows`
+7. `feat: guide MCP hosts through Cotal identity setup`
 
 Each branch is based on the preceding reviewed commit, uses its own worktree, contains its focused
 tests and docs, and is independently reviewable. The integration branch is updated only by the
@@ -124,6 +125,13 @@ both local roots with Codex metadata, and an authenticated Codex 0.149.1 session
 configuration explicitly selected `$cotal-mesh`, read the native installed skill, and returned its
 discovery marker. The skill proof uses a disposable home/project and no Cotal connection; it is kept
 separate from MCP tool discovery.
+
+The current official `tunnel-client` v0.0.13 was also inspected from its published macOS arm64
+release. Its real `init` command accepted the exact Cotal loopback target
+`http://127.0.0.1:8811/mcp`, materialized the DCR-capable HTTP profile, and retained the control-plane
+key only as `env:CONTROL_PLANE_API_KEY`. This was a disposable, placeholder-ID parser check; no
+control-plane credential or tunnel was configured, so it deliberately did not claim `doctor`, daemon,
+or ChatGPT Developer Mode acceptance.
 
 ## Out of scope
 
