@@ -2,4 +2,4 @@
 
 | Plan | Status | Updated | Notes |
 | --- | --- | --- | --- |
-| [Operator MCP gateway](operator-mcp-gateway.md) | in progress | 2026-08-27 | PRs 1–6 are implemented and locally validated, including a credential-gated real Codex turn through the packed gateway and a fresh Codex native-skill load. ChatGPT tunnel/Desktop acceptance remains the operator-run final host receipt. |
+| [Operator MCP gateway](operator-mcp-gateway.md) | blocked externally | 2026-08-27 | All local PRs and real MCP/Codex validations are complete. The remaining proof needs a target-workspace tunnel ID, runtime key, healthy tunnel-client daemon, and a real ChatGPT Developer Mode conversation; it cannot be inferred from local protocol tests. |

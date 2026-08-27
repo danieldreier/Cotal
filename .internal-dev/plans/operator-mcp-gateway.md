@@ -1,6 +1,6 @@
 # Operator MCP gateway
 
-Status: in progress
+Status: blocked externally (ChatGPT tunnel/Desktop receipt)
 
 ## Goal
 
@@ -132,6 +132,23 @@ release. Its real `init` command accepted the exact Cotal loopback target
 key only as `env:CONTROL_PLANE_API_KEY`. This was a disposable, placeholder-ID parser check; no
 control-plane credential or tunnel was configured, so it deliberately did not claim `doctor`, daemon,
 or ChatGPT Developer Mode acceptance.
+
+## Completion audit — 2026-08-27
+
+| Objective requirement | Current direct evidence | Verdict |
+| --- | --- | --- |
+| Shared Cotal MCP surface mirrors existing connectors | `createCotalMcpServer` registers existing `cotalToolSpecs` plus context/inbox resources; `@cotal-ai/mcp` only supplies identity/session and transport policy. | Proven locally. |
+| Trusted multi-identity Cotal access | Gateway provisions from one persona envelope, returns opaque handles, and rejects ambiguous actor selection. Real open and static mesh cells prove separate actors, writes, peeks, and retirement. | Proven locally. |
+| Helpful unfamiliar-host flow and skill discovery | Real raw stdio initialize smoke proves JSON-RPC-only stdout and guidance to open an identity, orient, and use `$cotal-mesh` when supported. A fresh authenticated Codex 0.149.1 session loaded the installed native skill without MCP configuration. | Proven locally. |
+| Useful live context and message notice without a polling loop | `cotal://context` is typed live orientation; `cotal://inbox` is forced peek. Real SDK subscription smoke receives `notifications/resources/updated` after a witness DM, and repeated reads preserve the message. Notifications are explicitly advisory, not wake/ack authority. | Proven at MCP protocol level; host wake is intentionally not claimed. |
+| Real end-to-end MCP driver and shipped artifact | `smoke:mcp-gateway`, `smoke:mcp-http`, and installed tarball open/static cells use real `nats-server`, SDK transports, and witnesses. Credential-gated `smoke:mcp-gateway-codex-live` passed with a real authenticated Codex action through the packed binary. | Proven locally. |
+| ChatGPT Desktop can reach the local mesh | Loopback Streamable HTTP, exact Host/session bounds, and a real `tunnel-client` v0.0.13 profile parser are proven. No tunnel ID, runtime control-plane key, or ChatGPT Developer Mode UI session is configured here. | **Not proven; external acceptance remains.** |
+| Clean review series | Focused local review refs exist for core, provisioning, gateway, HTTP, skill, and full validation; integration is clean at `review/operator-mcp-validation`. | Ready for human review locally. |
+
+The last row that could make this plan complete is deliberately not inferred from protocol, inspector,
+or Codex tests. It requires a tunnel associated with the target ChatGPT workspace, its runtime key,
+a healthy `tunnel-client` daemon, and a Developer Mode conversation recording the documented
+tool-discovery/nonce/failure-recovery receipt.
 
 ## Out of scope
 
