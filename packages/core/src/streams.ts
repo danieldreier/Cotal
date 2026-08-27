@@ -727,10 +727,12 @@ export async function deprovisionAgent(opts: {
   targetId: string;
   lifecycleUid: string;
   creds?: string;
+  /** The target's resolved transport policy. Never infer or downgrade it for a credentialed teardown. */
+  tls: boolean;
 }): Promise<void> {
   const nc = await connect({
     servers: opts.servers,
-    ...standaloneConnectOpts({ creds: opts.creds, /* not yet wired to a recorded transport - see broker-policy/MeshEntry work */ tls: false }),
+    ...standaloneConnectOpts({ creds: opts.creds, tls: opts.tls }),
     // This is a detached, fire-and-forget teardown — it must FAIL FAST, never hang, so the caller's
     // fail-loud `.catch` is load-bearing: no reconnect loop (a wedged broker rejects promptly instead of
     // looping silently) and a bounded initial connect. Without this a broker-down deprovision would sit

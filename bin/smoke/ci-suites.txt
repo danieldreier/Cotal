@@ -546,3 +546,4 @@ smoke:jcode-private-lifecycle
 smoke:hook-load-emitter-race
 smoke:spawn-name-actor
 smoke:mcp-server
+smoke:standalone-agent

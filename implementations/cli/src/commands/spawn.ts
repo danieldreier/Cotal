@@ -567,7 +567,7 @@ export async function spawn(args: ParsedArgs): Promise<void> {
     console.error(`  ↩ retired creds for ${name} (${why})`);
     try {
       const dc = await mintCreds(auth, newIdentity(), "deprovisioner", { deprovisionTarget: { principal: id, lifecycleUid } });
-      await deprovisionAgent({ servers: server, space, targetId: id, lifecycleUid, creds: dc });
+      await deprovisionAgent({ servers: server, space, targetId: id, lifecycleUid, creds: dc, tls: target.tlsRequired });
     } catch (e) {
       console.error(`! retire: broker teardown for ${name} failed: ${(e as Error).message}`);
     }
@@ -930,7 +930,7 @@ async function provisionUserForeground(
         rmSync(healthPath, { force: true });
         const targetId = principalKey(owner, name).key;
         await mintCreds(infra, newIdentity(), "deprovisioner", { deprovisionTarget: { principal: targetId, lifecycleUid: opts.lifecycleUid } })
-          .then((creds) => deprovisionAgent({ servers: server, space, targetId, lifecycleUid: opts.lifecycleUid, creds }))
+          .then((creds) => deprovisionAgent({ servers: server, space, targetId, lifecycleUid: opts.lifecycleUid, creds, tls: target.tlsRequired }))
           .catch((err) => console.error(c.red(`✗ retiring ${name}'s broker footprint: ${(err as Error).message}`)));
       },
     };
@@ -945,7 +945,7 @@ async function provisionUserForeground(
     rmSync(healthPath, { force: true });
     const targetId = principalKey(owner, name).key;
     await mintCreds(infra, newIdentity(), "deprovisioner", { deprovisionTarget: { principal: targetId, lifecycleUid: opts.lifecycleUid } })
-      .then((creds) => deprovisionAgent({ servers: server, space, targetId, lifecycleUid: opts.lifecycleUid, creds }))
+      .then((creds) => deprovisionAgent({ servers: server, space, targetId, lifecycleUid: opts.lifecycleUid, creds, tls: target.tlsRequired }))
       .catch((err) => console.error(c.red(`✗ rollback deprovision ${name}: ${(err as Error).message}`)));
     return fail(`agent auth preflight failed for "${name}": ${(e as Error).message}`);
   }

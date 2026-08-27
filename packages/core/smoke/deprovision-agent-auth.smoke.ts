@@ -148,7 +148,7 @@ try {
 
   // ---- deprovision with a TARGET-PINNED cred (what the manager mints on the agent's exit) ----
   const dpvCreds = await mintCreds(auth, newIdentity(), "deprovisioner", { deprovisionTarget: { principal: agent.id, lifecycleUid: uidA } });
-  await deprovisionAgent({ servers: SERVERS, space, targetId: agent.id, lifecycleUid: uidA, creds: dpvCreds });
+  await deprovisionAgent({ servers: SERVERS, space, targetId: agent.id, lifecycleUid: uidA, creds: dpvCreds, tls: false });
 
   console.log("after deprovisionAgent — the lifecycle A footprint is gone; the role-shared durable survives:");
   check("dm_local-<id>-<uidA> durable GONE", !(await consumerExists(provCreds, provId.id, DM, dmDurable(DEV_OWNER, agent.id, uidA))));
@@ -159,7 +159,7 @@ try {
   // ---- idempotent: a second teardown (missing consumers / absent ACL row) must not throw ----
   let threw = false;
   try {
-    await deprovisionAgent({ servers: SERVERS, space, targetId: agent.id, lifecycleUid: uidA, creds: dpvCreds });
+    await deprovisionAgent({ servers: SERVERS, space, targetId: agent.id, lifecycleUid: uidA, creds: dpvCreds, tls: false });
   } catch (e) {
     threw = true;
     console.error("  ! second deprovision threw:", (e as Error).message);
@@ -200,7 +200,7 @@ try {
   // It must be a harmless no-op against A's already-gone names and CANNOT resolve to B's.
   let replayThrew = false;
   try {
-    await deprovisionAgent({ servers: SERVERS, space, targetId: agent.id, lifecycleUid: uidA, creds: dpvCreds });
+    await deprovisionAgent({ servers: SERVERS, space, targetId: agent.id, lifecycleUid: uidA, creds: dpvCreds, tls: false });
   } catch { replayThrew = true; }
   check("replayed retired-lifecycle teardown is a no-op (never resolves to the successor)", !replayThrew);
   check("successor dm durable SURVIVES the replayed teardown", await consumerExists(provCreds, provId.id, DM, dmDurable(DEV_OWNER, agent.id, uidB)));
@@ -212,7 +212,7 @@ try {
   // loud error, never a delete) and B's footprint is intact.
   let wrongUidOutcome = "completed";
   try {
-    await deprovisionAgent({ servers: SERVERS, space, targetId: agent.id, lifecycleUid: uidB, creds: dpvCreds });
+    await deprovisionAgent({ servers: SERVERS, space, targetId: agent.id, lifecycleUid: uidB, creds: dpvCreds, tls: false });
   } catch { wrongUidOutcome = "threw"; }
   check("A's teardown cred aimed at B's names is broker-DENIED (threw, never deleted)", wrongUidOutcome === "threw", { wrongUidOutcome });
   check("successor dm durable INTACT after the denied wrong-uid attempt", await consumerExists(provCreds, provId.id, DM, dmDurable(DEV_OWNER, agent.id, uidB)));

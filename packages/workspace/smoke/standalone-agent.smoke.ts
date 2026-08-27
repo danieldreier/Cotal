@@ -69,6 +69,20 @@ async function waitForBroker(server: string): Promise<void> {
   throw new Error(`broker did not come up at ${server}`);
 }
 
+async function received(endpoint: CotalEndpoint, timeoutMs = 1_000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      endpoint.off("message", onMessage);
+      resolve(false);
+    }, timeoutMs);
+    const onMessage = (): void => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    endpoint.once("message", onMessage);
+  });
+}
+
 function persona(root: string, name: string, channel = "general"): void {
   mkdirSync(join(root, ".cotal", "agents"), { recursive: true });
   writeFileSync(
@@ -98,18 +112,56 @@ try {
     const resolved = resolveStandaloneAgent({ cwd: elsewhere, targetFlags: { space: "standalone-open" }, persona: "open-gateway" });
     check("open resolution uses the selected target persona root", resolved.persona.path === join(root, ".cotal", "agents", "open-gateway.md"), resolved);
     const prepared = await prepareStandaloneAgent({ resolved });
-    check("open preparation is lazy and has no static identity material", prepared.id === undefined && prepared.creds === undefined && prepared.lifecycleUid === undefined, prepared);
+    check("open preparation mints one caller-owned lifecycle identity without credentials", !!prepared.id && !!prepared.lifecycleUid && prepared.creds === undefined, prepared);
     const endpoint = new CotalEndpoint({
       space: prepared.target.space,
       servers: prepared.target.server,
+      lifecycleUid: prepared.lifecycleUid,
       channels: prepared.subscribe,
-      card: { name: prepared.name, role: prepared.role, kind: prepared.kind },
+      card: { id: prepared.id, name: prepared.name, role: prepared.role, kind: prepared.kind },
     });
     endpoint.on("error", () => {});
     await endpoint.start();
     await endpoint.stop();
+
+    // A stopped endpoint leaves its lifecycle durable for reconnection. Send a witness DM while it is
+    // stopped, then bind the SAME lifecycle: receipt proves the known lifecycle durable exists.
+    const witness = new CotalEndpoint({
+      space: prepared.target.space,
+      servers: prepared.target.server,
+      consume: false,
+      card: { name: "open-witness", kind: "endpoint" },
+    });
+    witness.on("error", () => {});
+    await witness.start();
+    await witness.unicast(endpoint.card.id, "open lifecycle witness");
+    await witness.stop();
+    const existing = new CotalEndpoint({
+      space: prepared.target.space,
+      servers: prepared.target.server,
+      lifecycleUid: prepared.lifecycleUid,
+      channels: prepared.subscribe,
+      card: { id: prepared.id, name: prepared.name, role: prepared.role, kind: prepared.kind },
+    });
+    existing.on("error", () => {});
+    const deliveredFromExistingLifecycle = received(existing);
+    await existing.start();
+    check("open endpoint binds the prepared lifecycle's real DM durable", await deliveredFromExistingLifecycle);
+    await existing.stop();
     await prepared.retire();
-    check("open preparation and retirement complete without a broker-managed footprint", true);
+    await prepared.retire();
+    const fresh = new CotalEndpoint({
+      space: prepared.target.space,
+      servers: prepared.target.server,
+      lifecycleUid: prepared.lifecycleUid,
+      channels: prepared.subscribe,
+      card: { id: prepared.id, name: prepared.name, role: prepared.role, kind: prepared.kind },
+    });
+    fresh.on("error", () => {});
+    const deliveredAfterRetirement = received(fresh);
+    await fresh.start();
+    check("open retirement deletes exactly the prepared lifecycle's DM durable", !(await deliveredAfterRetirement));
+    await fresh.stop();
   }
 
   // STATIC: provision a real lifecycle, bind it as an endpoint, then prove retirement removes exactly
@@ -179,8 +231,8 @@ try {
     check("retirement removes exactly this lifecycle's DM durable", !rebound);
   }
 
-  // The workspace package has no composition-root argv for an auth-provider command. Refuse the two
-  // user-mode cases that cannot be generalized, instead of guessing an executable or remote contract.
+  // User auth's actor-grant ownership cannot safely be shared by arbitrary logical identities yet.
+  // Refuse every user target in v1 instead of guessing a bearer-provider contract or rotating a grant.
   {
     const root = mkdtempSync(join(tmpdir(), "cotal-standalone-user-root-"));
     roots.push(root);
@@ -200,15 +252,9 @@ try {
     });
     await assert.rejects(
       () => prepareStandaloneAgent({ resolved }),
-      /remote user-auth target .* is not supported/,
+      /user-auth target .* is not supported by the standalone MCP gateway yet/,
     );
-    check("remote user-auth refuses rather than guessing the CLI-only material contract", true);
-    const local = { ...resolved, target: { ...resolved.target, userAuth: { remote: false } as never } };
-    await assert.rejects(
-      () => prepareStandaloneAgent({ resolved: local }),
-      /requires userAuth\.bearerCommand/,
-    );
-    check("local user-auth requires an explicit composition-root bearer command", true);
+    check("user-auth refuses before any identity or grant can be created", true);
   }
 } catch (error) {
   fail++;
