@@ -20,7 +20,7 @@ import { CLI_USER_ACTOR, accountInventory, authDir, extensionsDir, findCotalRoot
 import { connect } from "@nats-io/transport-node";
 import { localProcessSurface } from "../ext-loader.js";
 import { cliVersion, extensionVersions } from "../lib/version.js";
-import { agentSkillsSkew } from "../lib/agent-skills.js";
+import { agentSkillsSkew, codexSkillsSkew } from "../lib/agent-skills.js";
 import { managerHasDeliveryMarker } from "../lib/manager-proc.js";
 import { machineStatus, resolveSpace, webUp, WEB_URL, type MachineStatus } from "../lib/status.js";
 import { pidfileState, type PidfileState } from "./down.js";
@@ -69,14 +69,15 @@ function printExtensions(): void {
   for (const e of exts) row(e.label, c.green(`v${e.version}`) + (e.pkg === e.label ? "" : c.dim(` · ${e.pkg}`)));
 }
 
-/** Cotal's authored skills reach non-Claude harnesses through the cross-vendor `~/.agents/skills`
- *  directory (Codex, Cursor, OpenCode, Gemini CLI, Windsurf). Those harnesses have no remote update, so
- *  surface a stale/missing/retired drop here and point at the fix (`cotal setup` or `cotal update` reconciles it). A corrupt
- *  skills bundle throws (fail-loud); we render that as a red integrity error rather than "none shipped". */
-function skillsSkewRow(): string {
+/** Cotal's authored skills reach Cursor, OpenCode, Gemini CLI, and Windsurf through cross-vendor
+ *  `~/.agents/skills`, and Codex through its native `~/.codex/skills`. Those harnesses have no remote
+ *  update, so surface a stale/missing/retired drop here and point at the fix (`cotal setup` or
+ *  `cotal update` reconciles it). A corrupt skills bundle throws (fail-loud); we render that as a red
+ *  integrity error rather than "none shipped". */
+function skillsSkewRow(skewFor = agentSkillsSkew): string {
   let skew;
   try {
-    skew = agentSkillsSkew();
+    skew = skewFor();
   } catch (e) {
     return c.red(`bundle error: ${(e as Error).message}`);
   }
@@ -118,6 +119,7 @@ async function printMachine(): Promise<void> {
   row("Claude", m.agents.claude ? c.green("on PATH") : c.dim("not on PATH"));
   row("OpenCode", m.agents.opencode ? c.green("on PATH") : c.dim("not on PATH"));
   row("Skills (.agents)", skillsSkewRow());
+  row("Skills (Codex)", skillsSkewRow(codexSkillsSkew));
   row("Web extension", webExt ? c.green("installed") : c.dim("not installed"));
   row("Web process", web ? c.green(WEB_URL) : c.dim(webExt ? "down" : "not installed"));
 }

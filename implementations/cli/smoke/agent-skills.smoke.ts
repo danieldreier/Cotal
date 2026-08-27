@@ -1,35 +1,38 @@
 /**
- * Smoke for the cross-vendor `~/.agents/skills` reconcile (lib/agent-skills.ts). Exercises the
- * destructive/adversarial paths in throwaway HOME/COTAL_HOME dirs: fresh install, ownership-aware
- * backup (including a SECOND edit), file-level retirement that spares a user's files and empties, the
- * skew states, the symlink-escape guard (incl. a nested SKILL.md symlink), the hard-linked-SKILL.md
- * clobber guard, fresh-slot backups that never destroy a pre-existing/foreign `.bak`, the manifest-temp
- * symlink-clobber guard, and manifest integrity (traversal-key rejection, array-shape rejection,
- * corrupt-JSON fail-loud). Run: pnpm smoke:agent-skills
+ * Smoke for the cross-vendor `~/.agents/skills` and Codex-native `~/.codex/skills` reconciles
+ * (lib/agent-skills.ts). Exercises the destructive/adversarial paths in throwaway HOME/COTAL_HOME
+ * dirs: fresh install, ownership-aware backup (including a SECOND edit), file-level retirement that
+ * spares a user's files and empties, the skew states, the symlink-escape guard (incl. a nested
+ * SKILL.md symlink), the hard-linked-SKILL.md clobber guard, fresh-slot backups that never destroy a
+ * pre-existing/foreign `.bak`, the manifest-temp symlink-clobber guard, and manifest integrity
+ * (traversal-key rejection, array-shape rejection, corrupt-JSON fail-loud). Run: pnpm smoke:agent-skills
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const sha = (b: Buffer | string) => "sha256:" + createHash("sha256").update(b).digest("hex");
 const created: string[] = [];
+const originalCodexHome = process.env.CODEX_HOME;
 
-/** Point HOME + COTAL_HOME at fresh throwaway dirs so each block starts with an empty ~/.agents and an
- *  empty ownership manifest. The lib reads homedir()/COTAL_HOME at call time, so this rebinds cleanly. */
+/** Point HOME + COTAL_HOME at fresh throwaway dirs so each block starts with empty cross-vendor and
+ *  Codex skill roots plus an empty ownership manifest. The lib reads homedir()/COTAL_HOME at call time,
+ *  so this rebinds cleanly. */
 function freshEnv() {
   const home = mkdtempSync(join(tmpdir(), "cs-home-"));
   const cotalHome = mkdtempSync(join(tmpdir(), "cs-cotal-"));
   created.push(home, cotalHome);
   process.env.HOME = home;
   process.env.USERPROFILE = home; // win32 homedir()
+  process.env.CODEX_HOME = join(home, ".codex");
   process.env.COTAL_HOME = cotalHome;
   return { home, cotalHome, manifest: join(cotalHome, "agent-skills.json") };
 }
 
 const lib = await import("../src/lib/agent-skills.js");
-const { agentSkillsHome, canonicalSkillsDir, canonicalSkillNames, installAgentSkills, agentSkillsSkew } = lib;
+const { agentSkillsHome, canonicalSkillsDir, canonicalSkillNames, codexSkillsHome, codexSkillsSkew, installAgentSkills, agentSkillsSkew } = lib;
 
 try {
   const canon = canonicalSkillsDir();
@@ -42,12 +45,15 @@ try {
   const name = names[0]; // cotal-mesh: exercise installation and safety with the mesh skill itself
   const canonicalBytes = readFileSync(join(canon, name, "SKILL.md"));
   const stateOf = (n: string) => agentSkillsSkew().find((s) => s.name === n)?.state;
+  const codexStateOf = (n: string) => codexSkillsSkew().find((s) => s.name === n)?.state;
 
   // --- Block 1: install / backup / retirement / skew -----------------------------------------------
   {
     const { manifest } = freshEnv();
     const skillsHome = agentSkillsHome();
     const destFile = join(skillsHome, name, "SKILL.md");
+    const codexDestFile = join(codexSkillsHome(), name, "SKILL.md");
+    const codexInterface = join(codexSkillsHome(), name, "agents", "openai.yaml");
     const bak = `${destFile}.bak`;
     const readManifest = () => JSON.parse(readFileSync(manifest, "utf8")) as { skills: Record<string, string> };
     const writeManifest = (m: { skills: Record<string, string> }) => writeFileSync(manifest, JSON.stringify(m));
@@ -63,8 +69,13 @@ try {
     assert.equal(stateOf(name), "missing");
     let r = installAgentSkills();
     assert.deepEqual([r.installed, r.backedUp, r.removed], [names, [], []]);
+    assert.deepEqual([r.codexInstalled, r.codexBackedUp, r.codexRemoved], [names, [], []]);
+    assert.deepEqual([r.codexInterfacesInstalled, r.codexInterfacesBackedUp, r.codexInterfacesRemoved], [["cotal-mesh"], [], []]);
     assert.equal(stateOf(name), "current");
+    assert.equal(codexStateOf(name), "current");
     assert.ok(readFileSync(destFile).equals(canonicalBytes));
+    assert.ok(readFileSync(codexDestFile).equals(canonicalBytes), "Codex gets its native skill root");
+    assert.match(readFileSync(codexInterface, "utf8"), /allow_implicit_invocation: true/, "Codex gets Cotal's native skill metadata");
 
     // first user edit -> backed up to a fresh `.bak`
     writeFileSync(destFile, "EDIT-A");
@@ -127,6 +138,30 @@ try {
     }
     assert.throws(() => installAgentSkills(), /symlink/, `must refuse a symlinked ${kind}`);
     if (kind === "file") assert.equal(readFileSync(join(outside, "victim.txt"), "utf8"), "OUTSIDE DATA", "outside file not clobbered");
+    rmSync(outside, { recursive: true, force: true });
+  }
+
+  // Codex's native root receives the same redirected-ancestor defense as the cross-vendor root.
+  {
+    const { home } = freshEnv();
+    const outside = mkdtempSync(join(tmpdir(), "cs-outside-"));
+    created.push(outside);
+    symlinkSync(outside, join(home, ".codex"));
+    assert.throws(() => installAgentSkills(), /symlink/, "must refuse a symlinked Codex skill ancestor");
+    assert.equal(readdirSync(outside).length, 0, "Codex symlink target untouched");
+    rmSync(outside, { recursive: true, force: true });
+  }
+
+  // The optional Codex interface file is guarded independently; a redirected `agents/` directory
+  // cannot make setup write outside the native skill root.
+  {
+    const { home } = freshEnv();
+    const outside = mkdtempSync(join(tmpdir(), "cs-outside-"));
+    created.push(outside);
+    mkdirSync(join(home, ".codex", "skills", "cotal-mesh"), { recursive: true });
+    symlinkSync(outside, join(home, ".codex", "skills", "cotal-mesh", "agents"));
+    assert.throws(() => installAgentSkills(), /symlink/, "must refuse a symlinked Codex interface directory");
+    assert.equal(readdirSync(outside).length, 0, "Codex interface symlink target untouched");
     rmSync(outside, { recursive: true, force: true });
   }
 
@@ -213,4 +248,6 @@ try {
   console.log("agent-skills.smoke: all assertions passed");
 } finally {
   for (const d of created) rmSync(d, { recursive: true, force: true });
+  if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = originalCodexHome;
 }

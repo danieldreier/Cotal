@@ -37,15 +37,16 @@ on two channels:
   is stamped from the running CLI release, so an upgrade + `cotal setup` runs `claude plugin update` and
   the deployed install actually gets the new skill. `cotal setup` installs it on first run and on repeat
   runs, so upgraders are not left behind.
-- **Every other harness** (Codex, Cursor, OpenCode, Gemini CLI, Windsurf/Devin) reads the cross-vendor
-  `~/.agents/skills/` directory convention, which has no remote index, so `cotal setup` **reconciles** it:
+- **Codex** reads its native `~/.codex/skills/` directory (or `$CODEX_HOME/skills`); **Cursor, OpenCode,
+  Gemini CLI, and Windsurf/Devin** read the cross-vendor `~/.agents/skills/` convention. These roots
+  have no remote index, so `cotal setup` **reconciles** both:
   it installs/updates each Cotal skill, backs up a copy you have edited to `SKILL.md.bak` before
   replacing it, and removes a Cotal skill that is no longer shipped. Only skills Cotal owns are touched;
   your own or third-party skills there are left alone. `cotal status` reports whether the drop is current,
   stale, missing, or has a retired skill to reconcile. This is the working cross-vendor path.
 
-`cotal update` also reconciles the cross-vendor drop after refreshing the bundled first-party
-surfaces. This keeps an installed Codex session from seeing an older skill until a later setup run.
+`cotal update` also reconciles both local drops after refreshing the bundled first-party surfaces.
+This keeps an installed Codex session from seeing an older skill until a later setup run.
 The Claude skills plugin is refreshed by first-run or repeat `cotal setup`, which runs its
 release-derived plugin update path.
 

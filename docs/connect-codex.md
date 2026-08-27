@@ -24,8 +24,9 @@ adapter, which appears there only because Codex reads the same plugin-marketplac
 not this connector and installing it does not connect Codex to a mesh. Codex needs nothing
 installed on its side: the connector drives it from the outside, over `codex app-server`.
 
-Codex's Cotal workflow guidance is a separate cross-vendor Agent Skill, `cotal-mesh`, installed by
-`cotal setup` at `~/.agents/skills/cotal-mesh/SKILL.md`. It explains how to orient and verify live
+Cotal's Codex workflow guidance is a separate Agent Skill, `cotal-mesh`, installed by
+`cotal setup` at `~/.codex/skills/cotal-mesh/SKILL.md` (or `$CODEX_HOME/skills/cotal-mesh/SKILL.md`
+when you set `CODEX_HOME`). It explains how to orient and verify live
 mesh state; the `cotal_*` MCP tools remain the authority for state and side effects. A fresh-session
 skill load is distinct from MCP `tools/list` discovery.
 

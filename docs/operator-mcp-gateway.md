@@ -27,6 +27,19 @@ Start with `cotal_identity_open`. It returns an opaque handle. `cotal_identity_l
 
 The gateway writes JSON-RPC only to stdout. Its stderr diagnostics are not MCP messages.
 
+`cotal setup` also installs the `cotal-mesh` Agent Skill into Codex's native
+`$CODEX_HOME/skills/cotal-mesh` directory (normally `~/.codex/skills/cotal-mesh`). In a Cotal task,
+tell a new Codex session to use `$cotal-mesh`; it teaches the model to orient before acting and to
+distinguish live MCP state from static guidance. Skill availability does not imply a mesh connection;
+the MCP tools remain the source of truth.
+
+For the credential-gated Codex acceptance on a macOS host where the Codex CLI reports
+`UnknownIssuer`, use the verified system bundle rather than disabling TLS verification:
+
+```bash
+SSL_CERT_FILE=/etc/ssl/cert.pem COTAL_E2E_CODEX=1 pnpm smoke:mcp-gateway-codex-live
+```
+
 ## ChatGPT Desktop through Secure MCP Tunnel
 
 ChatGPT cannot attach to a local stdio process directly. For the ChatGPT Desktop product, run the separate HTTP transport on an explicit loopback port:

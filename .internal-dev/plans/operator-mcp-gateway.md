@@ -59,8 +59,9 @@ and open-world effects.
      unpacked extension artifact through the installed CLI, and run open/static real-mesh round trips.
    - Isolate HOME, XDG_CONFIG_HOME, COTAL_HOME, and npm cache so this path cannot inherit an
      operator's Cotal state, credentials, or source checkout.
-4. Skill and docs
-   - Ship the canonical `cotal-mesh` Agent Skill through the existing cross-vendor skill installer.
+5. Skill and docs
+   - Ship the canonical `cotal-mesh` Agent Skill through both the cross-vendor installer and Codex's
+     native `$CODEX_HOME/skills` root, including the Codex interface metadata.
    - Keep skill-discovery proof separate from MCP tool-discovery proof.
    - Document the short Codex setup and the explicit Secure MCP Tunnel + ChatGPT Developer Mode flow.
 
@@ -117,6 +118,12 @@ opened an identity, called orientation and send, and a separate real Cotal witne
 The local Codex runtime needs the existing verified system CA bundle supplied as
 `SSL_CERT_FILE=/etc/ssl/cert.pem`; this selects normal certificate verification rather than disabling
 or altering trust. The test never copies or reads the Codex authentication file.
+
+The separate fresh-host skill proof also passed: a sandboxed `cotal setup` installed `cotal-mesh` into
+both local roots with Codex metadata, and an authenticated Codex 0.149.1 session with no MCP
+configuration explicitly selected `$cotal-mesh`, read the native installed skill, and returned its
+discovery marker. The skill proof uses a disposable home/project and no Cotal connection; it is kept
+separate from MCP tool discovery.
 
 ## Out of scope
 
