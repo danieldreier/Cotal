@@ -1,6 +1,6 @@
 # Operator MCP gateway
 
-Status: planned
+Status: in progress
 
 ## Goal
 
