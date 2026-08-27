@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,6 +47,7 @@ function packageName(tarball: string): string {
 
 if (spawnSync("nats-server", ["-v"], { stdio: "ignore" }).error) { console.error("installed MCP smoke needs nats-server on PATH"); process.exit(2); }
 const { authDir, prepareStandaloneAgent, recordMesh, resolveStandaloneAgent, saveSpaceAuth } = await import("@cotal-ai/workspace");
+const runRealCodex = /^(1|true|yes|on)$/i.test(process.env.COTAL_E2E_CODEX ?? "");
 const base = mkdtempSync(join(tmpdir(), "cotal-mcp-tarball-"));
 const tarballsDir = join(base, "tarballs"); const prefix = join(base, "prefix");
 const mcpPayload = join(base, "mcp-payload");
@@ -175,9 +176,84 @@ try {
     }
   }
 
+  /** Credential-gated host acceptance. The Cotal side is still the installed
+   * tarball product; source imports below only create the real broker witness. */
+  async function codexCell(): Promise<void> {
+    const codex = process.env.COTAL_CODEX_BIN ?? "codex";
+    const probe = spawnSync(codex, ["--version"], { encoding: "utf8" });
+    if (probe.status !== 0) throw new Error(`real Codex acceptance requires an executable codex CLI: ${probe.stderr || probe.error?.message || "not found"}`);
+    const authSource = process.env.COTAL_E2E_CODEX_AUTH ?? join(process.env.HOME ?? "", ".codex", "auth.json");
+    if (!existsSync(authSource)) throw new Error(`real Codex acceptance needs auth at ${authSource}; set COTAL_E2E_CODEX_AUTH to use a different existing file`);
+
+    const root = join(base, "project-codex"); const home = join(base, "home-codex"); const configHome = join(base, "config-codex");
+    const cotalHome = join(base, "cotal-home-codex"); const codexHome = join(home, ".codex");
+    for (const dir of [root, home, configHome, cotalHome, codexHome]) mkdirSync(dir, { recursive: true });
+    // Do not copy, inspect, or print the operator credential. Codex reads this
+    // one transient link exactly as it does in its normal local login flow.
+    symlinkSync(authSource, join(codexHome, "auth.json"));
+    const originalCwd = process.cwd(); const priorCotalHome = process.env.COTAL_HOME;
+    const port = await freePort(); const server = `nats://127.0.0.1:${port}`; const space = `installed-mcp-codex-${process.pid}`;
+    const nonce = `cotal-codex-mcp-${process.pid}-${Date.now()}`;
+    let broker: ChildProcess | undefined; let peer: CotalEndpoint | undefined;
+    try {
+      persona(root); process.env.COTAL_HOME = cotalHome; process.chdir(root);
+      broker = spawn("nats-server", ["-js", "-a", "127.0.0.1", "-p", String(port), "-sd", join(root, "js")], { stdio: "ignore" });
+      await reachable(server);
+      await setupSpaceStreams({ servers: server, space });
+      recordMesh({ space, server, root, mode: "open", tlsRequired: false, ts: new Date().toISOString() });
+      let witnessed = false;
+      peer = new CotalEndpoint({ space, servers: server, channels: ["general"], card: { id: "codex_witness", name: "codex-witness", role: "witness", kind: "agent" } });
+      peer.on("error", () => {});
+      peer.on("message", (message: { parts: Array<{ kind: string; text?: string }> }, delivery: { ack(): void }) => {
+        if (message.parts.some((part) => part.kind === "text" && part.text === nonce)) witnessed = true;
+        delivery.ack();
+      });
+      await peer.start();
+
+      const cleanEnv: NodeJS.ProcessEnv = { ...process.env };
+      for (const key of Object.keys(cleanEnv)) if (key.startsWith("COTAL_")) delete cleanEnv[key];
+      const productBin = join(prefix, "node_modules", ".bin");
+      const env: NodeJS.ProcessEnv = {
+        ...cleanEnv, HOME: home, USERPROFILE: home, CODEX_HOME: codexHome, XDG_CONFIG_HOME: configHome, COTAL_HOME: cotalHome,
+        PATH: `${productBin}:${cleanEnv.PATH ?? ""}`,
+      };
+      const added = spawnSync(process.execPath, [installedCotal, "ext", "add", mcpPayload], { cwd: root, env, encoding: "utf8" });
+      check("real Codex lane installs the packed MCP extension with the installed cotal binary", added.status === 0, `${added.stdout}\n${added.stderr}`);
+      const registered = spawnSync(codex, ["mcp", "add", "cotal-e2e", "--", "cotal", "mcp", "--space", space, "--config", "gateway"], { cwd: root, env, encoding: "utf8" });
+      check("real Codex records the installed stdio command without source paths", registered.status === 0, `${registered.stdout}\n${registered.stderr}`);
+      const listed = spawnSync(codex, ["mcp", "list", "--json"], { cwd: root, env, encoding: "utf8" });
+      const listing = listed.stdout ?? "";
+      check("real Codex discoverability records the exact cotal MCP command and arguments", listed.status === 0 && listing.includes("cotal-e2e") && listing.includes("cotal") && listing.includes("gateway") && listing.includes(space), listing);
+
+      const last = join(base, "codex-last-message.txt");
+      const prompt = [
+        "Validate the configured Cotal MCP server without using shell tools.",
+        "Call cotal_identity_open with key codex-live, then call cotal_orientation.",
+        `Then call cotal_send to channel general with text exactly ${nonce}.`,
+        "Wait for each tool result. When all three calls have succeeded, reply with exactly COTAL_E2E_DONE.",
+      ].join(" ");
+      const run = spawnSync(codex, ["exec", "--ephemeral", "--json", "--sandbox", "read-only", "--skip-git-repo-check", "--cd", root, "-o", last, prompt], {
+        cwd: root, env, encoding: "utf8", timeout: 120_000, maxBuffer: 16 * 1024 * 1024,
+      });
+      const events = `${run.stdout ?? ""}\n${run.stderr ?? ""}`;
+      if (run.error) throw new Error(`real Codex turn did not complete: ${run.error.message}\n${events.slice(-2_000)}`);
+      const answer = existsSync(last) ? readFileSync(last, "utf8") : "";
+      check("a real authenticated Codex turn calls the Cotal identity, orientation, and send tools", run.status === 0 && /cotal_identity_open/.test(events) && /cotal_orientation/.test(events) && /cotal_send/.test(events) && /COTAL_E2E_DONE/.test(answer), events.slice(-2_000));
+      await waitFor("real Codex mesh nonce", () => witnessed, 30_000);
+      check("the real mesh witness received the nonce from the real Codex MCP tool call", witnessed);
+    } finally {
+      await peer?.stop().catch(() => {});
+      broker?.kill("SIGTERM");
+      if (broker) await Promise.race([once(broker, "exit"), sleep(5_000)]);
+      process.chdir(originalCwd);
+      if (priorCotalHome === undefined) delete process.env.COTAL_HOME; else process.env.COTAL_HOME = priorCotalHome;
+    }
+  }
+
   await cell("open");
   await cell("static");
-  check("every installed open/static MCP cell completed", passed === 24, passed);
+  if (runRealCodex) await codexCell();
+  check("every installed open/static MCP cell completed", passed === (runRealCodex ? 29 : 24), passed);
   console.log("MCP GATEWAY INSTALLED-ARTIFACT SMOKE OK ✅");
 } finally {
   rmSync(base, { recursive: true, force: true });

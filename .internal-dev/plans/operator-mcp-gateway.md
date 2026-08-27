@@ -108,6 +108,15 @@ coordinator after verification.
   review/refresh, orientation, identity creation, real nonce round trips, no idle wake claim, tunnel
   failure/recovery, and redacted receipts.
 
+### Current live-host receipt
+
+On 2026-08-27 the installed-command registration portion of the real Codex acceptance passed under
+an isolated profile. The actual Codex model turn could not start because this workstation's Codex
+runtime rejected the ChatGPT endpoint certificate as `UnknownIssuer`; a minimal no-tool authenticated
+Codex probe failed identically. This is recorded as an external workstation trust-chain blocker, not
+a gateway pass. The test keeps TLS verification intact and reports its final diagnostics after a
+bounded timeout; it should be rerun after the operator repairs the local trust chain.
+
 ## Out of scope
 
 - Public multi-user ChatGPT publication.

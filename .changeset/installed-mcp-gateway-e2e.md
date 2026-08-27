@@ -4,3 +4,5 @@
 ---
 
 Add a published-artifact smoke that packs, installs, and drives the operator MCP gateway against real open and static meshes.
+
+When explicitly credential-gated, it also records the installed stdio command in a fresh Codex profile and requires a real authenticated Codex turn to send a witnessed Cotal message.

@@ -2,4 +2,4 @@
 
 | Plan | Status | Updated | Notes |
 | --- | --- | --- | --- |
-| [Operator MCP gateway](operator-mcp-gateway.md) | in progress | 2026-08-27 | PRs 1–4 (shared surface, lifecycle provisioning, stdio identities, HTTP tunnel adapter) integrated; PR 5 adds the real packed-artifact verification lane. |
+| [Operator MCP gateway](operator-mcp-gateway.md) | in progress | 2026-08-27 | PRs 1–5 integrated; PR 6 adds the credential-gated real Codex lane. Installed command registration passed, while real model execution is externally blocked by the workstation TLS trust chain. |

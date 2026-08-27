@@ -66,6 +66,7 @@
     "smoke:mcp-gateway": "pnpm --filter @cotal-ai/core... build && pnpm --filter @cotal-ai/workspace build && pnpm --filter @cotal-ai/connector-core build && tsx extensions/mcp/smoke/gateway.smoke.ts",
     "smoke:mcp-http": "pnpm --filter @cotal-ai/core... build && pnpm --filter @cotal-ai/workspace build && pnpm --filter @cotal-ai/connector-core build && tsx extensions/mcp/smoke/http.smoke.ts",
     "smoke:mcp-gateway-installed:live": "pnpm --filter cotal-ai... build && pnpm --filter @cotal-ai/mcp build && tsx bin/smoke/mcp-gateway-tarball-live.smoke.ts",
+    "smoke:mcp-gateway-codex-live": "COTAL_E2E_CODEX=1 pnpm smoke:mcp-gateway-installed:live",
     "smoke:docs": "tsx extensions/connector-core/smoke/docs.smoke.ts",
     "smoke:pi": "tsx extensions/pi/pi.smoke.ts && tsx extensions/pi/pi-sdk.smoke.ts",
     "smoke:codex-args": "tsx extensions/connector-codex/smoke/codex-args.smoke.ts",
