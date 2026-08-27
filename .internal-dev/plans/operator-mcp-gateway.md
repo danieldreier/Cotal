@@ -111,12 +111,12 @@ coordinator after verification.
 
 ### Current live-host receipt
 
-On 2026-08-27 the installed-command registration portion of the real Codex acceptance passed under
-an isolated profile. The actual Codex model turn could not start because this workstation's Codex
-runtime rejected the ChatGPT endpoint certificate as `UnknownIssuer`; a minimal no-tool authenticated
-Codex probe failed identically. This is recorded as an external workstation trust-chain blocker, not
-a gateway pass. The test keeps TLS verification intact and reports its final diagnostics after a
-bounded timeout; it should be rerun after the operator repairs the local trust chain.
+On 2026-08-27 the complete installed-artifact Codex acceptance passed under an isolated profile:
+Codex registered the absolute packed gateway command, discovered it during a real authenticated turn,
+opened an identity, called orientation and send, and a separate real Cotal witness received the nonce.
+The local Codex runtime needs the existing verified system CA bundle supplied as
+`SSL_CERT_FILE=/etc/ssl/cert.pem`; this selects normal certificate verification rather than disabling
+or altering trust. The test never copies or reads the Codex authentication file.
 
 ## Out of scope
 

@@ -266,11 +266,23 @@ try {
       };
       const added = spawnSync(process.execPath, [installedCotal, "ext", "add", mcpPayload], { cwd: root, env, encoding: "utf8" });
       check("real Codex lane installs the packed MCP extension with the installed cotal binary", added.status === 0, `${added.stdout}\n${added.stderr}`);
-      const registered = spawnSync(codex, ["mcp", "add", "cotal-e2e", "--", "cotal", "mcp", "--space", space, "--config", "gateway"], { cwd: root, env, encoding: "utf8" });
-      check("real Codex records the installed stdio command without source paths", registered.status === 0, `${registered.stdout}\n${registered.stderr}`);
+      // Codex persists an MCP command independently of the shell that ran
+      // `mcp add`. Spell out the executable and the three non-secret runtime
+      // paths so the server cannot accidentally depend on PATH inheritance or
+      // the test harness's source checkout when the real turn starts.
+      const registered = spawnSync(codex, [
+        "mcp", "add", "cotal-e2e",
+        "--env", `COTAL_HOME=${cotalHome}`,
+        "--env", `XDG_CONFIG_HOME=${configHome}`,
+        "--env", `PATH=${productBin}:${cleanEnv.PATH ?? ""}`,
+        "--", process.execPath, installedCotal, "mcp", "--space", space, "--config", "gateway",
+      ], { cwd: root, env, encoding: "utf8" });
+      check("real Codex records an absolute installed stdio command with only non-secret environment paths", registered.status === 0, `${registered.stdout}\n${registered.stderr}`);
       const listed = spawnSync(codex, ["mcp", "list", "--json"], { cwd: root, env, encoding: "utf8" });
       const listing = listed.stdout ?? "";
-      check("real Codex discoverability records the exact cotal MCP command and arguments", listed.status === 0 && listing.includes("cotal-e2e") && listing.includes("cotal") && listing.includes("gateway") && listing.includes(space), listing);
+      check("real Codex discoverability records the exact installed Cotal MCP arguments", listed.status === 0 && listing.includes("cotal-e2e") && listing.includes(installedCotal) && listing.includes("gateway") && listing.includes(space), listing);
+      const configured = spawnSync(codex, ["mcp", "get", "cotal-e2e", "--json"], { cwd: root, env, encoding: "utf8" });
+      check("real Codex stores the explicit Cotal target and extension paths", configured.status === 0 && (configured.stdout ?? "").includes(cotalHome) && (configured.stdout ?? "").includes(configHome), configured.stdout);
 
       const last = join(base, "codex-last-message.txt");
       const prompt = [
@@ -279,7 +291,11 @@ try {
         `Then call cotal_send to channel general with text exactly ${nonce}.`,
         "Wait for each tool result. When all three calls have succeeded, reply with exactly COTAL_E2E_DONE.",
       ].join(" ");
-      const run = spawnSync(codex, ["exec", "--ephemeral", "--json", "--sandbox", "read-only", "--skip-git-repo-check", "--cd", root, "-o", last, prompt], {
+      // `--approve-for-me` is Codex's non-interactive approval mode and owns
+      // its sandbox selection. The workspace is an empty temporary directory
+      // and the prompt explicitly permits no shell activity; it is required so
+      // this acceptance can exercise Cotal's intentional identity/write tools.
+      const run = spawnSync(codex, ["exec", "--ephemeral", "--json", "--approve-for-me", "--skip-git-repo-check", "--cd", root, "-o", last, prompt], {
         cwd: root, env, encoding: "utf8", timeout: 120_000, maxBuffer: 16 * 1024 * 1024,
       });
       const events = `${run.stdout ?? ""}\n${run.stderr ?? ""}`;
@@ -300,7 +316,7 @@ try {
   await cell("open");
   await cell("static");
   if (runRealCodex) await codexCell();
-  check("every installed open/static MCP cell completed", passed === (runRealCodex ? 35 : 30), passed);
+  check("every installed open/static MCP cell completed", passed === (runRealCodex ? 36 : 30), passed);
   console.log("MCP GATEWAY INSTALLED-ARTIFACT SMOKE OK ✅");
 } finally {
   rmSync(base, { recursive: true, force: true });
