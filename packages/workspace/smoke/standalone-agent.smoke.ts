@@ -148,6 +148,20 @@ try {
     await existing.start();
     check("open endpoint binds the prepared lifecycle's real DM durable", await deliveredFromExistingLifecycle);
     await existing.stop();
+
+    // Queue a second DM AFTER the reconnection has stopped. A no-op retirement leaves this unacked
+    // on the old durable and the next bind sees it; a real retirement removes that durable and a new
+    // one starts at the current frontier, so it cannot replay the pre-retirement witness.
+    const retirementWitness = new CotalEndpoint({
+      space: prepared.target.space,
+      servers: prepared.target.server,
+      consume: false,
+      card: { name: "open-retirement-witness", kind: "endpoint" },
+    });
+    retirementWitness.on("error", () => {});
+    await retirementWitness.start();
+    await retirementWitness.unicast(endpoint.card.id, "must disappear when lifecycle retires");
+    await retirementWitness.stop();
     await prepared.retire();
     await prepared.retire();
     const fresh = new CotalEndpoint({
