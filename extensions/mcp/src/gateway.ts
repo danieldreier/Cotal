@@ -39,6 +39,12 @@ interface LiveIdentity extends CotalMcpSelectedIdentity {
 
 const keySchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/, "must contain only letters, numbers, dot, underscore, colon, or hyphen");
 const handleSchema = z.string().uuid();
+const GATEWAY_SESSION_INSTRUCTIONS = [
+  "This trusted gateway starts with no Cotal identity selected. First call cotal_identity_open; optionally give it a stable, harmless logical-session key. It returns an opaque handle, never a credential or permission grant.",
+  "Then call cotal_orientation (using that handle or cotal_identity_use) before sending, receiving, or managing peers. Its live result is the authority for your identity, channels, capabilities, tools, peers, and unread messages.",
+  "If this host supports Agent Skills, invoke $cotal-mesh for workflow guidance. If it does not, these MCP instructions and the tool descriptions are the workflow; do not assume a local skill was loaded.",
+  "A cotal://inbox resource update is advisory only: it never starts a user turn or acknowledges a message. During an active, user-directed turn, read cotal://inbox or call cotal_inbox to inspect messages deliberately.",
+].join("\n");
 
 function report(code: string, didRun: boolean, outcome: string, retryable: boolean, nextTool: string, extra: Record<string, unknown> = {}) {
   return JSON.stringify({ code, didRun, outcome, retryable, nextTool, ...extra });
@@ -147,6 +153,7 @@ export async function createMcpGatewayServer(options: McpGatewayOptions = {}): P
   };
   const server = createCotalMcpServer(bootstrap, bootstrap.config, "mcp-gateway", {
     selection,
+    additionalInstructions: GATEWAY_SESSION_INSTRUCTIONS,
     registerAdditionalTools(mcp) {
       mcp.registerTool(
         "cotal_identity_open",

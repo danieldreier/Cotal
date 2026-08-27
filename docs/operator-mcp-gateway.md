@@ -25,6 +25,11 @@ args = ["mcp", "--config", "gateway"]
 
 Start with `cotal_identity_open`. It returns an opaque handle. `cotal_identity_list`, `cotal_identity_use`, and `cotal_identity_close` manage handles. Every usual `cotal_*` tool accepts an optional `identity` handle. With several open identities, calls that omit it fail loudly unless `cotal_identity_use` selected a default. `cotal://context` and `cotal://inbox` read the selected identity; the inbox resource is always a non-consuming peek.
 
+The MCP `initialize` response gives the same first-call workflow to an unfamiliar host: open an
+identity, orient from live state, then use the returned handle. If the host supports Agent Skills,
+it also points it at `$cotal-mesh`; the skill is guidance, while the live MCP results remain the
+authority.
+
 The gateway writes JSON-RPC only to stdout. Its stderr diagnostics are not MCP messages.
 
 `cotal setup` also installs the `cotal-mesh` Agent Skill into Codex's native

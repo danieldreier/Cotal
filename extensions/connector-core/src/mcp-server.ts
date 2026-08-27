@@ -38,6 +38,8 @@ export interface CotalResourceRegistration {
  * each request. */
 export interface CotalMcpServerOptions {
   selection?: CotalMcpToolSelection;
+  /** Host-specific workflow guidance appended to the shared Cotal orientation instructions. */
+  additionalInstructions?: string;
   /** Register host-specific tools after the common Cotal surface is installed. */
   registerAdditionalTools?: (server: McpServer) => void;
 }
@@ -186,7 +188,7 @@ export function createCotalMcpServer(
 ): McpServer & { cotalResources: CotalResourceRegistration } {
   const server = new McpServer(
     { name: "cotal", version: "0.0.0" },
-    { instructions: `${ORIENTATION_BOOTSTRAP}\n\n${MESH_FIRST_STEER}` },
+    { instructions: [ORIENTATION_BOOTSTRAP, MESH_FIRST_STEER, options.additionalInstructions].filter(Boolean).join("\n\n") },
   );
   registerCotalTools(server, agent, config, source, options.selection);
   const resources = registerCotalResources(server, agent, config, source, options.selection);

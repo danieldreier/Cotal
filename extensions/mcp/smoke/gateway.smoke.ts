@@ -31,7 +31,7 @@ async function waitFor(name: string, read: () => boolean, timeout = 10_000): Pro
   const until = Date.now() + timeout;
   while (!read()) { if (Date.now() > until) throw new Error(`timed out waiting for ${name}`); await sleep(50); }
 }
-async function rawStdioProbe(command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+async function rawStdioProbe(command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<{ clean: boolean; instructions: string }> {
   const child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
   let stdout = "";
   child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk; });
@@ -39,9 +39,14 @@ async function rawStdioProbe(command: string, args: string[], cwd: string, env: 
   await waitFor("raw initialize frame", () => stdout.includes("\n"));
   child.kill("SIGTERM");
   await Promise.race([once(child, "exit"), sleep(5_000)]);
-  return stdout.split("\n").filter(Boolean).every((line) => {
-    try { const frame = JSON.parse(line) as { jsonrpc?: unknown }; return frame.jsonrpc === "2.0"; } catch { return false; }
+  const frames = stdout.split("\n").filter(Boolean).map((line) => {
+    try { return JSON.parse(line) as { jsonrpc?: unknown; result?: { instructions?: unknown } }; } catch { return undefined; }
   });
+  const initialized = frames.find((frame) => typeof frame?.result?.instructions === "string");
+  return {
+    clean: frames.every((frame) => frame?.jsonrpc === "2.0"),
+    instructions: typeof initialized?.result?.instructions === "string" ? initialized.result.instructions : "",
+  };
 }
 
 if (spawnSync("nats-server", ["-v"], { stdio: "ignore" }).error) { console.error("gateway smoke needs nats-server on PATH"); process.exit(2); }
@@ -69,7 +74,9 @@ async function cell(mode: "open" | "auth"): Promise<void> {
     const offline = new Set<string>();
     peer = new CotalEndpoint({ space, servers: server, creds: peerPrepared?.creds, lifecycleUid: peerPrepared?.lifecycleUid, channels: ["general"], card: { id: peerPrepared?.id, name: peerPrepared?.name ?? `peer-${mode}`, role: peerPrepared?.role ?? "witness", kind: "agent" } }); peer.on("error", () => {}); peer.on("presence", (event: { type: string; presence: { card: { id: string } } }) => { if (event.type === "offline") offline.add(event.presence.card.id); }); await peer.start();
     const stderr: string[] = [];
-    check(`${mode}: raw newline-framed stdio has JSON-RPC-only stdout`, await rawStdioProbe(tsx, [main, "--space", space, "--persona", "gateway"], root, { ...process.env, COTAL_HOME: home }));
+    const raw = await rawStdioProbe(tsx, [main, "--space", space, "--persona", "gateway"], root, { ...process.env, COTAL_HOME: home });
+    check(`${mode}: raw newline-framed stdio has JSON-RPC-only stdout`, raw.clean);
+    check(`${mode}: initialize teaches an unfamiliar host to open an identity, orient, and use the skill when available`, raw.instructions.includes("cotal_identity_open") && raw.instructions.includes("cotal_orientation") && raw.instructions.includes("$cotal-mesh"), raw.instructions);
     transport = new StdioClientTransport({ command: tsx, args: [main, "--space", space, "--persona", "gateway"], cwd: root, env: { ...process.env, COTAL_HOME: home }, stderr: "pipe" }); transport.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk.toString()));
     const updates: string[] = [];
     client = new Client({ name: "gateway-smoke", version: "0.0.0" }); client.setNotificationHandler(ResourceUpdatedNotificationSchema, async (notification) => { updates.push(notification.params.uri); }); await client.connect(transport);
@@ -100,4 +107,4 @@ async function cell(mode: "open" | "auth"): Promise<void> {
   } finally { await client?.close().catch(() => {}); await transport?.close().catch(() => {}); await peer?.stop().catch(() => {}); await peerPrepared?.retire().catch(() => {}); broker?.kill("SIGTERM"); if (broker) await Promise.race([once(broker, "exit"), sleep(5_000)]); rmSync(root, { recursive: true, force: true }); }
 }
 
-try { await cell("open"); await cell("auth"); check("every real-broker cell completed", passed === 30, passed); console.log("MCP GATEWAY SMOKE OK ✅"); } finally { rmSync(home, { recursive: true, force: true }); }
+try { await cell("open"); await cell("auth"); check("every real-broker cell completed", passed === 32, passed); console.log("MCP GATEWAY SMOKE OK ✅"); } finally { rmSync(home, { recursive: true, force: true }); }
