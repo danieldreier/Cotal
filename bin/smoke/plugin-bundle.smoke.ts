@@ -49,7 +49,7 @@ assert.ok(manifest.interface.defaultPrompt.some((prompt) => prompt.includes("$te
 assert.ok(manifest.interface.defaultPrompt.some((prompt) => prompt.includes("$cotal-engineering")));
 
 const mcp = json<Record<string, unknown>>(join(pluginDir, ".mcp.json"));
-assert.deepEqual(mcp, { cotal: { command: "cotal", args: ["mcp"] } }, "plugin config relies on Cotal's selected local target, never a baked-in endpoint or secret");
+assert.deepEqual(mcp, { cotal: { command: "cotal", args: ["mcp", "--cpn"] } }, "personal plugin selects CPN enrollment without baking an endpoint or secret into Codex");
 
 const expectedSkills = ["cotal-engineering", "cotal-mesh", "team-topology"];
 assert.deepEqual(names(sourceSkillsDir), expectedSkills, "CLI canonical skills are exactly the portable Cotal bundle");

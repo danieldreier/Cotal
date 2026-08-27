@@ -21,9 +21,10 @@ If an older install is missing it, `cotal ext seed --repair` (or `cotal ext add
 `codex app-server`.
 
 For a person running their own local Codex client, the separate `cotal-mesh` Codex plugin bundles
-the portable Cotal skills and a trusted local `cotal mcp` server. It is not the managed connector
-and it creates independent, session-scoped Cotal identities. Install and validate it through the
-[operator MCP gateway guide](operator-mcp-gateway.md#cotal-mesh-codex-plugin).
+the portable Cotal skills and a trusted local MCP server. The CPN personal-marketplace declaration
+runs `cotal mcp --cpn`: it enrolls independent, scoped session identities through the CPN launcher
+rather than resolving a local mesh. Install and validate it through the [operator MCP gateway
+guide](operator-mcp-gateway.md#cotal-mesh-codex-plugin).
 
 Cotal's workflow guidance is also installed by `cotal setup` in Codex's native skill root: normally
 `~/.codex/skills/`, or `$CODEX_HOME/skills/` when you set `CODEX_HOME`. The portable set is

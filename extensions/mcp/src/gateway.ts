@@ -12,15 +12,42 @@ import { mintLifecycleUid, newIdentity } from "@cotal-ai/core";
 import {
   prepareStandaloneAgent,
   resolveStandaloneAgent,
-  type PreparedStandaloneAgent,
   type ResolveFlags,
 } from "@cotal-ai/workspace";
+import { prepareCpnGatewayAgent, type CpnRole } from "./cpn.js";
 
 /** Arguments shared by the self-registering command and the standalone binary. */
 export interface McpGatewayOptions extends ResolveFlags {
   /** Alias of the standalone `config` persona reference. */
   persona?: string;
   config?: string;
+  /** Use the CPN Kubernetes enrollment and loopback-tunnel contract. */
+  cpn?: boolean;
+  /** Optional label prefix; every CPN gateway identity still receives a fresh principal. */
+  principal?: string;
+  /** CPN laptop role. Defaults to leader for an owner-driven session. */
+  role?: CpnRole;
+}
+
+/** The common identity envelope consumed by both local and CPN preparation paths. */
+export interface PreparedGatewayAgent {
+  target: { space: string; server: string; tlsRequired: boolean };
+  id?: string;
+  creds?: string;
+  lifecycleUid: string;
+  name: string;
+  role?: string;
+  description?: string;
+  tags?: string[];
+  meta?: Record<string, string>;
+  capabilities?: string[];
+  subscribe: string[];
+  allowSubscribe: string[];
+  allowPublish: string[];
+  quiet?: string[];
+  muted?: string[];
+  kind: "agent" | "endpoint";
+  retire(): Promise<void>;
 }
 
 /** One transport-neutral, session-scoped gateway surface. */
@@ -33,7 +60,7 @@ export interface McpGatewayServer {
 
 interface LiveIdentity extends CotalMcpSelectedIdentity {
   key: string;
-  prepared: PreparedStandaloneAgent;
+  prepared: PreparedGatewayAgent;
   resourceListeners?: { incoming: () => void; connection: () => void };
 }
 
@@ -55,7 +82,7 @@ function toolResult(text: string, isError = false) {
   return isError ? { content, isError: true as const } : { content };
 }
 
-function configFor(prepared: PreparedStandaloneAgent): AgentConfig {
+function configFor(prepared: PreparedGatewayAgent): AgentConfig {
   return {
     space: prepared.target.space,
     id: prepared.id,
@@ -95,11 +122,12 @@ async function stopIdentity(identity: LiveIdentity): Promise<void> {
  * cross an MCP session boundary, even when HTTP shares one listener process.
  */
 export async function createMcpGatewayServer(options: McpGatewayOptions = {}): Promise<McpGatewayServer> {
-  const resolved = resolveStandaloneAgent({
+  const cpn = options.cpn === true;
+  const resolved = cpn ? undefined : resolveStandaloneAgent({
     targetFlags: { space: options.space, server: options.server },
     config: options.config ?? options.persona,
   });
-  if (resolved.target.mode === "user")
+  if (resolved?.target.mode === "user")
     throw new Error("cotal mcp: user-auth targets are not supported by this gateway yet; use an open or static-auth mesh");
 
   const identities = new GatewayIdentityRegistry<LiveIdentity>();
@@ -108,10 +136,12 @@ export async function createMcpGatewayServer(options: McpGatewayOptions = {}): P
     const handle = randomUUID();
     // The client controls a harmless session key, never the wire name, grants,
     // owner, credential, or lifecycle.  The prepared persona is the full grant envelope.
-    const prepared = await prepareStandaloneAgent({
-      resolved,
-      name: `${resolved.persona.def.name}-mcp-${handle.slice(0, 8)}`,
-    });
+    const prepared: PreparedGatewayAgent = cpn
+      ? await prepareCpnGatewayAgent({ principal: options.principal, role: options.role })
+      : await prepareStandaloneAgent({
+        resolved: resolved!,
+        name: `${resolved!.persona.def.name}-mcp-${handle.slice(0, 8)}`,
+      });
     const agent = new MeshAgent(configFor(prepared));
     try {
       await agent.start();
@@ -138,13 +168,18 @@ export async function createMcpGatewayServer(options: McpGatewayOptions = {}): P
   // This deliberately never starts or becomes a selectable identity.  The
   // shared factory needs an agent for its static registration shape; all reads
   // and calls go through `selection` and therefore choose a live child only.
-  const bootstrap = new MeshAgent({
-    ...configFor({
-      target: resolved.target, persona: resolved.persona, name: "mcp-gateway-bootstrap", kind: "agent",
-      subscribe: resolved.persona.def.subscribe ?? [], allowSubscribe: resolved.persona.def.allowSubscribe ?? resolved.persona.def.subscribe ?? [],
-      allowPublish: resolved.persona.def.allowPublish ?? [], id: newIdentity().id, lifecycleUid: mintLifecycleUid(), retire: async () => {},
-    }),
-  });
+  const bootstrapPrepared: PreparedGatewayAgent = cpn
+    ? {
+      target: { space: "cpn-pilot", server: process.env.COTAL_CPN_MCP_NATS_URL?.trim() || "nats://127.0.0.1:14222", tlsRequired: false },
+      name: "cpn-mcp-gateway-bootstrap", kind: "agent", id: newIdentity().id, lifecycleUid: mintLifecycleUid(),
+      subscribe: [], allowSubscribe: [], allowPublish: [], retire: async () => {},
+    }
+    : {
+      target: resolved!.target, name: "mcp-gateway-bootstrap", kind: "agent", id: newIdentity().id, lifecycleUid: mintLifecycleUid(),
+      subscribe: resolved!.persona.def.subscribe ?? [], allowSubscribe: resolved!.persona.def.allowSubscribe ?? resolved!.persona.def.subscribe ?? [],
+      allowPublish: resolved!.persona.def.allowPublish ?? [], retire: async () => {},
+    };
+  const bootstrap = new MeshAgent(configFor(bootstrapPrepared));
 
   const selection = {
     select(handle?: string): CotalMcpSelectedIdentity {
@@ -232,7 +267,7 @@ export async function createMcpGatewayServer(options: McpGatewayOptions = {}): P
     server.cotalResources.close();
     await server.close().catch(() => {});
   })());
-  return { server, space: resolved.target.space, close };
+  return { server, space: bootstrapPrepared.target.space, close };
 }
 
 /** Run the local stdio product. JSON-RPC remains stdout-only; diagnostics use stderr. */

@@ -12,6 +12,16 @@ cotal mcp --space my-cotal-space --config gateway
 
 `--config <persona-or-path>` wins over the older `--persona` alias. The gateway currently supports open and static-auth meshes. It refuses user-auth targets rather than guessing a provisioning path.
 
+### CPN Kubernetes mesh
+
+`cotal mcp --cpn` is the CPN-specific laptop path. On `cotal_identity_open`, it reuses or creates
+loopback-only tunnels to the CPN launcher and NATS services, enrolls a fresh DNS-safe principal with
+the launcher, writes that identity's material mode 600 in a private directory, and connects only with
+that scoped credential. The MCP client receives an opaque identity handle, never the credential,
+launcher token, owner, grant, or lifecycle value. Closing the identity leaves the mesh and removes
+only the material that gateway created. This mode is for the CPN deployment; ordinary local or
+external Cotal meshes continue to use the explicit `--space` and `--config` form above.
+
 ## ChatGPT Desktop and Codex (local stdio)
 
 ChatGPT Desktop, Codex CLI, and the Codex IDE extension share the same local MCP configuration.
@@ -51,11 +61,11 @@ the MCP tools remain the source of truth.
 
 ## Cotal Mesh Codex plugin
 
-For a local **Codex** client, this repository also ships a `cotal-mesh` plugin. It bundles the same
-portable skills (`cotal-mesh`, `team-topology`, and `cotal-engineering`) with a deliberately small
-local MCP declaration: `cotal mcp`. The client never receives a mesh credential, owner, grant, or
-lifecycle value. The Cotal CLI resolves the operator's selected current mesh and its normal
-`default` persona; `cotal setup` creates that persona for a new local mesh.
+For the CPN **Codex** client, this repository's personal `cotal-mesh` plugin bundles the same
+portable skills (`cotal-mesh`, `team-topology`, and `cotal-engineering`) with the deliberately small
+local declaration `cotal mcp --cpn`. The client never receives a mesh credential, owner, grant, or
+lifecycle value. Its first `cotal_identity_open` performs CPN's scoped enrollment path; the plugin
+does not resolve or attach to a local mesh.
 
 From a checked-out Cotal release, add the repository-local marketplace and plugin to an isolated or
 everyday Codex home:
@@ -67,11 +77,11 @@ codex plugin list
 codex mcp list --json
 ```
 
-The last command must show a `cotal` stdio server with arguments `mcp`. If the selected mesh or its
-default persona is absent, the server fails clearly when Codex starts it; create/select the mesh and
-run `cotal setup` rather than placing credentials in the plugin. The plugin is the convenient Codex
-bundle; the explicit `mcp_servers.cotal` configuration above remains the supported ChatGPT Desktop
-setup until that client has separately been shown to load a local plugin bundle.
+The last command must show a `cotal` stdio server with arguments `mcp --cpn`. If CPN enrollment or a
+loopback tunnel is unavailable, `cotal_identity_open` fails clearly without placing credentials in
+the plugin. The plugin is the convenient CPN Codex bundle; the explicit `mcp_servers.cotal`
+configuration above remains the supported ChatGPT Desktop setup until that client has separately
+been shown to load a local plugin bundle.
 
 For the credential-gated Codex acceptance on a macOS host where the Codex CLI reports
 `UnknownIssuer`, use the verified system bundle rather than disabling TLS verification:

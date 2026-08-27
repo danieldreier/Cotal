@@ -8,18 +8,19 @@ interface McpCommandOptions extends McpGatewayOptions {
 }
 
 function options(argv: string[]): McpCommandOptions {
-  const values: Record<string, string> = {};
+  const values: Record<string, string | boolean> = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg.startsWith("--")) throw new Error(`cotal-mcp: unknown positional ${arg}`);
     const key = arg.slice(2);
-    if (!["space", "server", "persona", "config", "transport", "port"].includes(key)) throw new Error(`cotal-mcp: unknown flag --${key}`);
+    if (!["space", "server", "persona", "config", "cpn", "principal", "role", "transport", "port"].includes(key)) throw new Error(`cotal-mcp: unknown flag --${key}`);
     if (values[key] !== undefined) throw new Error(`cotal-mcp: --${key} may be supplied only once`);
+    if (key === "cpn") { values[key] = true; continue; }
     const value = argv[++i];
     if (!value || value.startsWith("--")) throw new Error(`cotal-mcp: --${key} requires a value`);
     values[key] = value;
   }
-  return values;
+  return values as McpCommandOptions;
 }
 
 function httpPort(value: string | undefined): number | undefined {
