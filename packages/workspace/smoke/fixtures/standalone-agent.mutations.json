@@ -1,0 +1,13 @@
+{
+  "command": "pnpm smoke:standalone-agent",
+  "mutations": [
+    {
+      "name": "PREDICTED KILLED (>=1 red) - static lifecycle retirement becomes a no-op, leaving the old credential able to bind its retired DM durable",
+      "file": "packages/workspace/src/standalone-agent.ts",
+      "find": "  await deprovisionAgent({\n    servers: target.server,\n    space: target.space,\n    targetId: id,\n    lifecycleUid,\n    creds: deprovisioner,\n  });",
+      "replace": "  await Promise.resolve();",
+      "expectRed": "retirement removes exactly this lifecycle's DM durable"
+    }
+  ],
+  "_note": "The smoke starts a real JWT-auth JetStream broker, provisions an agent through prepareStandaloneAgent, stops it, retires it, and then proves that the old lifecycle credential cannot bind again. The mutation is in the shared static retirement helper reached by the public prepared.retire entry point."
+}
