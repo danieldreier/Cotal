@@ -23,6 +23,14 @@ export interface McpGatewayOptions extends ResolveFlags {
   config?: string;
 }
 
+/** One transport-neutral, session-scoped gateway surface. */
+export interface McpGatewayServer {
+  server: ReturnType<typeof createCotalMcpServer>;
+  space: string;
+  /** Stop every selected identity, retire each exact lifecycle, then close MCP resources. */
+  close(): Promise<void>;
+}
+
 interface LiveIdentity extends CotalMcpSelectedIdentity {
   key: string;
   prepared: PreparedStandaloneAgent;
@@ -76,11 +84,11 @@ async function stopIdentity(identity: LiveIdentity): Promise<void> {
 }
 
 /**
- * Start the v1 operator gateway on the current process's stdio.  There is no
- * HTTP transport in this change: stdio keeps the client/process boundary simple
- * while each opened opaque handle owns its own MeshAgent and lifecycle.
+ * Create one transport-neutral MCP server for one logical client session. Each
+ * transport owns when it connects and closes this surface; identities never
+ * cross an MCP session boundary, even when HTTP shares one listener process.
  */
-export async function runMcpGateway(options: McpGatewayOptions = {}): Promise<void> {
+export async function createMcpGatewayServer(options: McpGatewayOptions = {}): Promise<McpGatewayServer> {
   const resolved = resolveStandaloneAgent({
     targetFlags: { space: options.space, server: options.server },
     config: options.config ?? options.persona,
@@ -211,21 +219,31 @@ export async function runMcpGateway(options: McpGatewayOptions = {}): Promise<vo
   });
   resources = server.cotalResources;
 
+  let stopping: Promise<void> | undefined;
+  const close = (): Promise<void> => (stopping ??= (async () => {
+    await identities.closeAll().catch((error) => process.stderr.write(`[cotal-mcp] cleanup: ${(error as Error).message}\n`));
+    server.cotalResources.close();
+    await server.close().catch(() => {});
+  })());
+  return { server, space: resolved.target.space, close };
+}
+
+/** Run the local stdio product. JSON-RPC remains stdout-only; diagnostics use stderr. */
+export async function runMcpGateway(options: McpGatewayOptions = {}): Promise<void> {
+  const gateway = await createMcpGatewayServer(options);
   const transport = new StdioServerTransport();
   let finish!: () => void;
   const done = new Promise<void>((resolve) => { finish = resolve; });
   let stopping: Promise<void> | undefined;
   const shutdown = (): Promise<void> => (stopping ??= (async () => {
-    await identities.closeAll().catch((error) => process.stderr.write(`[cotal-mcp] cleanup: ${(error as Error).message}\n`));
-    server.cotalResources.close();
-    await server.close().catch(() => {});
+    await gateway.close();
     finish();
   })());
-  await server.connect(transport);
+  await gateway.server.connect(transport);
   const inheritedClose = transport.onclose;
   transport.onclose = () => { inheritedClose?.(); void shutdown(); };
   process.once("SIGINT", () => void shutdown());
   process.once("SIGTERM", () => void shutdown());
-  process.stderr.write(`[cotal-mcp] stdio gateway ready for ${resolved.target.space}\n`);
+  process.stderr.write(`[cotal-mcp] stdio gateway ready for ${gateway.space}\n`);
   await done;
 }

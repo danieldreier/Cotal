@@ -12,8 +12,8 @@ resources, and prove the shipped artifact against a real mesh and real clients.
 ## Product contract
 
 - `cotal mcp` is supplied by a separately published, self-registering `@cotal-ai/mcp` extension.
-- The default transport is stdio. `--http` binds an authenticated loopback-only `/mcp` endpoint
-  for a separately operated OpenAI `tunnel-client`.
+- The default transport is stdio. `--transport http` binds a loopback-only `/mcp` endpoint for a
+  separately operated OpenAI `tunnel-client`; the tunnel is the remote authentication path.
 - A transport-neutral connector-core factory registers the shared Cotal tools and resources.
 - `cotal://context` exposes the structured orientation snapshot as JSON.
 - `cotal://inbox` is a forced-peek resource and never acknowledges or drains messages.
@@ -53,7 +53,7 @@ and open-world effects.
    - Add `extensions/mcp` / `@cotal-ai/mcp`, with peer dependencies on core, workspace, and
      connector-core.
    - Self-register the `mcp` command and managed local-process surface.
-   - Implement stdio and bounded authenticated loopback Streamable HTTP adapters.
+   - Implement stdio and bounded loopback Streamable HTTP adapters.
 4. Skill and docs
    - Ship the canonical `cotal-mesh` Agent Skill through the existing cross-vendor skill installer.
    - Keep skill-discovery proof separate from MCP tool-discovery proof.
@@ -62,9 +62,9 @@ and open-world effects.
 ## Security invariants
 
 - Stdio stdout is JSON-RPC only; diagnostics and readiness go to stderr.
-- HTTP rejects non-loopback peers, unexpected Host values, missing/invalid bearer material,
-  oversized/slow bodies, stale sessions, and non-initialize session creation before dispatch.
-- Bearer values come from mode-checked private files, never argv, URLs, logs, or tool results.
+- HTTP rejects non-loopback peers, unexpected Host values, oversized/slow bodies, stale sessions,
+  and non-initialize session creation before dispatch. Its documented tunnel control plane, not an
+  arbitrary local bearer header, authenticates the remote ChatGPT connection.
 - HTTP sessions share the gateway registry but have isolated MCP server/subscription state.
 - Session IDs are routing keys, never authentication.
 - Session count, request size/time, idle lifetime, and shutdown are bounded.
@@ -87,7 +87,7 @@ coordinator after verification.
 
 ## Validation
 
-- Protocol: real SDK clients over in-memory, stdio child-process, and Streamable HTTP transports.
+- Protocol: real SDK clients over stdio child-process and Streamable HTTP transports.
 - Mesh: isolated real open and static-auth `nats-server` cases with real peer witnesses.
 - Semantics: identity isolation, per-call actor selection, persona/grant narrowing, forced inbox
   peek, lifecycle cleanup, stdout purity, session expiry, and denial ordering.

@@ -548,3 +548,4 @@ smoke:spawn-name-actor
 smoke:mcp-server
 smoke:standalone-agent
 smoke:mcp-gateway
+smoke:mcp-http
