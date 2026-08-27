@@ -62,6 +62,7 @@ try {
 
   const cotalTgz = join(tgz, tarballs.find((f) => /^cotal-ai-\d/.test(f)) ?? "");
   const listing = execFileSync("tar", ["tzf", cotalTgz], { encoding: "utf8" });
+  check("cotal-ai tarball ships the cotal-mesh Agent Skill", listing.includes("package/cotal-skills/skills/cotal-mesh/SKILL.md"));
   check("cotal-ai tarball ships seeded-connectors/ payloads", listing.includes("package/seeded-connectors/hermes/package.json"));
   check("cotal-ai tarball bundles the web dashboard payload", listing.includes("package/seeded-connectors/web/package.json"));
   check(
@@ -117,6 +118,7 @@ try {
   const packageBin = join(prefix, "node_modules", "cotal-ai", "dist", "cotal.js");
   check("installed binary present", existsSync(packageBin));
   check("seeded-connectors present in the installed package", existsSync(join(prefix, "node_modules", "cotal-ai", "seeded-connectors")));
+  check("cotal-mesh Agent Skill present in the installed package", existsSync(join(prefix, "node_modules", "cotal-ai", "cotal-skills", "skills", "cotal-mesh", "SKILL.md")));
   check("single @cotal-ai/core hoisted in the prefix", existsSync(join(prefix, "node_modules", "@cotal-ai", "core")));
 
   console.log("seeding from the published layout …");

@@ -71,7 +71,7 @@ function printExtensions(): void {
 
 /** Cotal's authored skills reach non-Claude harnesses through the cross-vendor `~/.agents/skills`
  *  directory (Codex, Cursor, OpenCode, Gemini CLI, Windsurf). Those harnesses have no remote update, so
- *  surface a stale/missing/retired drop here and point at the fix (`cotal setup` reconciles it). A corrupt
+ *  surface a stale/missing/retired drop here and point at the fix (`cotal setup` or `cotal update` reconciles it). A corrupt
  *  skills bundle throws (fail-loud); we render that as a red integrity error rather than "none shipped". */
 function skillsSkewRow(): string {
   let skew;
@@ -82,10 +82,10 @@ function skillsSkewRow(): string {
   }
   const behind = skew.filter((s) => s.state !== "current");
   if (!behind.length) return c.green(`current (${skew.length})`);
-  if (behind.every((s) => s.state === "missing")) return c.dim(`not installed · ${displayCmd()} setup`);
+  if (behind.every((s) => s.state === "missing")) return c.dim(`not installed · ${displayCmd()} setup/update`);
   const retired = behind.filter((s) => s.state === "retired").length;
   const label = retired ? `${behind.length} to reconcile (${retired} retired)` : `${behind.length}/${skew.length} out of date`;
-  return c.yellow(`${label} · ${displayCmd()} setup`);
+  return c.yellow(`${label} · ${displayCmd()} setup/update`);
 }
 
 /** The `cotal-skills` Claude Code plugin (user scope) vs this CLI release: stale means an update didn't

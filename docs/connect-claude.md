@@ -27,7 +27,8 @@ The install mechanics and the invariants behind them are in
 [setup internals](setup-internals.md).
 
 `cotal setup` also installs Cotal's authored Agent Skills (`SKILL.md`, the agentskills.io format) for
-coordinating agent teams (today `team-topology`), from one canonical source, on two channels:
+mesh coordination and agent-team design (`cotal-mesh` and `team-topology`), from one canonical source,
+on two channels:
 
 - **Claude Code** gets a second, skills-only plugin, `cotal-skills`, from the same `cotal-mesh`
   marketplace, at **user scope** (machine-wide), and **independent of the mesh connector**: it carries no
@@ -42,6 +43,11 @@ coordinating agent teams (today `team-topology`), from one canonical source, on 
   replacing it, and removes a Cotal skill that is no longer shipped. Only skills Cotal owns are touched;
   your own or third-party skills there are left alone. `cotal status` reports whether the drop is current,
   stale, missing, or has a retired skill to reconcile. This is the working cross-vendor path.
+
+`cotal update` also reconciles the cross-vendor drop after refreshing the bundled first-party
+surfaces. This keeps an installed Codex session from seeing an older skill until a later setup run.
+The Claude skills plugin is refreshed by first-run or repeat `cotal setup`, which runs its
+release-derived plugin update path.
 
 Cotal also generates an [Agent Skills discovery index](https://cotal.ai/.well-known/agent-skills/index.json)
 on cotal.ai, but that RFC is still a draft with no harness consuming it yet, so it is a forward bet,

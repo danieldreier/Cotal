@@ -33,7 +33,13 @@ const { agentSkillsHome, canonicalSkillsDir, canonicalSkillNames, installAgentSk
 
 try {
   const canon = canonicalSkillsDir();
-  const name = canonicalSkillNames()[0]; // team-topology today
+  const names = canonicalSkillNames();
+  assert.deepEqual(names, ["cotal-mesh", "team-topology"], "the shipped cross-vendor skill set is deterministic");
+  const meshSkill = readFileSync(join(canon, "cotal-mesh", "SKILL.md"), "utf8");
+  assert.match(meshSkill, /^name:\s+cotal-mesh\s*$/m);
+  assert.match(meshSkill, /^description:\s+.+Cotal.+cotal_\* tools.+$/m);
+  assert.match(meshSkill, /Discovery marker: mesh edges are contracts, not vibes\./);
+  const name = names[0]; // cotal-mesh: exercise installation and safety with the mesh skill itself
   const canonicalBytes = readFileSync(join(canon, name, "SKILL.md"));
   const stateOf = (n: string) => agentSkillsSkew().find((s) => s.name === n)?.state;
 
@@ -56,7 +62,7 @@ try {
     // fresh install
     assert.equal(stateOf(name), "missing");
     let r = installAgentSkills();
-    assert.deepEqual([r.installed, r.backedUp, r.removed], [[name], [], []]);
+    assert.deepEqual([r.installed, r.backedUp, r.removed], [names, [], []]);
     assert.equal(stateOf(name), "current");
     assert.ok(readFileSync(destFile).equals(canonicalBytes));
 

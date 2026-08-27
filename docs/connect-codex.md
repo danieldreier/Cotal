@@ -24,6 +24,19 @@ adapter, which appears there only because Codex reads the same plugin-marketplac
 not this connector and installing it does not connect Codex to a mesh. Codex needs nothing
 installed on its side: the connector drives it from the outside, over `codex app-server`.
 
+Codex's Cotal workflow guidance is a separate cross-vendor Agent Skill, `cotal-mesh`, installed by
+`cotal setup` at `~/.agents/skills/cotal-mesh/SKILL.md`. It explains how to orient and verify live
+mesh state; the `cotal_*` MCP tools remain the authority for state and side effects. A fresh-session
+skill load is distinct from MCP `tools/list` discovery.
+
+## ChatGPT Developer Mode
+
+ChatGPT Developer Mode does not read a workstation's `~/.agents/skills` directory or the Claude
+`cotal-mesh` marketplace. A ChatGPT integration therefore needs the skill's short workflow guidance
+in the remote connector/app instructions; the MCP tool descriptions alone are not a skill-load proof.
+The local loopback endpoint described below also cannot be pasted into ChatGPT directly: expose it
+only through the separately operated authenticated HTTPS tunnel described by the operator MCP plan.
+
 **Codex version.** The connector drives `codex app-server` over its experimental v2 surface.
 Minimum **codex-cli 0.145.0**; tested against 0.145.0 and 0.146.0. An older binary authenticates fine but has
 no `--listen`/`--ws-auth` listener, so the launch fails at startup rather than misbehaving quietly:
