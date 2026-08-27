@@ -13,5 +13,6 @@ export * from "./tool-specs.js";
 export * from "./orientation.js";
 export * from "./docs.js";
 export * from "./tools.js";
+export * from "./mcp-server.js";
 export * from "./control.js";
 export * from "./relay.js";
