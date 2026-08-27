@@ -54,7 +54,7 @@ For operators running and watching a mesh:
 | [Run a mesh](run-a-mesh.md) | How do I operate the local stack (modes, status, multiple meshes, history)? |
 | [Define a team](define-a-team.md) | How do I declare a whole team in one `cotal.yaml` and launch it? |
 | [Watch a mesh](watch-a-mesh.md) | How do I see who is doing what (terminal console, web dashboard)? |
-| [Operator MCP gateway](operator-mcp-gateway.md) | How do I serve session-scoped Cotal identities over Codex stdio or a private ChatGPT tunnel? |
+| [Operator MCP gateway](operator-mcp-gateway.md) | How do I serve session-scoped Cotal identities over local ChatGPT Desktop/Codex stdio? |
 | [Deploy](deploy.md) | How do I run agent teams against an external broker? |
 | [Examples](examples.md) | Which runnable examples exist? |
 

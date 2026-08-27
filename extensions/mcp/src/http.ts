@@ -2,8 +2,9 @@
  * Loopback-only Streamable HTTP transport for a trusted local Cotal MCP gateway.
  *
  * This listener is intentionally not an Internet-facing authentication system.
- * ChatGPT reaches it only through the operator-run Secure MCP Tunnel in the same
- * host trust boundary. The listener rejects non-loopback peers and Host-header
+ * It is for optional hosted/remote access through an operator-run Secure MCP
+ * Tunnel in the same host trust boundary; ChatGPT Desktop uses the stdio
+ * transport instead. The listener rejects non-loopback peers and Host-header
  * rebinding, and each MCP session gets a separate identity registry.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -19,7 +20,7 @@ const IDLE_TTL_MS = 15 * 60_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 
 export interface McpHttpOptions {
-  /** Loopback port. `0` asks the OS for one; tunnel profiles normally use an explicit port. */
+  /** Loopback port. `0` asks the OS for one; optional tunnel profiles normally use an explicit port. */
   port?: number;
   /** Test-only bounds; production retains the conservative constants above. */
   maxSessions?: number;
@@ -28,7 +29,7 @@ export interface McpHttpOptions {
 }
 
 export interface McpHttpGateway {
-  /** Exact secret-free loopback endpoint to supply to tunnel-client. */
+  /** Exact secret-free loopback endpoint for an optional tunnel-client profile. */
   url: string;
   /** Stop admission, close every MCP session, then retire all session identities. */
   close(): Promise<void>;
@@ -99,9 +100,9 @@ async function requestBody(req: IncomingMessage, timeoutMs: number): Promise<unk
 }
 
 /**
- * Start the private HTTP transport. The tunnel (not a client-provided bearer)
- * authenticates the remote ChatGPT connection. Refusing a non-loopback peer is
- * therefore mandatory: ordinary plain HTTP is never a public deployment mode.
+ * Start the private HTTP transport. An optional tunnel (not a client-provided
+ * bearer) authenticates a hosted remote connection. Refusing a non-loopback
+ * peer is therefore mandatory: ordinary plain HTTP is never a public deployment mode.
  */
 export async function startMcpGatewayHttp(
   gatewayOptions: McpGatewayOptions = {},
@@ -251,7 +252,7 @@ export async function startMcpGatewayHttp(
 }
 
 /** Run the loopback HTTP product until the operator stops it. The printed URL
- * contains no credential: tunnel-client remains entirely operator-managed. */
+ * contains no credential: an optional tunnel-client remains operator-managed. */
 export async function runMcpGatewayHttp(
   gatewayOptions: McpGatewayOptions = {},
   options: McpHttpOptions = {},

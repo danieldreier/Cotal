@@ -1,19 +1,23 @@
 # Operator MCP gateway
 
-Status: blocked externally (ChatGPT tunnel/Desktop receipt)
+Status: in progress (direct ChatGPT Desktop stdio acceptance)
 
 ## Goal
 
-Ship a trusted, multi-identity Cotal MCP gateway that lets Codex use local stdio and lets
-ChatGPT reach the same gateway through Secure MCP Tunnel. The gateway must mirror the existing
+Ship a trusted, multi-identity Cotal MCP gateway that lets ChatGPT Desktop and Codex use local
+stdio. A hosted ChatGPT Web connection through Secure MCP Tunnel is a separate optional remote
+surface. The gateway must mirror the existing
 connector-core tool surface, teach an unfamiliar model how to use Cotal, expose useful read-only
 resources, and prove the shipped artifact against a real mesh and real clients.
 
 ## Product contract
 
 - `cotal mcp` is supplied by a separately published, self-registering `@cotal-ai/mcp` extension.
-- The default transport is stdio. `--transport http` binds a loopback-only `/mcp` endpoint for a
-  separately operated OpenAI `tunnel-client`; the tunnel is the remote authentication path.
+- The default transport is stdio, used directly by ChatGPT Desktop, Codex CLI, and the Codex IDE
+  extension through their shared MCP configuration. `--space` is explicit in desktop onboarding so
+  target selection cannot depend on the host working directory.
+- `--transport http` binds a loopback-only `/mcp` endpoint only for the optional, separately
+  operated hosted ChatGPT Web/Secure MCP Tunnel route.
 - A transport-neutral connector-core factory registers the shared Cotal tools and resources.
 - `cotal://context` exposes the structured orientation snapshot as JSON.
 - `cotal://inbox` is a forced-peek resource and never acknowledges or drains messages.
@@ -63,7 +67,8 @@ and open-world effects.
    - Ship the canonical `cotal-mesh` Agent Skill through both the cross-vendor installer and Codex's
      native `$CODEX_HOME/skills` root, including the Codex interface metadata.
    - Keep skill-discovery proof separate from MCP tool-discovery proof.
-   - Document the short Codex setup and the explicit Secure MCP Tunnel + ChatGPT Developer Mode flow.
+   - Document the direct ChatGPT Desktop/Codex stdio setup and keep the optional hosted tunnel flow
+     clearly separate.
 
 ## Security invariants
 
@@ -107,9 +112,12 @@ coordinator after verification.
   compositions both run against real SDK clients and witnesses.
 - Codex: isolated CODEX_HOME, `codex mcp add`, real authenticated `codex exec`, then PTY TUI proof.
 - Skill: a fresh Codex session must load the installed skill marker without MCP tools configured.
-- ChatGPT: manual authorized Developer Mode acceptance through Secure MCP Tunnel, including metadata
-  review/refresh, orientation, identity creation, real nonce round trips, no idle wake claim, tunnel
-  failure/recovery, and redacted receipts.
+- ChatGPT Desktop: manual authorized standard-stdio acceptance through Settings → MCP servers,
+  restart, `/mcp` discovery, orientation, identity creation, real nonce round trips, and no idle
+  wake claim. The desktop configuration uses the same Codex MCP config proven by the automated
+  Codex acceptance.
+- Hosted ChatGPT Web: optional, separate Secure MCP Tunnel acceptance (metadata review/refresh,
+  tunnel failure/recovery, and redacted receipts) only if the hosted product is in scope.
 
 ### Current live-host receipt
 
@@ -130,8 +138,8 @@ The current official `tunnel-client` v0.0.13 was also inspected from its publish
 release. Its real `init` command accepted the exact Cotal loopback target
 `http://127.0.0.1:8811/mcp`, materialized the DCR-capable HTTP profile, and retained the control-plane
 key only as `env:CONTROL_PLANE_API_KEY`. This was a disposable, placeholder-ID parser check; no
-control-plane credential or tunnel was configured, so it deliberately did not claim `doctor`, daemon,
-or ChatGPT Developer Mode acceptance.
+control-plane credential or tunnel was configured. This affects only the optional hosted Web route,
+not direct ChatGPT Desktop stdio.
 
 ## Completion audit — 2026-08-27
 
@@ -142,13 +150,13 @@ or ChatGPT Developer Mode acceptance.
 | Helpful unfamiliar-host flow and skill discovery | Real raw stdio initialize smoke proves JSON-RPC-only stdout and guidance to open an identity, orient, and use `$cotal-mesh` when supported. A fresh authenticated Codex 0.149.1 session loaded the installed native skill without MCP configuration. | Proven locally. |
 | Useful live context and message notice without a polling loop | `cotal://context` is typed live orientation; `cotal://inbox` is forced peek. Real SDK subscription smoke receives `notifications/resources/updated` after a witness DM, and repeated reads preserve the message. Notifications are explicitly advisory, not wake/ack authority. | Proven at MCP protocol level; host wake is intentionally not claimed. |
 | Real end-to-end MCP driver and shipped artifact | `smoke:mcp-gateway`, `smoke:mcp-http`, and installed tarball open/static cells use real `nats-server`, SDK transports, and witnesses. Credential-gated `smoke:mcp-gateway-codex-live` passed with a real authenticated Codex action through the packed binary. | Proven locally. |
-| ChatGPT Desktop can reach the local mesh | Loopback Streamable HTTP, exact Host/session bounds, and a real `tunnel-client` v0.0.13 profile parser are proven. No tunnel ID, runtime control-plane key, or ChatGPT Developer Mode UI session is configured here. | **Not proven; external acceptance remains.** |
+| ChatGPT Desktop can reach the local mesh | ChatGPT Desktop officially supports local stdio MCP and shares Codex MCP configuration; the packed installed stdio command is proven from an unrelated host directory against real open/static meshes, and real Codex registered/discovered/used that same configuration shape. | Direct transport and artifact path proven; a real Desktop UI/tool-call receipt remains to record. |
 | Clean review series | Focused local review refs exist for core, provisioning, gateway, HTTP, skill, and full validation; integration is clean at `review/operator-mcp-validation`. | Ready for human review locally. |
 
-The last row that could make this plan complete is deliberately not inferred from protocol, inspector,
-or Codex tests. It requires a tunnel associated with the target ChatGPT workspace, its runtime key,
-a healthy `tunnel-client` daemon, and a Developer Mode conversation recording the documented
-tool-discovery/nonce/failure-recovery receipt.
+The remaining Desktop UI receipt is deliberately not inferred from protocol or Codex tests: it must
+show ChatGPT Desktop loading the shared stdio configuration and completing the documented
+identity/orientation/nonce round trip. It does not require a tunnel. A tunnel, workspace key, and
+Developer Mode conversation are required only for the optional hosted Web route.
 
 ## Out of scope
 

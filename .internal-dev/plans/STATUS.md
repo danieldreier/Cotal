@@ -2,4 +2,4 @@
 
 | Plan | Status | Updated | Notes |
 | --- | --- | --- | --- |
-| [Operator MCP gateway](operator-mcp-gateway.md) | blocked externally | 2026-08-27 | All local PRs and real MCP/Codex validations are complete. The remaining proof needs a target-workspace tunnel ID, runtime key, healthy tunnel-client daemon, and a real ChatGPT Developer Mode conversation; it cannot be inferred from local protocol tests. |
+| [Operator MCP gateway](operator-mcp-gateway.md) | in progress | 2026-08-27 | Direct ChatGPT Desktop stdio is the primary path: it shares Codex MCP configuration and needs no tunnel. Packed stdio artifact and real Codex acceptance are complete; the remaining evidence is a ChatGPT Desktop UI/tool-call receipt against a local mesh. Hosted Web/tunnel acceptance is optional and separate. |

@@ -140,13 +140,17 @@ try {
       const installedExtension = join(configHome, "cotal", "extensions", "node_modules", "@cotal-ai", "mcp", "dist", "index.js");
       check(`${mode}: extension dispatch resolves the packed dist rather than this checkout`, existsSync(installedExtension), installedExtension);
 
-      transport = new StdioClientTransport({ command: process.execPath, args: [installedCotal, "mcp", "--space", space, "--config", "gateway"], cwd: root, env, stderr: "pipe" });
+      // Desktop MCP hosts do not promise to start in the Cotal project. The
+      // explicit space resolves both the mesh and its persona catalog, so the
+      // installed stdio command must work from an unrelated working directory.
+      const hostCwd = join(base, `mcp-host-${mode}`); mkdirSync(hostCwd, { recursive: true });
+      transport = new StdioClientTransport({ command: process.execPath, args: [installedCotal, "mcp", "--space", space, "--config", "gateway"], cwd: hostCwd, env, stderr: "pipe" });
       const stderr: string[] = [];
       transport.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk.toString()));
       client = new Client({ name: "installed-mcp-smoke", version: "0.0.0" });
       await client.connect(transport);
       const tools = await client.listTools();
-      check(`${mode}: installed command discovers the real trusted-identity MCP surface`, ["cotal_identity_open", "cotal_orientation", "cotal_inbox", "cotal_send"].every((name) => tools.tools.some((tool) => tool.name === name)));
+      check(`${mode}: installed command resolves from an unrelated MCP host directory and discovers the real trusted-identity surface`, ["cotal_identity_open", "cotal_orientation", "cotal_inbox", "cotal_send"].every((name) => tools.tools.some((tool) => tool.name === name)));
       const opened = receipt(await client.callTool({ name: "cotal_identity_open", arguments: { key: "operator" } }));
       const identity = String(opened.identity);
       check(`${mode}: installed gateway creates a fresh identity from the persona envelope`, /^[0-9a-f-]{36}$/.test(identity) && opened.outcome === "opened", opened);
@@ -169,9 +173,9 @@ try {
       await waitFor(`${mode} installed gateway EOF cleanup`, () => offline.has(principal!));
       check(`${mode}: installed gateway EOF retires the actual child identity`, offline.has(principal!));
 
-      // ChatGPT uses this exact installed command through a Secure MCP Tunnel,
-      // not the stdio transport above. Prove its shipped composition root once
-      // here using the real Streamable HTTP SDK and the same real witness.
+      // The stdio command above is the ChatGPT Desktop/Codex path. Prove the
+      // optional hosted-remote HTTP composition root once here too, using the
+      // real Streamable HTTP SDK and the same real witness.
       if (mode === "open") {
         const httpPort = await freePort(); let httpStderr = "";
         httpChild = spawn(process.execPath, [installedCotal, "mcp", "--transport", "http", "--port", String(httpPort), "--space", space, "--config", "gateway"], {

@@ -30,13 +30,19 @@ when you set `CODEX_HOME`). It explains how to orient and verify live
 mesh state; the `cotal_*` MCP tools remain the authority for state and side effects. A fresh-session
 skill load is distinct from MCP `tools/list` discovery.
 
-## ChatGPT Developer Mode
+## ChatGPT Desktop
 
-ChatGPT Developer Mode does not read a workstation's `~/.agents/skills` directory or the Claude
-`cotal-mesh` marketplace. A ChatGPT integration therefore needs the skill's short workflow guidance
-in the remote connector/app instructions; the MCP tool descriptions alone are not a skill-load proof.
-The local loopback endpoint described below also cannot be pasted into ChatGPT directly: expose it
-only through the separately operated authenticated HTTPS tunnel described by the operator MCP plan.
+ChatGPT Desktop supports local stdio MCP servers and shares its MCP configuration with Codex CLI
+and the Codex IDE extension. Configure `cotal mcp --space <space>
+--config <persona>` as a stdio server in **Settings → MCP servers**, save, restart, and check the
+Composer's `/mcp` view. See [Operator MCP gateway](operator-mcp-gateway.md) for the exact setup and
+the identity-first workflow.
+
+This direct local gateway is separate from Cotal's spawned `@cotal-ai/connector-codex` adapter: it
+creates session-scoped standalone identities rather than attaching to a Cotal-spawned Codex thread.
+The server's initialization instructions and tool descriptions guide a host that has no Cotal skill;
+do not infer a native skill load from MCP registration. Hosted ChatGPT Web/plugin use is a separate
+remote-connector path and does not read the workstation's local MCP configuration.
 
 **Codex version.** The connector drives `codex app-server` over its experimental v2 surface.
 Minimum **codex-cli 0.145.0**; tested against 0.145.0 and 0.146.0. An older binary authenticates fine but has

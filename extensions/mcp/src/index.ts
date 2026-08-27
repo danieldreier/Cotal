@@ -39,8 +39,8 @@ const command: Command = {
     ...targetFlags,
     { name: "config", type: "string", value: "<file|name>", description: "persona envelope for gateway-created identities (wins over --persona)" },
     { name: "persona", type: "string", value: "<file|name>", description: "persona envelope for gateway-created identities" },
-    { name: "transport", type: "string", value: "<stdio|http>", description: "MCP transport (stdio for Codex; http for an operator-run Secure MCP Tunnel)" },
-    { name: "port", type: "string", value: "<0-65535>", description: "with --transport http: loopback port (0 chooses one; use an explicit port for tunnel-client)" },
+    { name: "transport", type: "string", value: "<stdio|http>", description: "MCP transport (stdio for local ChatGPT Desktop and Codex; http for optional hosted remote access)" },
+    { name: "port", type: "string", value: "<0-65535>", description: "with --transport http: loopback port (0 chooses one; use an explicit port for optional tunnel-client access)" },
   ],
   async run(args): Promise<void> {
     await run(args.values as McpCommandOptions);
