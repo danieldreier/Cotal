@@ -26,7 +26,7 @@ command = "cotal"
 args = ["mcp", "--space", "my-cotal-space", "--config", "gateway"]
 ```
 
-Replace `my-cotal-space` with the name shown by `cotal meshes list`. Naming the space makes the
+Replace `my-cotal-space` with the name shown by `cotal meshes`. Naming the space makes the
 server independent of the desktop app's working directory. `--config` may instead be an absolute
 path to a persona file when the persona is outside that mesh's catalog.
 
@@ -49,6 +49,31 @@ The gateway writes JSON-RPC only to stdout. Its stderr diagnostics are not MCP m
 tell a new Codex session to use `$cotal-mesh`; it teaches the model to orient before acting and to
 distinguish live MCP state from static guidance. Skill availability does not imply a mesh connection;
 the MCP tools remain the source of truth.
+
+## Cotal Mesh Codex plugin
+
+For a local **Codex** client, this repository also ships a `cotal-mesh` plugin. It bundles the same
+portable skills (`cotal-mesh`, `team-topology`, and `cotal-engineering`) with a deliberately small
+local MCP declaration: `cotal mcp`. The client never receives a mesh credential, owner, grant, or
+lifecycle value. The Cotal CLI resolves the operator's selected current mesh and its normal
+`default` persona; `cotal setup` creates that persona for a new local mesh.
+
+From a checked-out Cotal release that has the MCP extension installed, add the repository-local
+marketplace and plugin to an isolated or everyday Codex home:
+
+```bash
+cotal ext add @cotal-ai/mcp
+codex plugin marketplace add /path/to/Cotal
+codex plugin add cotal-mesh@personal
+codex plugin list
+codex mcp list --json
+```
+
+The last command must show a `cotal` stdio server with arguments `mcp`. If the selected mesh or its
+default persona is absent, the server fails clearly when Codex starts it; create/select the mesh and
+run `cotal setup` rather than placing credentials in the plugin. The plugin is the convenient Codex
+bundle; the explicit `mcp_servers.cotal` configuration above remains the supported ChatGPT Desktop
+setup until that client has separately been shown to load a local plugin bundle.
 
 For the credential-gated Codex acceptance on a macOS host where the Codex CLI reports
 `UnknownIssuer`, use the verified system bundle rather than disabling TLS verification:

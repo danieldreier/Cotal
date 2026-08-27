@@ -154,6 +154,7 @@ smoke:codex-args
 smoke:codex-host
 smoke:codex-dist
 smoke:codex-installed
+smoke:plugin-bundle
 smoke:jcode-args
 smoke:jcode-host
 smoke:jcode-private-state

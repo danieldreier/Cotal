@@ -36,7 +36,12 @@ async function waitFor(name: string, read: () => boolean, timeout = 15_000): Pro
 }
 function persona(root: string): void {
   mkdirSync(join(root, ".cotal", "agents"), { recursive: true });
-  writeFileSync(join(root, ".cotal", "agents", "gateway.md"), "---\nname: gateway\nrole: operator\nsubscribe: [general]\nallowSubscribe: [general]\nallowPublish: [general]\n---\ninstalled gateway smoke persona\n");
+  const contents = "---\nname: gateway\nrole: operator\nsubscribe: [general]\nallowSubscribe: [general]\nallowPublish: [general]\n---\ninstalled gateway smoke persona\n";
+  // The direct command cells select `gateway`; the plugin's portable `.mcp.json`
+  // deliberately uses Cotal's normal default-persona resolution. Keep both
+  // names here so the real-plugin cell proves that ordinary installed setup.
+  writeFileSync(join(root, ".cotal", "agents", "gateway.md"), contents);
+  writeFileSync(join(root, ".cotal", "agents", "default.md"), contents);
 }
 function text(result: Awaited<ReturnType<Client["callTool"]>>): string {
   return result.content.filter((entry) => entry.type === "text").map((entry) => entry.text).join("\n");
@@ -47,7 +52,7 @@ function packageName(tarball: string): string {
 }
 
 if (spawnSync("nats-server", ["-v"], { stdio: "ignore" }).error) { console.error("installed MCP smoke needs nats-server on PATH"); process.exit(2); }
-const { authDir, prepareStandaloneAgent, recordMesh, resolveStandaloneAgent, saveSpaceAuth } = await import("@cotal-ai/workspace");
+const { authDir, prepareStandaloneAgent, recordMesh, resolveStandaloneAgent, saveSpaceAuth, setCurrent } = await import("@cotal-ai/workspace");
 const runRealCodex = /^(1|true|yes|on)$/i.test(process.env.COTAL_E2E_CODEX ?? "");
 const base = mkdtempSync(join(tmpdir(), "cotal-mcp-tarball-"));
 const tarballsDir = join(base, "tarballs"); const prefix = join(base, "prefix");
@@ -79,7 +84,7 @@ try {
   const cliListing = execFileSync("tar", ["tzf", cliTgz], { encoding: "utf8" });
   const mcpListing = execFileSync("tar", ["tzf", mcpTgz], { encoding: "utf8" });
   check("packed cotal-ai contains concrete dependency versions", !cotalPackage.includes("workspace:"));
-  check("packed CLI contains Codex-native cotal-mesh metadata", cliListing.includes("package/cotal-skills/skills/cotal-mesh/agents/openai.yaml"));
+  check("packed CLI contains every Codex-native portable Cotal skill", cliListing.includes("package/cotal-skills/skills/cotal-mesh/agents/openai.yaml") && cliListing.includes("package/cotal-skills/skills/cotal-engineering/agents/openai.yaml"));
   check("packed MCP extension contains its command and HTTP/stdio exports", mcpListing.includes("package/dist/mcp-main.js") && mcpListing.includes("package/dist/http.js") && mcpListing.includes("package/dist/index.js"));
   // `cotal ext add` deliberately accepts a directory package, not a tarball
   // pathname. Unpack the just-produced tarball into a disposable directory so
@@ -121,6 +126,7 @@ try {
       const provisioner = auth ? await mintCreds(auth, newIdentity(), "provisioner") : undefined;
       await setupSpaceStreams({ servers: server, space, creds: provisioner });
       recordMesh({ space, server, root, mode: mode === "static" ? "auth" : "open", tlsRequired: false, ts: new Date().toISOString() });
+      setCurrent(space);
       process.chdir(root);
       if (auth) peerPrepared = await prepareStandaloneAgent({ resolved: resolveStandaloneAgent({ targetFlags: { space }, config: "gateway" }), name: `installed_peer_${mode}` });
       const offline = new Set<string>();
@@ -139,6 +145,19 @@ try {
       check(`${mode}: installed cotal adds the packed MCP extension into its private prefix`, added.status === 0, `${added.stdout}\n${added.stderr}`);
       const installedExtension = join(configHome, "cotal", "extensions", "node_modules", "@cotal-ai", "mcp", "dist", "index.js");
       check(`${mode}: extension dispatch resolves the packed dist rather than this checkout`, existsSync(installedExtension), installedExtension);
+
+      // This is the exact command in the Cotal Mesh plugin's `.mcp.json`.
+      // It must resolve the operator's current mesh plus ordinary `default`
+      // persona, rather than silently depending on a host working directory or
+      // requiring client-side broker/identity flags.
+      const pluginHostCwd = join(base, `plugin-mcp-host-${mode}`); mkdirSync(pluginHostCwd, { recursive: true });
+      transport = new StdioClientTransport({ command: process.execPath, args: [installedCotal, "mcp"], cwd: pluginHostCwd, env, stderr: "pipe" });
+      client = new Client({ name: "installed-cotal-plugin-command-smoke", version: "0.0.0" });
+      await client.connect(transport);
+      const pluginTools = await client.listTools();
+      check(`${mode}: the plugin's bare cotal mcp command resolves the current mesh and default persona`, pluginTools.tools.some((tool) => tool.name === "cotal_identity_open"));
+      await client.close(); client = undefined;
+      await transport.close(); transport = undefined;
 
       // Desktop MCP hosts do not promise to start in the Cotal project. The
       // explicit space resolves both the mesh and its persona catalog, so the
@@ -238,8 +257,13 @@ try {
     const authSource = process.env.COTAL_E2E_CODEX_AUTH ?? join(process.env.HOME ?? "", ".codex", "auth.json");
     if (!existsSync(authSource)) throw new Error(`real Codex acceptance needs auth at ${authSource}; set COTAL_E2E_CODEX_AUTH to use a different existing file`);
 
-    const root = join(base, "project-codex"); const home = join(base, "home-codex"); const configHome = join(base, "config-codex");
-    const cotalHome = join(base, "cotal-home-codex"); const codexHome = join(home, ".codex");
+    const root = join(base, "project-codex"); const home = join(base, "home-codex");
+    // A plugin-declared MCP child receives its normal HOME, but it must not
+    // need a harness-only COTAL_HOME/XDG_CONFIG_HOME forwarding convention.
+    // Put Cotal's state at its normal paths inside this disposable home, which
+    // is both the production behavior and proof the plugin carries no machine
+    // path or credential configuration.
+    const configHome = join(home, ".config"); const cotalHome = join(home, ".cotal"); const codexHome = join(home, ".codex");
     for (const dir of [root, home, configHome, cotalHome, codexHome]) mkdirSync(dir, { recursive: true });
     // Do not copy, inspect, or print the operator credential. Codex reads this
     // one transient link exactly as it does in its normal local login flow.
@@ -254,6 +278,7 @@ try {
       await reachable(server);
       await setupSpaceStreams({ servers: server, space });
       recordMesh({ space, server, root, mode: "open", tlsRequired: false, ts: new Date().toISOString() });
+      setCurrent(space);
       let witnessed = false;
       peer = new CotalEndpoint({ space, servers: server, channels: ["general"], card: { id: "codex_witness", name: "codex-witness", role: "witness", kind: "agent" } });
       peer.on("error", () => {});
@@ -272,44 +297,42 @@ try {
       };
       const added = spawnSync(process.execPath, [installedCotal, "ext", "add", mcpPayload], { cwd: root, env, encoding: "utf8" });
       check("real Codex lane installs the packed MCP extension with the installed cotal binary", added.status === 0, `${added.stdout}\n${added.stderr}`);
-      // Codex persists an MCP command independently of the shell that ran
-      // `mcp add`. Spell out the executable and the three non-secret runtime
-      // paths so the server cannot accidentally depend on PATH inheritance or
-      // the test harness's source checkout when the real turn starts.
-      const registered = spawnSync(codex, [
-        "mcp", "add", "cotal-e2e",
-        "--env", `COTAL_HOME=${cotalHome}`,
-        "--env", `XDG_CONFIG_HOME=${configHome}`,
-        "--env", `PATH=${productBin}:${cleanEnv.PATH ?? ""}`,
-        "--", process.execPath, installedCotal, "mcp", "--space", space, "--config", "gateway",
-      ], { cwd: root, env, encoding: "utf8" });
-      check("real Codex records an absolute installed stdio command with only non-secret environment paths", registered.status === 0, `${registered.stdout}\n${registered.stderr}`);
+      // Install Cotal through the real Codex marketplace mechanism. Its
+      // `.mcp.json` intentionally declares only `cotal mcp`: Cotal's current
+      // local target and default persona remain the operator-side authority,
+      // while PATH below resolves `cotal` to the packed artifact just tested.
+      const marketplace = spawnSync(codex, ["plugin", "marketplace", "add", REPO, "--json"], { cwd: root, env, encoding: "utf8" });
+      check("real Codex accepts the repository's local Cotal plugin marketplace", marketplace.status === 0, `${marketplace.stdout}\n${marketplace.stderr}`);
+      const installedPlugin = spawnSync(codex, ["plugin", "add", "cotal-mesh@personal", "--json"], { cwd: root, env, encoding: "utf8" });
+      check("real Codex installs the Cotal Mesh plugin without copying mesh credentials into plugin config", installedPlugin.status === 0, `${installedPlugin.stdout}\n${installedPlugin.stderr}`);
+      const plugins = spawnSync(codex, ["plugin", "list", "--json"], { cwd: root, env, encoding: "utf8" });
+      check("real Codex enables the installed Cotal Mesh plugin", plugins.status === 0 && (plugins.stdout ?? "").includes("cotal-mesh@personal"), plugins.stdout);
       const listed = spawnSync(codex, ["mcp", "list", "--json"], { cwd: root, env, encoding: "utf8" });
       const listing = listed.stdout ?? "";
-      check("real Codex discoverability records the exact installed Cotal MCP arguments", listed.status === 0 && listing.includes("cotal-e2e") && listing.includes(installedCotal) && listing.includes("gateway") && listing.includes(space), listing);
-      const configured = spawnSync(codex, ["mcp", "get", "cotal-e2e", "--json"], { cwd: root, env, encoding: "utf8" });
-      check("real Codex stores the explicit Cotal target and extension paths", configured.status === 0 && (configured.stdout ?? "").includes(cotalHome) && (configured.stdout ?? "").includes(configHome), configured.stdout);
+      check("real Codex discovers the plugin's local Cotal stdio command", listed.status === 0 && listing.includes('"name": "cotal"') && listing.includes('"command": "cotal"') && listing.includes('"mcp"'), listing);
 
       const last = join(base, "codex-last-message.txt");
       const prompt = [
-        "Validate the configured Cotal MCP server without using shell tools.",
+        "Use $cotal-mesh to validate the configured Cotal plugin without using shell tools.",
         "Call cotal_identity_open with key codex-live, then call cotal_orientation.",
         `Then call cotal_send to channel general with text exactly ${nonce}.`,
-        "Wait for each tool result. When all three calls have succeeded, reply with exactly COTAL_E2E_DONE.",
+        "Wait for each tool result. When all three calls have succeeded, reply with exactly COTAL_E2E_DONE: Discovery marker: mesh edges are contracts, not vibes.",
       ].join(" ");
-      // `--approve-for-me` is Codex's non-interactive approval mode and owns
-      // its sandbox selection. The workspace is an empty temporary directory
-      // and the prompt explicitly permits no shell activity; it is required so
-      // this acceptance can exercise Cotal's intentional identity/write tools.
-      const run = spawnSync(codex, ["exec", "--ephemeral", "--json", "--approve-for-me", "--skip-git-repo-check", "--cd", root, "-o", last, prompt], {
+      // `--ephemeral` deliberately excludes plugin-contributed configuration
+      // overlays in Codex 0.149, so it proves an explicitly registered server
+      // but not an installed plugin. Run the ordinary CLI profile instead.
+      // This is still isolated: both CODEX_HOME and the project are fresh
+      // throwaway directories. `--approve-for-me` owns sandbox selection and
+      // is needed to exercise Cotal's intentional identity/write tools.
+      const run = spawnSync(codex, ["exec", "--json", "--approve-for-me", "--skip-git-repo-check", "--cd", root, "-o", last, prompt], {
         cwd: root, env, encoding: "utf8", timeout: 120_000, maxBuffer: 16 * 1024 * 1024,
       });
       const events = `${run.stdout ?? ""}\n${run.stderr ?? ""}`;
       if (run.error) throw new Error(`real Codex turn did not complete: ${run.error.message}\n${events.slice(-2_000)}`);
       const answer = existsSync(last) ? readFileSync(last, "utf8") : "";
-      check("a real authenticated Codex turn calls the Cotal identity, orientation, and send tools", run.status === 0 && /cotal_identity_open/.test(events) && /cotal_orientation/.test(events) && /cotal_send/.test(events) && /COTAL_E2E_DONE/.test(answer), events.slice(-2_000));
-      await waitFor("real Codex mesh nonce", () => witnessed, 30_000);
-      check("the real mesh witness received the nonce from the real Codex MCP tool call", witnessed);
+      check("a real authenticated Codex plugin session loads cotal-mesh and calls identity, orientation, and send", run.status === 0 && /cotal_identity_open/.test(events) && /cotal_orientation/.test(events) && /cotal_send/.test(events) && /COTAL_E2E_DONE: Discovery marker: mesh edges are contracts, not vibes\./.test(answer), events.slice(-2_000));
+      await waitFor("real Codex plugin mesh nonce", () => witnessed, 30_000);
+      check("the real mesh witness received the nonce from the installed plugin's Cotal MCP tool call", witnessed);
     } finally {
       await peer?.stop().catch(() => {});
       broker?.kill("SIGTERM");
@@ -322,7 +345,7 @@ try {
   await cell("open");
   await cell("static");
   if (runRealCodex) await codexCell();
-  check("every installed open/static MCP cell completed", passed === (runRealCodex ? 37 : 31), passed);
+  check("every installed open/static MCP cell completed", passed === (runRealCodex ? 40 : 33), passed);
   console.log("MCP GATEWAY INSTALLED-ARTIFACT SMOKE OK ✅");
 } finally {
   rmSync(base, { recursive: true, force: true });

@@ -272,13 +272,14 @@ export function claudePluginStep(): Step {
 }
 
 /** The Claude Code skills-plugin install, as a step. Independent of the mesh connector: it runs whenever
- *  Claude is on PATH, so a Claude user gets Cotal's authored skills (cotal-mesh and team-topology) even
+ *  Claude is on PATH, so a Claude user gets Cotal's authored skills (cotal-mesh, team-topology, and
+ *  cotal-engineering) even
  *  with no connector, and a repeat `cotal setup` updates them. Installed at user scope (machine-wide). */
 export function skillsPluginStep(): Step {
   return {
     name: "claude-skills-plugin",
     title: "Add Cotal's skills to Claude Code",
-    explain: "Installs Cotal's authored skills (cotal-mesh and team-topology) as a Claude Code plugin, updatable and removable on their own.",
+    explain: "Installs Cotal's authored skills (cotal-mesh, team-topology, and cotal-engineering) as a Claude Code plugin, updatable and removable on their own.",
     context: [join(homeCotalDir(), "claude-plugin"), CC_DOCS_URL],
     async run() {
       installSkillsPlugin();

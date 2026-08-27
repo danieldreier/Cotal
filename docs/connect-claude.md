@@ -27,7 +27,8 @@ The install mechanics and the invariants behind them are in
 [setup internals](setup-internals.md).
 
 `cotal setup` also installs Cotal's authored Agent Skills (`SKILL.md`, the agentskills.io format) for
-mesh coordination and agent-team design (`cotal-mesh` and `team-topology`), from one canonical source,
+mesh coordination, agent-team design, and generic Cotal engineering (`cotal-mesh`, `team-topology`, and
+`cotal-engineering`), from one canonical source,
 on two channels:
 
 - **Claude Code** gets a second, skills-only plugin, `cotal-skills`, from the same `cotal-mesh`

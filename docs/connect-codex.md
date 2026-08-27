@@ -14,19 +14,20 @@ spawn options that are not wired **fail loud** rather than degrade: resuming a s
 ## Install
 
 The connector ships with the CLI as a seeded extension (`@cotal-ai/connector-codex`): no
-separate install step and no Codex-side plugin. You only need an authenticated `codex` binary
-on your PATH (a ChatGPT-plan login or an `OPENAI_API_KEY`). If an older install is missing it,
-`cotal ext seed --repair` (or `cotal ext add @cotal-ai/connector-codex`) brings it in.
+separate install step and no Codex-side plugin are needed for a **Cotal-managed** agent. You only
+need an authenticated `codex` binary on your PATH (a ChatGPT-plan login or an `OPENAI_API_KEY`).
+If an older install is missing it, `cotal ext seed --repair` (or `cotal ext add
+@cotal-ai/connector-codex`) brings it in. The connector drives Codex from the outside over
+`codex app-server`.
 
-**Don't install the `cotal` plugin Codex offers you.** Searching Codex's plugin list for "cotal"
-turns up a plugin named `cotal`, from the `cotal-mesh` marketplace. That is the **Claude Code**
-adapter, which appears there only because Codex reads the same plugin-marketplace format; it is
-not this connector and installing it does not connect Codex to a mesh. Codex needs nothing
-installed on its side: the connector drives it from the outside, over `codex app-server`.
+For a person running their own local Codex client, the separate `cotal-mesh` Codex plugin bundles
+the portable Cotal skills and a trusted local `cotal mcp` server. It is not the managed connector
+and it creates independent, session-scoped Cotal identities. Install and validate it through the
+[operator MCP gateway guide](operator-mcp-gateway.md#cotal-mesh-codex-plugin).
 
-Cotal's Codex workflow guidance is a separate Agent Skill, `cotal-mesh`, installed by
-`cotal setup` at `~/.codex/skills/cotal-mesh/SKILL.md` (or `$CODEX_HOME/skills/cotal-mesh/SKILL.md`
-when you set `CODEX_HOME`). It explains how to orient and verify live
+Cotal's workflow guidance is also installed by `cotal setup` in Codex's native skill root: normally
+`~/.codex/skills/`, or `$CODEX_HOME/skills/` when you set `CODEX_HOME`. The portable set is
+`cotal-mesh`, `team-topology`, and `cotal-engineering`. It explains how to orient and verify live
 mesh state; the `cotal_*` MCP tools remain the authority for state and side effects. A fresh-session
 skill load is distinct from MCP `tools/list` discovery.
 

@@ -37,7 +37,7 @@ const { agentSkillsHome, canonicalSkillsDir, canonicalSkillNames, codexSkillsHom
 try {
   const canon = canonicalSkillsDir();
   const names = canonicalSkillNames();
-  assert.deepEqual(names, ["cotal-mesh", "team-topology"], "the shipped cross-vendor skill set is deterministic");
+  assert.deepEqual(names, ["cotal-engineering", "cotal-mesh", "team-topology"], "the shipped cross-vendor skill set is deterministic");
   const meshSkill = readFileSync(join(canon, "cotal-mesh", "SKILL.md"), "utf8");
   assert.match(meshSkill, /^name:\s+cotal-mesh\s*$/m);
   assert.match(meshSkill, /^description:\s+.+Cotal.+cotal_\* tools.+$/m);
@@ -70,7 +70,7 @@ try {
     let r = installAgentSkills();
     assert.deepEqual([r.installed, r.backedUp, r.removed], [names, [], []]);
     assert.deepEqual([r.codexInstalled, r.codexBackedUp, r.codexRemoved], [names, [], []]);
-    assert.deepEqual([r.codexInterfacesInstalled, r.codexInterfacesBackedUp, r.codexInterfacesRemoved], [["cotal-mesh"], [], []]);
+    assert.deepEqual([r.codexInterfacesInstalled, r.codexInterfacesBackedUp, r.codexInterfacesRemoved], [["cotal-engineering", "cotal-mesh"], [], []]);
     assert.equal(stateOf(name), "current");
     assert.equal(codexStateOf(name), "current");
     assert.ok(readFileSync(destFile).equals(canonicalBytes));
