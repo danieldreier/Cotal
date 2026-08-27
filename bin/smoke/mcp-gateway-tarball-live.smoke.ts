@@ -73,11 +73,13 @@ try {
   const tarballs = readdirSync(tarballsDir).filter((name) => name.endsWith(".tgz")).map((name) => join(tarballsDir, name));
   check("packed the complete Cotal + MCP extension closure", tarballs.length === dirs.length, tarballs.length);
   const byPackage = new Map(tarballs.map((tarball) => [packageName(tarball), tarball]));
-  const cotalTgz = byPackage.get("cotal-ai"); const mcpTgz = byPackage.get("@cotal-ai/mcp");
-  if (!cotalTgz || !mcpTgz) throw new Error("packed closure did not include cotal-ai and @cotal-ai/mcp");
+  const cotalTgz = byPackage.get("cotal-ai"); const cliTgz = byPackage.get("@cotal-ai/cli"); const mcpTgz = byPackage.get("@cotal-ai/mcp");
+  if (!cotalTgz || !cliTgz || !mcpTgz) throw new Error("packed closure did not include cotal-ai, @cotal-ai/cli, and @cotal-ai/mcp");
   const cotalPackage = execFileSync("tar", ["xzf", cotalTgz, "-O", "package/package.json"], { encoding: "utf8" });
+  const cliListing = execFileSync("tar", ["tzf", cliTgz], { encoding: "utf8" });
   const mcpListing = execFileSync("tar", ["tzf", mcpTgz], { encoding: "utf8" });
   check("packed cotal-ai contains concrete dependency versions", !cotalPackage.includes("workspace:"));
+  check("packed CLI contains Codex-native cotal-mesh metadata", cliListing.includes("package/cotal-skills/skills/cotal-mesh/agents/openai.yaml"));
   check("packed MCP extension contains its command and HTTP/stdio exports", mcpListing.includes("package/dist/mcp-main.js") && mcpListing.includes("package/dist/http.js") && mcpListing.includes("package/dist/index.js"));
   // `cotal ext add` deliberately accepts a directory package, not a tarball
   // pathname. Unpack the just-produced tarball into a disposable directory so
@@ -316,7 +318,7 @@ try {
   await cell("open");
   await cell("static");
   if (runRealCodex) await codexCell();
-  check("every installed open/static MCP cell completed", passed === (runRealCodex ? 36 : 30), passed);
+  check("every installed open/static MCP cell completed", passed === (runRealCodex ? 37 : 31), passed);
   console.log("MCP GATEWAY INSTALLED-ARTIFACT SMOKE OK ✅");
 } finally {
   rmSync(base, { recursive: true, force: true });

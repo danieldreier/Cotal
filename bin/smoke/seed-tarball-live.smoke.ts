@@ -38,9 +38,11 @@ const base = mkdtempSync(join(tmpdir(), "cotal-tarball-smoke-"));
 const tgz = join(base, "tgz");
 const prefix = join(base, "prefix");
 const cfg = join(base, "cfg");
+const npmCache = join(base, "npm-cache");
 mkdirSync(tgz, { recursive: true });
 mkdirSync(prefix, { recursive: true });
 mkdirSync(cfg, { recursive: true });
+mkdirSync(npmCache, { recursive: true });
 
 try {
   console.log("packing the cotal-ai closure …");
@@ -61,8 +63,11 @@ try {
   check("packed the full @cotal-ai closure", tarballs.length === dirs.length, tarballs.length);
 
   const cotalTgz = join(tgz, tarballs.find((f) => /^cotal-ai-\d/.test(f)) ?? "");
+  const cliTgz = join(tgz, tarballs.find((f) => /^cotal-ai-cli-\d/.test(f)) ?? "");
   const listing = execFileSync("tar", ["tzf", cotalTgz], { encoding: "utf8" });
-  check("cotal-ai tarball ships the cotal-mesh Agent Skill", listing.includes("package/cotal-skills/skills/cotal-mesh/SKILL.md"));
+  const cliListing = execFileSync("tar", ["tzf", cliTgz], { encoding: "utf8" });
+  check("@cotal-ai/cli tarball ships the cotal-mesh Agent Skill", cliListing.includes("package/cotal-skills/skills/cotal-mesh/SKILL.md"));
+  check("@cotal-ai/cli tarball ships Codex-native skill metadata", cliListing.includes("package/cotal-skills/skills/cotal-mesh/agents/openai.yaml"));
   check("cotal-ai tarball ships seeded-connectors/ payloads", listing.includes("package/seeded-connectors/hermes/package.json"));
   check("cotal-ai tarball bundles the web dashboard payload", listing.includes("package/seeded-connectors/web/package.json"));
   check(
@@ -112,22 +117,29 @@ try {
   const install = spawnSync("npm", ["install", "--no-audit", "--no-fund", ...tarballs.map((f) => join(tgz, f))], {
     cwd: prefix,
     encoding: "utf8",
+    env: { ...process.env, NPM_CONFIG_CACHE: npmCache, NO_UPDATE_NOTIFIER: "1", NPM_CONFIG_UPDATE_NOTIFIER: "false" },
   });
   check("npm install of the tarball closure succeeded", install.status === 0, install.stderr?.split("\n").slice(-6).join("\n"));
 
   const packageBin = join(prefix, "node_modules", "cotal-ai", "dist", "cotal.js");
   check("installed binary present", existsSync(packageBin));
   check("seeded-connectors present in the installed package", existsSync(join(prefix, "node_modules", "cotal-ai", "seeded-connectors")));
-  check("cotal-mesh Agent Skill present in the installed package", existsSync(join(prefix, "node_modules", "cotal-ai", "cotal-skills", "skills", "cotal-mesh", "SKILL.md")));
+  check("cotal-mesh Agent Skill present in the installed CLI package", existsSync(join(prefix, "node_modules", "@cotal-ai", "cli", "cotal-skills", "skills", "cotal-mesh", "SKILL.md")));
+  check("Codex-native skill metadata present in the installed CLI package", existsSync(join(prefix, "node_modules", "@cotal-ai", "cli", "cotal-skills", "skills", "cotal-mesh", "agents", "openai.yaml")));
   check("single @cotal-ai/core hoisted in the prefix", existsSync(join(prefix, "node_modules", "@cotal-ai", "core")));
 
   console.log("seeding from the published layout …");
   const npmBin = join(prefix, "node_modules", ".bin", "cotal");
   const invokedBin = process.platform === "win32" ? packageBin : npmBin;
+  const seededEnv = { ...process.env, XDG_CONFIG_HOME: cfg, NPM_CONFIG_CACHE: npmCache, NO_UPDATE_NOTIFIER: "1", NPM_CONFIG_UPDATE_NOTIFIER: "false" };
   if (process.platform !== "win32") {
     check("npm installed cotal through a bin symlink", existsSync(npmBin) && lstatSync(npmBin).isSymbolicLink());
   }
-  const list = spawnSync("node", [invokedBin, "ext", "list"], { encoding: "utf8", env: { ...process.env, XDG_CONFIG_HOME: cfg } });
+  // POSIX npm bins are executable shebang shims, not JavaScript modules. Execute that shim directly;
+  // only the Windows fallback needs an explicit `node` process for the packaged entrypoint.
+  const list = process.platform === "win32"
+    ? spawnSync("node", [invokedBin, "ext", "list"], { encoding: "utf8", env: seededEnv })
+    : spawnSync(invokedBin, ["ext", "list"], { encoding: "utf8", env: seededEnv });
   const out = list.stdout ?? "";
   for (const n of ["claude", "opencode", "codex", "hermes", "jcode", "pi"]) {
     check(`seeded connector:${n} from the tarball binary`, out.includes(`connector:${n}`), list.stderr);
