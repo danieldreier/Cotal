@@ -70,6 +70,7 @@ try {
   check("@cotal-ai/cli tarball ships Codex-native skill metadata", cliListing.includes("package/cotal-skills/skills/cotal-mesh/agents/openai.yaml"));
   check("cotal-ai tarball ships seeded-connectors/ payloads", listing.includes("package/seeded-connectors/hermes/package.json"));
   check("cotal-ai tarball bundles the web dashboard payload", listing.includes("package/seeded-connectors/web/package.json"));
+  check("cotal-ai tarball bundles the local MCP gateway payload", listing.includes("package/seeded-connectors/mcp/package.json"));
   check(
     "bundled web payload is self-contained (marked/dompurify shipped in dist, no runtime deps)",
     listing.includes("package/seeded-connectors/web/dist/web/vendor/marked.umd.js") &&
@@ -82,7 +83,7 @@ try {
   // as the generation, so a skewed payload would be installed and treated as current (F1). The prepack
   // asserts this too; the tarball is the last place to catch it before a customer install.
   const umbrellaVersion = (JSON.parse(packedPkg) as { version: string }).version;
-  for (const n of ["claude", "opencode", "hermes", "pi", "web"]) {
+  for (const n of ["claude", "opencode", "hermes", "pi", "web", "mcp"]) {
     const seededPkg = JSON.parse(
       execFileSync("tar", ["xzf", cotalTgz, "-O", `package/seeded-connectors/${n}/package.json`], { encoding: "utf8" }),
     ) as { version: string };
@@ -151,10 +152,10 @@ try {
   };
   const hermes = manifest.extensions.find((e) => e.pkg === "@cotal-ai/connector-hermes");
   check("connector installed from the durable store under the isolated config (pubDir branch)", Boolean(hermes && hermes.spec.startsWith(cfg)), hermes?.spec);
-  const firstParty = ["@cotal-ai/connector-claude-code", "@cotal-ai/connector-opencode", "@cotal-ai/connector-codex", "@cotal-ai/connector-hermes", "@cotal-ai/connector-jcode", "@cotal-ai/pi", "@cotal-ai/web"];
+  const firstParty = ["@cotal-ai/connector-claude-code", "@cotal-ai/connector-opencode", "@cotal-ai/connector-codex", "@cotal-ai/connector-hermes", "@cotal-ai/connector-jcode", "@cotal-ai/pi", "@cotal-ai/web", "@cotal-ai/mcp"];
   const seededEntries = manifest.extensions.filter((e) => firstParty.includes(e.pkg));
   const allSeeded = seededEntries.every((e) => e.source === "seeded");
-  check("all seven first-party exts recorded source:seeded (registered into the binary's single core)", allSeeded && seededEntries.length === 7);
+  check("all eight first-party exts recorded source:seeded (registered into the binary's single core)", allSeeded && seededEntries.length === 8);
   const webEntry = manifest.extensions.find((e) => e.pkg === "@cotal-ai/web");
   check("web installed from the durable store under the isolated config (bundled, not npm-fetched)", Boolean(webEntry && webEntry.spec.startsWith(cfg)), webEntry?.spec);
 

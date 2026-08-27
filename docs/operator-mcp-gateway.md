@@ -2,12 +2,11 @@
 
 > **Guide** (informative) · **For:** one trusted local operator · **Prereqs:** a running open or static-auth mesh
 
-`@cotal-ai/mcp` is a separately installed Cotal extension that serves the shared Cotal MCP tools either over local stdio or a private loopback HTTP endpoint. It creates fresh, session-scoped Cotal identities on demand. Each opaque handle owns its own broker credential, MeshAgent, inbox, presence, and lifecycle; closing it stops the agent and retires that exact lifecycle.
+`@cotal-ai/mcp` is a first-party Cotal extension, seeded automatically with the CLI so `cotal mcp` is available after the first command. It serves the shared Cotal MCP tools either over local stdio or a private loopback HTTP endpoint. It creates fresh, session-scoped Cotal identities on demand. Each opaque handle owns its own broker credential, MeshAgent, inbox, presence, and lifecycle; closing it stops the agent and retires that exact lifecycle.
 
-Install the extension, then point the gateway at the persona that defines the permitted channel and capability envelope:
+Point the gateway at the persona that defines the permitted channel and capability envelope:
 
 ```bash
-cotal ext add @cotal-ai/mcp
 cotal mcp --space my-cotal-space --config gateway
 ```
 
@@ -58,11 +57,10 @@ local MCP declaration: `cotal mcp`. The client never receives a mesh credential,
 lifecycle value. The Cotal CLI resolves the operator's selected current mesh and its normal
 `default` persona; `cotal setup` creates that persona for a new local mesh.
 
-From a checked-out Cotal release that has the MCP extension installed, add the repository-local
-marketplace and plugin to an isolated or everyday Codex home:
+From a checked-out Cotal release, add the repository-local marketplace and plugin to an isolated or
+everyday Codex home:
 
 ```bash
-cotal ext add @cotal-ai/mcp
 codex plugin marketplace add /path/to/Cotal
 codex plugin add cotal-mesh@personal
 codex plugin list

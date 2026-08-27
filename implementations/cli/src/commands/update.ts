@@ -164,8 +164,8 @@ async function reconcileCurrent(
     rt.out(c.bold("Operator extensions"));
     let entries: readonly InstalledExtension[];
     try {
-      // Exclude every seeded built-in (the connectors AND the bundled web dashboard) — runSeed already
-      // reconciled them from the bundled store; letting web fall through here reinstalls it from npm on
+      // Exclude every seeded built-in (the connectors, bundled web dashboard, and local MCP gateway) — runSeed already
+      // reconciled them from the bundled store; letting a bundled package fall through here reinstalls it from npm on
       // top of the seed, drops its seeded marker, and makes `cotal update` fail offline on a bundled pkg.
       const builtIns = new Set(Object.values(SEEDED_EXTENSIONS).map((e) => e.pkg));
       entries = rt.extensions().filter((entry) => !builtIns.has(entry.pkg));

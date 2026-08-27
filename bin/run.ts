@@ -29,6 +29,11 @@ import "@cotal-ai/auth"; // self-registers login / logout — per-user IdP sessi
 // runtime and its zod copy into CLI startup, and a renderer needs none of it.
 import "@cotal-ai/connector-core/agui-render";
 import { registry } from "@cotal-ai/core";
+import { setExtensionHostResolver } from "@cotal-ai/workspace";
+
+// Extensions bind their shared peers to this composition root. This matters in a source worktree:
+// workspace itself intentionally does not depend on every optional peer the published cotal binary carries.
+setExtensionHostResolver((specifier) => import.meta.resolve(specifier));
 
 // A CLI must exit quietly when its stdout is closed early — piped to `head`, a pager that quits,
 // or a shell's process substitution (`source <(cotal completion bash)`). Node otherwise turns the

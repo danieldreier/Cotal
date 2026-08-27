@@ -23,6 +23,7 @@
       "@cotal-ai/connector-jcode",
       "@cotal-ai/connector-opencode",
       "@cotal-ai/connector-codex",
+      "@cotal-ai/mcp",
       "@cotal-ai/pi",
       "@cotal-ai/auth"
     ]

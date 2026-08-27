@@ -181,10 +181,21 @@ export interface BoundExtensionPeer {
   readonly destination: string;
 }
 
+/** The published binary sets this to its own resolver before it loads operator extensions.
+ *  A source-worktree package resolves its dependencies from its package directory, which deliberately
+ *  does not depend on every optional extension peer the binary carries. Resolve from the composition
+ *  root instead, so a seeded extension is linked to the peer copy that actually owns the registry. */
+let extensionHostResolve: ((specifier: string) => string) | undefined;
+
+export function setExtensionHostResolver(resolve: (specifier: string) => string): void {
+  extensionHostResolve = resolve;
+}
+
 /** Locate a shared package in this host's module graph. Exported so a failed import can name the
  *  EXACT peer copy the binder linked, rather than a second resolution that might not be the same one. */
 export function hostPackageDir(name: string): string {
-  let dir = dirname(fileURLToPath(import.meta.resolve(name)));
+  const resolved = (extensionHostResolve ?? import.meta.resolve)(name);
+  let dir = dirname(fileURLToPath(resolved));
   for (;;) {
     const pj = join(dir, "package.json");
     if (existsSync(pj) && (JSON.parse(readFileSync(pj, "utf8")) as { name?: string }).name === name) return dir;

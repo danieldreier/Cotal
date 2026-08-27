@@ -1,7 +1,7 @@
 /**
  * Published-artifact MCP smoke. It packs the complete Cotal closure, installs
- * it under a fresh npm prefix, adds the packed @cotal-ai/mcp extension through
- * the installed `cotal` binary, and speaks MCP to that installed binary over
+ * it under a fresh npm prefix, lets the installed `cotal` binary seed its own
+ * packed @cotal-ai/mcp extension, and speaks MCP to that installed binary over
  * stdio while a real NATS broker and witness prove mesh effects. Source imports
  * are only the test harness/broker witness: the product child resolves solely
  * from the installed prefix and its isolated HOME/XDG/COTAL_HOME.
@@ -56,7 +56,6 @@ const { authDir, prepareStandaloneAgent, recordMesh, resolveStandaloneAgent, sav
 const runRealCodex = /^(1|true|yes|on)$/i.test(process.env.COTAL_E2E_CODEX ?? "");
 const base = mkdtempSync(join(tmpdir(), "cotal-mcp-tarball-"));
 const tarballsDir = join(base, "tarballs"); const prefix = join(base, "prefix");
-const mcpPayload = join(base, "mcp-payload");
 const npmCache = join(base, "npm-cache");
 mkdirSync(tarballsDir, { recursive: true }); mkdirSync(prefix, { recursive: true }); mkdirSync(npmCache, { recursive: true });
 // Packing `cotal-ai` runs its existing seeded-connector prepack, which invokes
@@ -86,13 +85,8 @@ try {
   check("packed cotal-ai contains concrete dependency versions", !cotalPackage.includes("workspace:"));
   check("packed CLI contains every Codex-native portable Cotal skill", cliListing.includes("package/cotal-skills/skills/cotal-mesh/agents/openai.yaml") && cliListing.includes("package/cotal-skills/skills/cotal-engineering/agents/openai.yaml"));
   check("packed MCP extension contains its command and HTTP/stdio exports", mcpListing.includes("package/dist/mcp-main.js") && mcpListing.includes("package/dist/http.js") && mcpListing.includes("package/dist/index.js"));
-  // `cotal ext add` deliberately accepts a directory package, not a tarball
-  // pathname. Unpack the just-produced tarball into a disposable directory so
-  // the product receives a normal installed-artifact input with no checkout
-  // path on its resolution chain.
-  mkdirSync(mcpPayload, { recursive: true });
-  execFileSync("tar", ["xzf", mcpTgz, "-C", mcpPayload, "--strip-components=1"]);
-  check("extension add input is the unpacked MCP artifact, never source", existsSync(join(mcpPayload, "dist", "index.js")));
+  const cotalListing = execFileSync("tar", ["tzf", cotalTgz], { encoding: "utf8" });
+  check("packed cotal-ai seeds the MCP gateway from its own version-locked payload", cotalListing.includes("package/seeded-connectors/mcp/package.json"));
 
   writeFileSync(join(prefix, "package.json"), JSON.stringify({ name: "cotal-mcp-installed-smoke", private: true }));
   const install = spawnSync("npm", ["install", "--no-audit", "--no-fund", ...tarballs], { cwd: prefix, encoding: "utf8" });
@@ -141,10 +135,7 @@ try {
       const cleanEnv: NodeJS.ProcessEnv = { ...process.env };
       for (const key of Object.keys(cleanEnv)) if (key.startsWith("COTAL_")) delete cleanEnv[key];
       const env: NodeJS.ProcessEnv = { ...cleanEnv, HOME: home, XDG_CONFIG_HOME: configHome, COTAL_HOME: cotalHome };
-      const added = spawnSync(process.execPath, [installedCotal, "ext", "add", mcpPayload], { cwd: root, env, encoding: "utf8" });
-      check(`${mode}: installed cotal adds the packed MCP extension into its private prefix`, added.status === 0, `${added.stdout}\n${added.stderr}`);
       const installedExtension = join(configHome, "cotal", "extensions", "node_modules", "@cotal-ai", "mcp", "dist", "index.js");
-      check(`${mode}: extension dispatch resolves the packed dist rather than this checkout`, existsSync(installedExtension), installedExtension);
 
       // This is the exact command in the Cotal Mesh plugin's `.mcp.json`.
       // It must resolve the operator's current mesh plus ordinary `default`
@@ -156,6 +147,7 @@ try {
       await client.connect(transport);
       const pluginTools = await client.listTools();
       check(`${mode}: the plugin's bare cotal mcp command resolves the current mesh and default persona`, pluginTools.tools.some((tool) => tool.name === "cotal_identity_open"));
+      check(`${mode}: boot reconcile seeds the MCP gateway from the installed cotal artifact`, existsSync(installedExtension), installedExtension);
       await client.close(); client = undefined;
       await transport.close(); transport = undefined;
 
@@ -295,8 +287,6 @@ try {
         ...cleanEnv, HOME: home, USERPROFILE: home, CODEX_HOME: codexHome, XDG_CONFIG_HOME: configHome, COTAL_HOME: cotalHome,
         PATH: `${productBin}:${cleanEnv.PATH ?? ""}`,
       };
-      const added = spawnSync(process.execPath, [installedCotal, "ext", "add", mcpPayload], { cwd: root, env, encoding: "utf8" });
-      check("real Codex lane installs the packed MCP extension with the installed cotal binary", added.status === 0, `${added.stdout}\n${added.stderr}`);
       // Install Cotal through the real Codex marketplace mechanism. Its
       // `.mcp.json` intentionally declares only `cotal mcp`: Cotal's current
       // local target and default persona remain the operator-side authority,
@@ -345,7 +335,7 @@ try {
   await cell("open");
   await cell("static");
   if (runRealCodex) await codexCell();
-  check("every installed open/static MCP cell completed", passed === (runRealCodex ? 40 : 33), passed);
+  check("every installed open/static MCP cell completed", passed === (runRealCodex ? 37 : 31), passed);
   console.log("MCP GATEWAY INSTALLED-ARTIFACT SMOKE OK ✅");
 } finally {
   rmSync(base, { recursive: true, force: true });
