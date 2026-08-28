@@ -1019,15 +1019,23 @@ export function cotalToolSpecs(config: AgentConfig, source = "connector"): Cotal
           .describe(
             "Optional working directory to root the new peer at (e.g. a different repo). A relative path resolves against the manager's workspace; omitted → it shares the manager's workspace.",
           ),
+        task: z
+          .string()
+          .min(1)
+          .max(12_000)
+          .optional()
+          .describe(
+            "One bounded, one-shot task for the new peer. Required by remote CPN runtimes; local runtimes deliver it as the new agent's initial turn.",
+          ),
         // NOTE: session `resume` is deliberately NOT exposed here. Forking a host-local `~/.claude`
         // transcript is an operator-local intent; letting a spawn-capable mesh PEER name a host
         // session id would expand `spawn` into host-transcript disclosure with no broker-enforced
         // boundary. Resume lives only on the operator CLI (`cotal spawn --resume`, foreground or
         // --detach); a peer-facing, capability-gated resume is deferred (see #159).
       },
-      async run(agent, _config, { name, role, agent: agentType, model, variant, launchOptions, cwd }: { name: string; role?: string; agent?: string; model?: string; variant?: string; launchOptions?: Record<string, unknown>; cwd?: string }) {
+      async run(agent, _config, { name, role, agent: agentType, model, variant, launchOptions, cwd, task }: { name: string; role?: string; agent?: string; model?: string; variant?: string; launchOptions?: Record<string, unknown>; cwd?: string; task?: string }) {
         try {
-          const reply = await agent.spawn(name, role, { agent: agentType, model, variant, launchOptions, cwd });
+          const reply = await agent.spawn(name, role, { agent: agentType, model, variant, launchOptions, cwd, task });
           if (!reply.ok) return err(`Couldn't spawn ${name}: ${reply.error ?? "manager refused"}`);
           const d = reply.data as { name?: string; mode?: string } | undefined;
           const actual = d?.name ?? name; // the manager auto-numbers on a collision — report what it spawned
