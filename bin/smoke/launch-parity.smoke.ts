@@ -5,8 +5,8 @@
  * between connector-core and workspace, so parity is enforced HERE, by test:
  *   1. `spawnFlags` ⊇ the shared `launchFlags` bundle (spawn parses the whole grammar).
  *   2. Every launch flag maps onto a manager `start`-op key (the golden op vocabulary).
- *   3. Every MCP `cotal_spawn` schema param IS one of those op keys (subset — the tool may
- *      expose less, e.g. no `resume` by design, but never a divergent name).
+ *   3. Every MCP `cotal_spawn` schema param maps onto one of those op keys (subset — the tool may
+ *      expose less, e.g. no `resume` by design; its user-facing `task` maps explicitly to `prompt`).
  *   4. Every launch client's request window OUTLIVES the manager's readiness wait (#159 B1) —
  *      the manager replies to `start`/`launch` only on a real outcome, so a client timeout at or
  *      under that window kills real spawns while the launch proceeds.
@@ -54,6 +54,12 @@ const flagToOpKey: Record<string, string> = {
   "no-events": "events",
 };
 
+/** MCP tool arg → manager op key where the peer-facing vocabulary is intentionally clearer than
+ *  the generic launch grammar. A spawned peer receives a one-shot task; the manager already calls
+ *  every connector's initial turn a `prompt`, so the connector translates rather than adding a
+ *  CPN-specific field to the control protocol. */
+const toolToOpKey: Record<string, string> = { task: "prompt" };
+
 // 1 — spawn parses the whole shared grammar.
 const spawnNames = new Set(spawnFlags.map((f) => f.name));
 for (const f of launchFlags) {
@@ -78,7 +84,8 @@ const spawnTool = cotalToolSpecs(configFromEnv({ COTAL_NAME: "parity-smoke" }), 
 assert.ok(spawnTool, "cotal_spawn tool spec exists");
 const toolParams = Object.keys(spawnTool.schema.shape);
 for (const p of toolParams) {
-  assert.ok(START_OP_KEYS.has(p), `cotal_spawn param "${p}" is not a start-op key — vocabulary drift`);
+  const key = toolToOpKey[p] ?? p;
+  assert.ok(START_OP_KEYS.has(key), `cotal_spawn param "${p}" has no start-op key (${key}) — vocabulary drift`);
 }
 // `resume` stays deliberately OFF the peer-facing tool (host-transcript disclosure — see the
 // tool-specs note); this asserts today's intent so re-adding it is a conscious edit here too.
