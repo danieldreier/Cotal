@@ -17,8 +17,9 @@
     "holder is no longer refused as `holder-alive`. Eviction may still fail closed later; the named",
     "cell is the admit condition, not the later barrier.",
     "",
-    "NOT GRADED HERE: the CLI `cotal reconcile-gate` path, which `smoke:gate-reconcile:auth` already",
-    "mutation-proofs. This file grades that the successor BOOT reaches that composition."
+    "NOT GRADED HERE: the CLI `cotal reconcile-gate` path. Its dedicated smoke has strong real-broker",
+    "coverage but no mutation config. This file grades the successor BOOT and the shared reply mapper",
+    "through the exact boundaries the automatic repair depends on."
   ],
   "mutations": [
     {
@@ -38,6 +39,33 @@
       "expectRed": "LIVE HOLDER: the refusal is named `holder-alive`",
       "cell": "LIVE HOLDER: the refusal is named `holder-alive`",
       "note": "The admit condition is gone AND sweepComplete=true. Forging a gone verdict at the boot seam is exactly the TTL-shaped failure two reviewers independently refused."
+    },
+    {
+      "name": "stale tenure: boot mutates after its own per-instance manager lease is lost",
+      "file": "implementations/manager/src/manager.ts",
+      "find": "        assertMutationAuthorized: (checkpoint) => this.assertBootHealLeaseHeld(checkpoint),\n",
+      "replace": "        assertMutationAuthorized: async () => {},\n",
+      "expectRed": "LEASE LOST: the refusal is named `lease-not-held`",
+      "cell": "LEASE LOST: the refusal is named `lease-not-held`",
+      "note": "The liveness and eviction RPCs can exceed the manager-lease TTL. Automatic repair must re-prove its own fencing tenure after the oracle reply and around every mutating phase."
+    },
+    {
+      "name": "swallow raced: boot continues after revoke and eviction even though its final reopen CAS lost",
+      "file": "implementations/manager/src/manager.ts",
+      "find": "      if (e instanceof GateReconcileRefused && e.condition === \"not-frozen\") {\n",
+      "replace": "      if (e instanceof GateReconcileRefused && (e.condition === \"not-frozen\" || e.condition === \"raced\")) {\n",
+      "expectRed": "RACED REOPEN: the refusal is named `raced`",
+      "cell": "RACED REOPEN: the refusal is named `raced`",
+      "note": "A raced reopen happens after family revoke and verified eviction. Seeing the gate open does not make those side effects benign, so automatic boot must refuse rather than register onward."
+    },
+    {
+      "name": "contradictory oracle: incomplete sweep is allowed to authorize gone",
+      "file": "implementations/manager/src/holder-liveness.ts",
+      "find": "  if (parsed.state === \"gone\" && parsed.sweepComplete !== true)\n",
+      "replace": "  if (false && parsed.state === \"gone\" && parsed.sweepComplete !== true)\n",
+      "expectRed": "INCOMPLETE SWEEP: contradictory `gone` is named `liveness-unestablishable`",
+      "cell": "INCOMPLETE SWEEP: contradictory `gone` is named `liveness-unestablishable`",
+      "note": "The boot contract names gone AND sweepComplete=true as the admit condition. Deleting the contradiction guard must make the new boot-seam cell red."
     }
   ]
 }

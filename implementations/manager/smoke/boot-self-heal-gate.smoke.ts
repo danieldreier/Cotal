@@ -107,6 +107,10 @@ const releaseBroker = teardownOnSignal(srv, dir);
 const holderConns: NatsConnection[] = [];
 let daemon: CotalEndpoint | undefined;
 let mgr: InstanceType<typeof Manager> | undefined;
+let startingManager: InstanceType<typeof Manager> | undefined;
+let beforeLivenessReply: ((principal: string) => Promise<void>) | undefined;
+let beforeEvictReply: ((principal: string) => Promise<void>) | undefined;
+let livenessReplyOverride: ((principal: string) => unknown) | undefined;
 
 const startDaemon = async (): Promise<CotalEndpoint> => {
   const dlvId = newIdentity();
@@ -123,12 +127,14 @@ const startDaemon = async (): Promise<CotalEndpoint> => {
       const result = await evictDeniedPrincipalWithCreds({
         servers: SERVERS, observerCreds, evictorCreds, accountId: auth.account.pub, principal,
       });
+      await beforeEvictReply?.(principal);
       return { ok: true, data: result };
     }
     if (req.op === "principalLiveness") {
-      const result = await observePrincipalLivenessWithCreds({
+      const result = livenessReplyOverride?.(principal) ?? await observePrincipalLivenessWithCreds({
         servers: SERVERS, observerCreds, accountId: auth.account.pub, principal,
       });
+      await beforeLivenessReply?.(principal);
       return { ok: true, data: result };
     }
     return { ok: false, error: `unsupported delivery-admin op "${req.op}"` };
@@ -182,12 +188,15 @@ const freezeRegisteredGate = async (instanceId: string, serveActor: string): Pro
 
 const startSuccessor = async (): Promise<{ ok: true; mgr: InstanceType<typeof Manager> } | { ok: false; error: Error }> => {
   const next = new Manager({ space: SPACE, servers: SERVERS, runtime: "pty", workspaceRoot });
+  startingManager = next;
   try {
     await next.start();
     return { ok: true, mgr: next };
   } catch (e) {
     await next.stop().catch(() => {});
     return { ok: false, error: e as Error };
+  } finally {
+    startingManager = undefined;
   }
 };
 
@@ -195,7 +204,11 @@ const conditionOf = (e: Error): string => {
   if (e instanceof GateReconcileRefused) return e.condition;
   const m = e.message;
   if (/holder-alive|is ALIVE/.test(m)) return "holder-alive";
+  if (/lease-not-held|does not hold its manager lease/.test(m)) return "lease-not-held";
   if (/liveness-unestablishable|CANNOT BE ESTABLISHED|not reachable on the ctl.delivery-admin/.test(m)) return "liveness-unestablishable";
+  if (/holder-unknown|is UNKNOWN/.test(m)) return "holder-unknown";
+  if (/wrong-op-kind|not a registration/.test(m)) return "wrong-op-kind";
+  if (/token-pinned reopen.*lost its CAS|newer barrier moved the gate/.test(m)) return "raced";
   if (/is frozen; another barrier holds it/.test(m)) return "frozen-conflict";
   return "other";
 };
@@ -251,7 +264,78 @@ try {
     }
   }
 
-  // ── CELL 2: freeze-holder still has a live CONNZ-attributed connection → named refuse, no mutate
+  // ── CELL 2: the successor must still hold THIS instance's lease after the liveness RPC ──
+  // The CONNZ sweep can consume longer than the 10s manager-lease TTL. Remove the lease after the
+  // oracle has established `gone` but before it replies: a boot heal that trusts only the earlier
+  // acquire can now revoke/reopen while a newer incarnation is entitled to take the same key.
+  {
+    await freezeRegisteredGate(iid, serveActor);
+    const { kv, nc } = await execKv(iid);
+    const before = await readGate(kv, iid);
+    const familyBefore = await endpointRegistrationBarrier(kv, SPACE, { endpoint: MANAGER_ENDPOINT, instanceId: iid, opId: mintLifecycleUid() }).enumerate();
+    beforeLivenessReply = async () => {
+      const active = startingManager as unknown as {
+        leaseTimer?: ReturnType<typeof setInterval>;
+        leaseRevision?: number;
+        ep: CotalEndpoint;
+      } | undefined;
+      if (!active || active.leaseRevision === undefined) throw new Error("successor did not acquire its manager lease before the boot-heal probe");
+      if (active.leaseTimer) clearInterval(active.leaseTimer);
+      active.leaseTimer = undefined;
+      await active.ep.releaseManagerLease(iid, active.leaseRevision);
+      beforeLivenessReply = undefined;
+    };
+    const r = await startSuccessor();
+    check("LEASE LOST: successor start REFUSES after the liveness RPC", r.ok === false, r.ok ? "started" : undefined);
+    check("LEASE LOST: the refusal is named `lease-not-held`",
+      r.ok === false && conditionOf(r.error) === "lease-not-held",
+      r.ok ? undefined : { condition: conditionOf(r.error), message: r.error.message });
+    const after = await readGate(kv, iid);
+    check("LEASE LOST: the gate is UNTOUCHED — still frozen", after?.state === "frozen" && after.generation === before?.generation, { before, after });
+    const familyAfter = await endpointRegistrationBarrier(kv, SPACE, { endpoint: MANAGER_ENDPOINT, instanceId: iid, opId: mintLifecycleUid() }).enumerate();
+    check("LEASE LOST: the credential family is UNTOUCHED (tenure is checked before mutation)",
+      familyAfter.length === familyBefore.length && familyAfter.every((row, i) => row.state === familyBefore[i]?.state),
+      { before: familyBefore.map((x) => x.state), after: familyAfter.map((x) => x.state) });
+    if (r.ok) await r.mgr.stop();
+    await nc.drain().catch(() => nc.close());
+    beforeLivenessReply = undefined;
+  }
+
+  // ── CELL 3: a raced reopen is never a benign boot success after revoke/evict side effects ──
+  // Complete the frozen op from the delivery-admin handler immediately before it returns the
+  // verified eviction. This manager then loses its token-pinned reopen. Continuing because the
+  // gate is now open would hide the fact that its earlier cleanup ran against another winner.
+  {
+    await freezeRegisteredGate(iid, serveActor);
+    const { kv, nc } = await execKv(iid);
+    beforeEvictReply = async () => {
+      beforeEvictReply = undefined;
+      const key = epgateKey(MANAGER_ENDPOINT, iid);
+      const entry = await kv.get(key);
+      if (!entry || entry.operation !== "PUT") throw new Error("race hook could not read the frozen gate");
+      const row = parseEndpointGate(entry.value, key);
+      if (row.state !== "frozen" || row.op?.kind !== "registration") throw new Error(`race hook found ${JSON.stringify(row)}`);
+      const moved = await endpointRegistrationBarrier(kv, SPACE, {
+        endpoint: MANAGER_ENDPOINT, instanceId: iid, opId: row.op.opId,
+      }).reopen(entry.revision, {
+        generation: row.generation + 1,
+        processEpoch: row.processEpoch,
+        registrationRevision: row.registrationRevision,
+        nameAuthorityRevision: row.nameAuthorityRevision,
+      });
+      if (!moved) throw new Error("race hook did not move the gate before the boot reconciler's reopen");
+    };
+    const r = await startSuccessor();
+    check("RACED REOPEN: successor start REFUSES instead of swallowing prior cleanup side effects", r.ok === false, r.ok ? "started" : undefined);
+    check("RACED REOPEN: the refusal is named `raced`",
+      r.ok === false && conditionOf(r.error) === "raced",
+      r.ok ? undefined : { condition: conditionOf(r.error), message: r.error.message });
+    if (r.ok) await r.mgr.stop();
+    await nc.drain().catch(() => nc.close());
+    beforeEvictReply = undefined;
+  }
+
+  // ── CELL 4: freeze-holder still has a live CONNZ-attributed connection → named refuse, no mutate
   {
     await freezeRegisteredGate(iid, serveActor);
     const hcreds = await mintCreds(auth, newIdentity(), "agent", {
@@ -282,7 +366,48 @@ try {
     holderConns.length = 0;
   }
 
-  // ── CELL 3: no delivery-admin oracle → named unestablishable, gate stays frozen ──
+  // ── CELL 5: contradictory gone + incomplete sweep → unestablishable, no mutation ──
+  {
+    await freezeRegisteredGate(iid, serveActor);
+    livenessReplyOverride = (principal) => ({ principal, state: "gone", sweepComplete: false });
+    const { kv, nc } = await execKv(iid);
+    const before = await readGate(kv, iid);
+    const familyBefore = await endpointRegistrationBarrier(kv, SPACE, { endpoint: MANAGER_ENDPOINT, instanceId: iid, opId: mintLifecycleUid() }).enumerate();
+    const r = await startSuccessor();
+    check("INCOMPLETE SWEEP: successor start REFUSES", r.ok === false, r.ok ? "started" : undefined);
+    check("INCOMPLETE SWEEP: contradictory `gone` is named `liveness-unestablishable`",
+      r.ok === false && conditionOf(r.error) === "liveness-unestablishable",
+      r.ok ? undefined : { condition: conditionOf(r.error), message: r.error.message });
+    const after = await readGate(kv, iid);
+    check("INCOMPLETE SWEEP: the gate is UNTOUCHED — still frozen", after?.state === "frozen" && after.generation === before?.generation, { before, after });
+    const familyAfter = await endpointRegistrationBarrier(kv, SPACE, { endpoint: MANAGER_ENDPOINT, instanceId: iid, opId: mintLifecycleUid() }).enumerate();
+    check("INCOMPLETE SWEEP: the credential family is UNTOUCHED",
+      familyAfter.length === familyBefore.length && familyAfter.every((row, i) => row.state === familyBefore[i]?.state),
+      { before: familyBefore.map((x) => x.state), after: familyAfter.map((x) => x.state) });
+    if (r.ok) await r.mgr.stop();
+    await nc.drain().catch(() => nc.close());
+    livenessReplyOverride = undefined;
+  }
+
+  // ── CELL 6: an incomplete sweep's ordinary UNKNOWN verdict → named refusal, no mutation ──
+  {
+    await freezeRegisteredGate(iid, serveActor);
+    livenessReplyOverride = (principal) => ({ principal, state: "unknown", sweepComplete: false });
+    const { kv, nc } = await execKv(iid);
+    const before = await readGate(kv, iid);
+    const r = await startSuccessor();
+    check("UNKNOWN HOLDER: successor start REFUSES", r.ok === false, r.ok ? "started" : undefined);
+    check("UNKNOWN HOLDER: the refusal is named `holder-unknown`",
+      r.ok === false && conditionOf(r.error) === "holder-unknown",
+      r.ok ? undefined : { condition: conditionOf(r.error), message: r.error.message });
+    const after = await readGate(kv, iid);
+    check("UNKNOWN HOLDER: the gate is UNTOUCHED — still frozen", after?.state === "frozen" && after.generation === before?.generation, { before, after });
+    if (r.ok) await r.mgr.stop();
+    await nc.drain().catch(() => nc.close());
+    livenessReplyOverride = undefined;
+  }
+
+  // ── CELL 7: no delivery-admin oracle → named unestablishable, gate stays frozen ──
   {
     await freezeRegisteredGate(iid, serveActor);
     await daemon.stop();
@@ -299,6 +424,28 @@ try {
     const after = await readGate(kv, iid);
     check("NO ORACLE: the gate stays frozen — an unreachable sweep never authorizes the repair",
       after?.state === "frozen" && after.generation === before?.generation, { before, after });
+    await nc.drain().catch(() => nc.close());
+  }
+
+  // ── CELL 8: a frozen non-registration op is outside this repair and never probes ──
+  {
+    daemon = await startDaemon();
+    await freezeRegisteredGate(iid, serveActor);
+    const { kv, nc } = await execKv(iid);
+    const key = epgateKey(MANAGER_ENDPOINT, iid);
+    const entry = await kv.get(key);
+    if (!entry || entry.operation !== "PUT") throw new Error("wrong-op cell could not read the frozen gate");
+    const row = parseEndpointGate(entry.value, key);
+    if (row.state !== "frozen" || row.op?.kind !== "registration") throw new Error(`wrong-op cell found ${JSON.stringify(row)}`);
+    await kv.update(key, new TextEncoder().encode(JSON.stringify({ ...row, op: { ...row.op, kind: "takeover" } })), entry.revision);
+    const r = await startSuccessor();
+    check("WRONG OP: successor start REFUSES", r.ok === false, r.ok ? "started" : undefined);
+    check("WRONG OP: the refusal is named `wrong-op-kind` before liveness or mutation",
+      r.ok === false && conditionOf(r.error) === "wrong-op-kind",
+      r.ok ? undefined : { condition: conditionOf(r.error), message: r.error.message });
+    const after = await readGate(kv, iid);
+    check("WRONG OP: the gate stays frozen under the takeover op", after?.state === "frozen" && after.op?.kind === "takeover", after);
+    if (r.ok) await r.mgr.stop();
     await nc.drain().catch(() => nc.close());
   }
 

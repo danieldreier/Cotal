@@ -857,7 +857,9 @@ correct. The successor manager now completes that dead registration itself on bo
 guard this command uses: it acts only when the freeze-holder is affirmatively gone under a complete
 CONNZ sweep (`gone` and `sweepComplete=true`), then abort-reopens the gate at generation+1 with
 processEpoch unchanged and continues the normal takeover. Live, unknown, unestablishable, and
-wrong-op-kind still refuse; there is no TTL.
+wrong-op-kind still refuse; there is no TTL. Automatic boot additionally re-proves its own manager
+lease around every mutating phase and refuses a lost/unreadable lease or a raced final reopen. It
+can find the old gate only when the manager workspace preserves the same logical instance identity.
 
 Use this command when that boot path cannot run — the delivery daemon is down, you are repairing a
 non-manager endpoint, or you want to lift the freeze without starting a manager. It checks that the

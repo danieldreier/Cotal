@@ -7,4 +7,5 @@ A manager that died mid-registration left the issuance gate frozen, and the succ
 register until an operator ran `cotal reconcile-gate`. Boot now completes that same dead
 registration itself when the freeze-holder is affirmatively gone under a complete CONNZ sweep
 (`gone` and `sweepComplete=true`), then continues the normal takeover. Live, unknown,
-unestablishable, and wrong-op-kind still refuse; there is no TTL.
+unestablishable, wrong-op-kind, lost successor lease tenure, and a raced final reopen still refuse;
+there is no TTL. The automatic path re-proves its own manager lease around every mutating phase.

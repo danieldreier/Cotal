@@ -51,7 +51,10 @@ export type GateReconcileCondition =
   /** A holder's eviction was not VERIFIED gone — the barrier's own fail-closed step. */
   | "eviction-unverified"
   /** The token-pinned reopen lost its CAS: a newer barrier moved the gate. Re-observe. */
-  | "raced";
+  | "raced"
+  /** Boot-specific guard: the successor no longer holds its own manager lease, so it has no
+   *  authority to mutate the frozen predecessor's family. The operator CLI does not use this. */
+  | "lease-not-held";
 
 /** A refusal, carrying the condition as DATA rather than only as prose. */
 export class GateReconcileRefused extends Error {
@@ -97,6 +100,11 @@ export interface GateReconcileReport {
  * everything else — including any form of "we did not hear back" — must be `unknown` or
  * `unestablishable`. It is a parameter and not an inlined call so that this ordering (probe, then
  * refuse, THEN mutate) is structural: the barrier is not even constructed until the probe passed.
+ *
+ * `assertMutationAuthorized`, when supplied by an automatic caller, re-proves that caller's own
+ * fencing authority after the potentially long liveness RPC and again around every mutating phase.
+ * The operator CLI omits it because the human invocation has no manager lease; its affirmative
+ * holder proof and the gate's token CAS remain its authority boundary.
  */
 export async function reconcileEndpointGate(opts: {
   kv: KV;
@@ -105,6 +113,7 @@ export async function reconcileEndpointGate(opts: {
   instanceId: string;
   probeHolder: (principal: string) => Promise<HolderLiveness>;
   evict: (holderPrincipal: string) => Promise<boolean>;
+  assertMutationAuthorized?: (checkpoint: "before-family-mutation" | "before-holder-eviction" | "before-reopen") => Promise<void>;
   log: (line: string) => void;
 }): Promise<GateReconcileReport> {
   const { kv, space, endpoint, instanceId, log } = opts;
@@ -153,6 +162,7 @@ export async function reconcileEndpointGate(opts: {
   const revoked: string[] = [];
   for (const r of rows) {
     if (r.state === "active") {
+      await opts.assertMutationAuthorized?.("before-family-mutation");
       await barrier.revoke(r); // deny-new BEFORE kill-live — the precondition eviction's name carries
       revoked.push(r.credentialId);
       log(`  revoked ${r.credentialId} (${r.holderPrincipal})`);
@@ -165,6 +175,7 @@ export async function reconcileEndpointGate(opts: {
   const holders = [...new Set([row.principal, ...rows.map((r) => r.holderPrincipal)])];
   const evicted: string[] = [];
   for (const h of holders) {
+    await opts.assertMutationAuthorized?.("before-holder-eviction");
     if (!(await barrier.evict(h)))
       throw new GateReconcileRefused(
         "eviction-unverified",
@@ -176,6 +187,7 @@ export async function reconcileEndpointGate(opts: {
 
   // ---- 4. Token-pinned abort-reopen at the UNCHANGED coordinate. The dead op wrote nothing
   // forward, so only `generation` advances; the successor's normal takeover then runs end-to-end.
+  await opts.assertMutationAuthorized?.("before-reopen");
   const reopenedAtGeneration = row.generation + 1;
   const ok = await barrier.reopen(freezeToken, {
     generation: reopenedAtGeneration,

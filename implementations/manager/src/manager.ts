@@ -4623,6 +4623,26 @@ export class Manager {
     };
   }
 
+  /** Re-prove THIS process still owns the persisted manager instance before boot self-heal mutates
+   *  a predecessor's issuance family. The CONNZ liveness/eviction RPCs can each outlast the 10s
+   *  manager-lease TTL, so the acquire at process start is not durable authority for the whole
+   *  repair. A definite loss OR an unreadable lease refuses: automatic recovery never acts while
+   *  its own fencing tenure is absent or unknowable. */
+  private async assertBootHealLeaseHeld(checkpoint: string): Promise<void> {
+    const verdict = await this.reconcileLease();
+    if (verdict.kind === "held") return;
+    const detail = verdict.kind === "gone"
+      ? "the lease key is gone"
+      : verdict.kind === "taken"
+        ? `the lease key is held by ${verdict.by}`
+        : `the lease key could not be read (${verdict.why})`;
+    throw new GateReconcileRefused(
+      "lease-not-held",
+      `boot self-heal refuses at ${checkpoint}: manager instance ${this.managerInstanceId} does not hold its own liveness lease (${detail}). ` +
+        "The automatic repair has no current fencing authority, so the frozen gate and credential family stay fail-closed.",
+    );
+  }
+
   /** Complete a crashed predecessor's FROZEN registration gate before this incarnation starts a
    *  new one (#783 item 3 / #871). The CLI `cotal reconcile-gate` already does this; a successor
    *  that cannot register is exactly the state that command exists to repair, so boot must run
@@ -4641,19 +4661,21 @@ export class Manager {
     if (row.state !== "frozen") return;
     const servers = this.servers ?? DEFAULT_SERVER;
     const log = (line: string) => console.error(`  ${line}`);
-    let report;
+    let report: Awaited<ReturnType<typeof reconcileEndpointGate>>;
     try {
       report = await reconcileEndpointGate({
         kv: authKv, space: this.space, endpoint: MANAGER_ENDPOINT, instanceId,
         probeHolder: makeManagerHolderLivenessProbe({ space: this.space, servers, auth, log }),
         evict: makeManagerEndpointEvictor({ space: this.space, servers, auth, log }),
+        assertMutationAuthorized: (checkpoint) => this.assertBootHealLeaseHeld(checkpoint),
         log,
       });
     } catch (e) {
       // We observed frozen, then a concurrent reconciler finished first. If the gate is now open,
-      // this incarnation continues the takeover. Every other refusal — including raced-but-still-
-      // frozen — stays loud.
-      if (e instanceof GateReconcileRefused && (e.condition === "not-frozen" || e.condition === "raced")) {
+      // a `not-frozen` refusal happened before this reconciler mutated anything, so this incarnation
+      // may continue the takeover. `raced` is NEVER benign here: revoke/evict precede reopen, so a
+      // lost final CAS may follow side effects against another winner and boot must stay fail-closed.
+      if (e instanceof GateReconcileRefused && e.condition === "not-frozen") {
         const latest = await authKv.get(key);
         if (latest && latest.operation === "PUT" && parseEndpointGate(latest.value, key).state === "open") {
           console.error(`boot self-heal: ${MANAGER_ENDPOINT}/${instanceId} is open after ${e.condition}; continuing the normal takeover`);
