@@ -1,0 +1,32 @@
+{
+  "suite": "extensions/cpn-runtime/smoke.ts",
+  "guard": "the CPN runtime refuses a caller-supplied non-helper child role before launcher issuance and tells the caller to omit the override because the reviewed persona supplies helper",
+  "command": "corepack pnpm --filter @cotal-ai/core build && corepack pnpm --filter @cotal-ai/cpn-runtime test",
+  "completionMarker": "returns remote job identity and status",
+  "proveWith": "node scripts/mutation-proof.mjs --config bin/smoke/mutations/cpn-runtime-role.json",
+  "why": [
+    "THE FAILED BOUNDARY IS CPN-SPECIFIC. Generic Cotal runtimes intentionally allow a spawn caller",
+    "to override a persona role, while the reviewed CPN launcher admits adopted Kubernetes workers",
+    "only as helper. Before this guard, the CPN runtime forwarded role=worker and the launcher",
+    "returned invalid_child_role after the manager had already begun the remote launch path.",
+    "",
+    "OMISSION STAYS VALID. A reviewed CPN persona resolves to helper without a caller override, and",
+    "the runtime also preserves undefined for compatibility with the launcher's established omitted-role",
+    "path. Only an explicit non-helper value is refused, before CpnLaunchClient.launch is called.",
+    "",
+    "THE ACTIONABLE WORDING IS PART OF THE CONTRACT. The refusal tells an agent to omit role rather",
+    "than guess another launcher-only value. The named cell matches that guidance and the sibling cell",
+    "proves the invalid request never crosses the trusted manager-to-launcher boundary."
+  ],
+  "mutations": [
+    {
+      "name": "the CPN runtime forwards an explicit non-helper role to the launcher",
+      "file": "extensions/cpn-runtime/src/runtime.ts",
+      "find": "    if (context.child.role !== undefined && context.child.role !== \"helper\")",
+      "replace": "    if (false && context.child.role !== undefined && context.child.role !== \"helper\")",
+      "expectRed": "refuses a non-helper CPN role with omit-the-override guidance",
+      "cell": "refuses a non-helper CPN role with omit-the-override guidance",
+      "note": "This is the defect as observed: role=worker reaches launcher issuance instead of failing at the CPN runtime boundary. The unchanged sibling assertion also verifies that CpnLaunchClient.launch was called, so the red result is not wording-only."
+    }
+  ]
+}

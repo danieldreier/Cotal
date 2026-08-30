@@ -11,6 +11,10 @@ The provider accepts only personas listed in `COTAL_CPN_LAUNCHER_PROFILES`, for 
 [{"persona":"codex-terra","profile":"codex-terra","lane":"terra","agent":"codex","model":"gpt-5.6-terra","variant":"high","taskClass":"general"}]
 ```
 
+Reviewed CPN worker personas supply role `helper`. Callers should omit the optional
+`cotal_spawn.role` override; the provider refuses any explicit non-helper role before it contacts
+the launcher. Generic Cotal runtimes retain their normal role-override behavior.
+
 The manager, not the agent, supplies the authenticated parent lifecycle, child lifecycle, resolved
 connector/model selectors, bounded task and action correlation ID. The provider reads the manager's
 already-minted child credential from `COTAL_LAUNCH_MATERIAL` and sends it only to the launcher's

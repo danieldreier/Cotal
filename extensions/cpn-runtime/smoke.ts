@@ -79,6 +79,14 @@ try {
   check("carries goal correlation", client.request?.correlation_id === "goal-17");
   check("returns remote job identity and status", handle.remote?.id === "job-17" && handle.remote.taskId === "task-17" && handle.remote.status === "queued");
 
+  const roleClient = new FakeClient(true);
+  const roleRuntime = new CpnRuntime(roleClient, config);
+  await rejects("refuses a non-helper CPN role with omit-the-override guidance", () => roleRuntime.spawn("worker-role", spec, "/", {
+    persona: "terra-worker", personaPrompt: "helper", task: "Role boundary test.", agent: "codex", model: "gpt-5.6-terra", variant: "high",
+    parent: { principal: "p", lifecycleUid: "parent-uid" }, child: { principal: "c", lifecycleUid: "child-uid", role: "worker" },
+  }), /role "worker" is not supported.*omit the role override.*persona supplies "helper"/);
+  check("refuses a non-helper CPN role before launcher issuance", roleClient.request === undefined);
+
   let exitNotice = false;
   handle.attach().onExit(() => { exitNotice = true; });
   await handle.waitForExit?.();
