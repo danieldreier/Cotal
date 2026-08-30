@@ -195,10 +195,23 @@ export async function reconcileEndpointGate(opts: {
     registrationRevision: row.registrationRevision,
     nameAuthorityRevision: row.nameAuthorityRevision,
   });
+  // A LOST CAS HERE IS NOT A NO-OP, and the refusal must not read like one. `raced` is the only
+  // refusal thrown AFTER the mutating phases: by this point the family has been revoked and every
+  // holder verify-evicted. Reporting only "the reopen did not land" is true about the reopen and
+  // materially false about the repair — an operator reading it concludes nothing happened and
+  // retries, when in fact this process severed credentials and connections under a freeze that a
+  // DIFFERENT barrier now owns, possibly belonging to a healthy race winner. Name the side effects
+  // that landed, in the same breath as the refusal, because this is the only place they are visible.
   if (!ok)
     throw new GateReconcileRefused(
       "raced",
-      `the token-pinned reopen of ${key} lost its CAS — a newer barrier moved the gate while this repair ran. Nothing was reopened; re-observe before retrying.`,
+      `the token-pinned reopen of ${key} lost its CAS — a newer barrier moved the gate while this repair ran. ` +
+        `THE GATE WAS NOT REOPENED, BUT THIS REPAIR HAD ALREADY MUTATED STATE: ${revoked.length} credential(s) REVOKED` +
+        `${revoked.length ? ` (${revoked.join(", ")})` : ""} and ${evicted.length} holder(s) VERIFY-EVICTED` +
+        `${evicted.length ? ` (${evicted.join(", ")})` : ""}. ` +
+        `Those side effects landed under a freeze the race winner now owns, so they may have revoked and ` +
+        `disconnected a HEALTHY incarnation. Re-observe the gate AND the credential family before retrying, ` +
+        `and expect the winner to need a restart if it was evicted mid-registration.`,
     );
 
   log(`✓ gate ${key} reopened at generation=${reopenedAtGeneration}, processEpoch unchanged (${row.processEpoch}); family revoked (${revoked.length}) and verify-evicted (${evicted.length} holder(s))`);

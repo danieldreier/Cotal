@@ -200,11 +200,18 @@ const startSuccessor = async (): Promise<{ ok: true; mgr: InstanceType<typeof Ma
   }
 };
 
+/** Name the refusal. The class is authoritative; the prose arms below are a SAFETY NET for an error
+ *  that lost its class on the way out of `start()` (a rewrap, a boundary crossing). A net whose
+ *  pattern cannot match the message it is meant to catch is worse than no net — it reads as coverage
+ *  while silently classifying every such refusal as "other". That had happened here: the lease arm
+ *  matched "does not hold its manager lease", and `assertBootHealLeaseHeld` writes "does not hold its
+ *  own liveness lease", so the arm could never fire. The cells below re-run this mapper against each
+ *  refusal's REAL message with the class stripped, which is what keeps every arm honest. */
 const conditionOf = (e: Error): string => {
   if (e instanceof GateReconcileRefused) return e.condition;
   const m = e.message;
   if (/holder-alive|is ALIVE/.test(m)) return "holder-alive";
-  if (/lease-not-held|does not hold its manager lease/.test(m)) return "lease-not-held";
+  if (/lease-not-held|does not hold its own liveness lease/.test(m)) return "lease-not-held";
   if (/liveness-unestablishable|CANNOT BE ESTABLISHED|not reachable on the ctl.delivery-admin/.test(m)) return "liveness-unestablishable";
   if (/holder-unknown|is UNKNOWN/.test(m)) return "holder-unknown";
   if (/wrong-op-kind|not a registration/.test(m)) return "wrong-op-kind";
@@ -290,6 +297,12 @@ try {
     check("LEASE LOST: the refusal is named `lease-not-held`",
       r.ok === false && conditionOf(r.error) === "lease-not-held",
       r.ok ? undefined : { condition: conditionOf(r.error), message: r.error.message });
+    // The class is what names it above. Strip the class and re-run the mapper on the SAME message to
+    // prove the prose safety net is live: a dead arm is invisible while the class survives, and it is
+    // exactly when the class does NOT survive that the net is the only thing left.
+    check("LEASE LOST: the prose fallback names it too (the safety net is not dead)",
+      r.ok === false && conditionOf(new Error(r.error.message)) === "lease-not-held",
+      r.ok ? undefined : { viaProse: conditionOf(new Error(r.error.message)), message: r.error.message });
     const after = await readGate(kv, iid);
     check("LEASE LOST: the gate is UNTOUCHED — still frozen", after?.state === "frozen" && after.generation === before?.generation, { before, after });
     const familyAfter = await endpointRegistrationBarrier(kv, SPACE, { endpoint: MANAGER_ENDPOINT, instanceId: iid, opId: mintLifecycleUid() }).enumerate();
@@ -330,6 +343,21 @@ try {
     check("RACED REOPEN: the refusal is named `raced`",
       r.ok === false && conditionOf(r.error) === "raced",
       r.ok ? undefined : { condition: conditionOf(r.error), message: r.error.message });
+    check("RACED REOPEN: the prose fallback names it too (the safety net is not dead)",
+      r.ok === false && conditionOf(new Error(r.error.message)) === "raced",
+      r.ok ? undefined : { viaProse: conditionOf(new Error(r.error.message)), message: r.error.message });
+    // `raced` is the ONLY refusal thrown after the mutating phases. Refusing is necessary but not
+    // sufficient: an operator who is told only that the reopen did not land will read "no harm done"
+    // and retry, while this process has already revoked the family and kicked every holder under a
+    // freeze the race winner owns. The refusal must SAY what it already did, or the fail-closed posture
+    // is silent about the damage it is failing closed over.
+    check("RACED REOPEN: the refusal DISCLOSES the revoke/evict side effects that already landed",
+      r.ok === false && /REVOKED/.test(r.error.message) && /VERIFY-EVICTED/.test(r.error.message)
+        && /HEALTHY incarnation/.test(r.error.message),
+      r.ok ? undefined : { message: r.error.message });
+    check("RACED REOPEN: the refusal does NOT claim the repair was a no-op",
+      r.ok === false && !/Nothing was reopened; re-observe/.test(r.error.message),
+      r.ok ? undefined : { message: r.error.message });
     if (r.ok) await r.mgr.stop();
     await nc.drain().catch(() => nc.close());
     beforeEvictReply = undefined;

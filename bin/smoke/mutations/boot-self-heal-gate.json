@@ -17,6 +17,16 @@
     "holder is no longer refused as `holder-alive`. Eviction may still fail closed later; the named",
     "cell is the admit condition, not the later barrier.",
     "",
+    "MUTATION 6 IS THE SILENT-DAMAGE REGRESSION: restore the old `raced` copy, which reported only",
+    "that the reopen did not land. Refusing is necessary but not sufficient — `raced` is the one",
+    "refusal thrown AFTER revoke and eviction, so a message that reads as a no-op sends an operator",
+    "to retry while a healthy race winner sits revoked and disconnected.",
+    "",
+    "MUTATION 7 IS THE DEAD-SAFETY-NET REGRESSION: reword the lease refusal so the smoke's prose",
+    "fallback can no longer match it. The class-based arm still names the condition, so the primary",
+    "cell stays green — only the cell that re-runs the mapper on the class-stripped message goes red.",
+    "That is the point: this coupling broke once already and nothing reported it.",
+    "",
     "NOT GRADED HERE: the CLI `cotal reconcile-gate` path. Its dedicated smoke has strong real-broker",
     "coverage but no mutation config. This file grades the successor BOOT and the shared reply mapper",
     "through the exact boundaries the automatic repair depends on."
@@ -66,6 +76,24 @@
       "expectRed": "INCOMPLETE SWEEP: contradictory `gone` is named `liveness-unestablishable`",
       "cell": "INCOMPLETE SWEEP: contradictory `gone` is named `liveness-unestablishable`",
       "note": "The boot contract names gone AND sweepComplete=true as the admit condition. Deleting the contradiction guard must make the new boot-seam cell red."
+    },
+    {
+      "name": "silent damage: a raced reopen reports itself as a no-op after revoke and eviction already landed",
+      "file": "implementations/manager/src/reconcile-gate.ts",
+      "find": "      `the token-pinned reopen of ${key} lost its CAS — a newer barrier moved the gate while this repair ran. ` +\n        `THE GATE WAS NOT REOPENED, BUT THIS REPAIR HAD ALREADY MUTATED STATE: ${revoked.length} credential(s) REVOKED` +\n        `${revoked.length ? ` (${revoked.join(\", \")})` : \"\"} and ${evicted.length} holder(s) VERIFY-EVICTED` +\n        `${evicted.length ? ` (${evicted.join(\", \")})` : \"\"}. ` +\n        `Those side effects landed under a freeze the race winner now owns, so they may have revoked and ` +\n        `disconnected a HEALTHY incarnation. Re-observe the gate AND the credential family before retrying, ` +\n        `and expect the winner to need a restart if it was evicted mid-registration.`,\n",
+      "replace": "      `the token-pinned reopen of ${key} lost its CAS — a newer barrier moved the gate while this repair ran. Nothing was reopened; re-observe before retrying.`,\n",
+      "expectRed": "RACED REOPEN: the refusal DISCLOSES the revoke/evict side effects that already landed",
+      "cell": "RACED REOPEN: the refusal DISCLOSES the revoke/evict side effects that already landed",
+      "note": "The shipped copy before this change. It is true about the reopen and false about the repair: revoke and verified eviction ran first. `raced` still refuses under this mutation, so the fail-closed cells stay green and only the disclosure cell reds — which is the whole claim."
+    },
+    {
+      "name": "dead safety net: the lease refusal's prose drifts out of the smoke's fallback mapper",
+      "file": "implementations/manager/src/manager.ts",
+      "find": "      `boot self-heal refuses at ${checkpoint}: manager instance ${this.managerInstanceId} does not hold its own liveness lease (${detail}). ` +\n",
+      "replace": "      `boot self-heal refuses at ${checkpoint}: manager instance ${this.managerInstanceId} cannot prove its fencing tenure (${detail}). ` +\n",
+      "expectRed": "LEASE LOST: the prose fallback names it too (the safety net is not dead)",
+      "cell": "LEASE LOST: the prose fallback names it too (the safety net is not dead)",
+      "note": "Exactly the drift that had already happened: the mapper matched a phrase the thrower no longer wrote. The class-based cell stays green under this mutation, so only the class-stripped cell can catch it."
     }
   ]
 }
