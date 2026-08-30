@@ -20,6 +20,9 @@ importers:
       '@cotal-ai/connector-claude-code':
         specifier: workspace:*
         version: link:extensions/connector-claude-code
+      '@cotal-ai/connector-core':
+        specifier: workspace:*
+        version: link:extensions/connector-core
       '@cotal-ai/connector-hermes':
         specifier: workspace:*
         version: link:extensions/connector-hermes

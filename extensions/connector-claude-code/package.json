@@ -25,7 +25,8 @@
     "prepublishOnly": "pnpm run build"
   },
   "peerDependencies": {
-    "@cotal-ai/core": ">=0.1.0"
+    "@cotal-ai/core": ">=0.1.0",
+    "@cotal-ai/connector-core": ">=0.1.0"
   },
   "devDependencies": {
     "@cotal-ai/connector-core": "workspace:*",

@@ -586,7 +586,8 @@
     "@cotal-ai/core": "workspace:*",
     "@cotal-ai/manager": "workspace:*",
     "@cotal-ai/orca": "workspace:*",
-    "@cotal-ai/tmux": "workspace:*"
+    "@cotal-ai/tmux": "workspace:*",
+    "@cotal-ai/connector-core": "workspace:*"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",
