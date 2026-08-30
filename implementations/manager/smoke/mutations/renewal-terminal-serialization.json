@@ -13,8 +13,8 @@
     {
       "name": "retirement no longer drains the renewal accepted before its latch",
       "file": "implementations/manager/src/manager.ts",
-      "find": "    const acceptedRenewal = a.staticCredentialRenewal;\n    if (acceptedRenewal) await acceptedRenewal.catch(() => {});",
-      "replace": "    void a.staticCredentialRenewal;",
+      "find": "    if (acceptedRenewal) await acceptedRenewal.catch(() => {});",
+      "replace": "    void acceptedRenewal;",
       "expectRed": "the durable terminal does not pass an accepted renewal still in flight",
       "cell": "the durable terminal does not pass an accepted renewal still in flight"
     },
@@ -53,16 +53,16 @@
     {
       "name": "the active static terminal no longer revokes its recorded credential rows",
       "file": "implementations/manager/src/static-lifecycle.ts",
-      "find": "  if (headNow.mapping.state !== \"retired\")\n    await headBeginRetirement(t, { owner: args.owner, actor: args.actor, lifecycleUid: args.lifecycleUid, opId: args.opId });\n  await revokeStaticCredentialRows(t, args.lifecycleUid, slot.row.credentialIds, hooks.log);\n  await hooks.cleanup();",
-      "replace": "  if (headNow.mapping.state !== \"retired\")\n    await headBeginRetirement(t, { owner: args.owner, actor: args.actor, lifecycleUid: args.lifecycleUid, opId: args.opId });\n  await hooks.cleanup();",
+      "find": "  const holders = await revokeStaticCredentialRows(t, args.lifecycleUid, slot.row.credentialIds, hooks.log);",
+      "replace": "  const holders: string[] = [];",
       "expectRed": "no credential row remains active after retirement",
       "cell": "no credential row remains active after retirement"
     },
     {
       "name": "natural process exit no longer closes the terminal latch in freeSlot",
       "file": "implementations/manager/src/manager.ts",
-      "find": "    a.terminalizing = true; // F5 latch (Unit B): also covers exit/reap paths that never rode stopHandle",
-      "replace": "    void a.terminalizing;",
+      "find": "    this.logSeatReaped(a, cause);\n    a.terminalizing = true;\n    this.agents.delete(a.name);",
+      "replace": "    this.logSeatReaped(a, cause);\n    void a.terminalizing;\n    this.agents.delete(a.name);",
       "expectRed": "racer_exit: the terminal latch closes synchronously",
       "cell": "racer_exit: the terminal latch closes synchronously"
     },
@@ -85,16 +85,16 @@
     {
       "name": "static retirement leaves the hosted secret-store credential key intact",
       "file": "implementations/manager/src/manager.ts",
-      "find": "    const cleanup = async (): Promise<void> => {\n      const secrets = this.secrets;\n      const files = a.secretPaths ?? agentLifecycleSecretFilePaths(this.workspaceRoot, a.name, a.lifecycleUid);\n      if (files.creds) {\n        await secrets.delete(agentSecretKeyForFile(files.creds));\n        rmSync(files.creds, { force: true });\n      }\n      await this.deprovisionBroker(a);\n    };",
-      "replace": "    const cleanup = async (): Promise<void> => {\n      const files = a.secretPaths ?? agentLifecycleSecretFilePaths(this.workspaceRoot, a.name, a.lifecycleUid);\n      if (files.creds) rmSync(files.creds, { force: true });\n      await this.deprovisionBroker(a);\n    };",
+      "find": "    const cleanup = async (): Promise<void> => {\n      const secrets = this.secrets;\n      const files = a.secretPaths ?? agentLifecycleSecretFilePaths(this.workspaceRoot, this.space, a.name, a.lifecycleUid);\n      if (files.creds) {\n        await secrets.delete(agentSecretKeyForFile(files.creds, this.space));\n        rmSync(files.creds, { force: true });\n      }\n      await this.deprovisionBroker(a);\n    };",
+      "replace": "    const cleanup = async (): Promise<void> => {\n      const files = a.secretPaths ?? agentLifecycleSecretFilePaths(this.workspaceRoot, this.space, a.name, a.lifecycleUid);\n      if (files.creds) rmSync(files.creds, { force: true });\n      await this.deprovisionBroker(a);\n    };",
       "expectRed": "the secret-store credential key is deleted",
       "cell": "the secret-store credential key is deleted"
     },
     {
       "name": "static retirement leaves the local credential materialization intact",
       "file": "implementations/manager/src/manager.ts",
-      "find": "    const cleanup = async (): Promise<void> => {\n      const secrets = this.secrets;\n      const files = a.secretPaths ?? agentLifecycleSecretFilePaths(this.workspaceRoot, a.name, a.lifecycleUid);\n      if (files.creds) {\n        await secrets.delete(agentSecretKeyForFile(files.creds));\n        rmSync(files.creds, { force: true });\n      }\n      await this.deprovisionBroker(a);\n    };",
-      "replace": "    const cleanup = async (): Promise<void> => {\n      const secrets = this.secrets;\n      const files = a.secretPaths ?? agentLifecycleSecretFilePaths(this.workspaceRoot, a.name, a.lifecycleUid);\n      if (files.creds) await secrets.delete(agentSecretKeyForFile(files.creds));\n      await this.deprovisionBroker(a);\n    };",
+      "find": "    const cleanup = async (): Promise<void> => {\n      const secrets = this.secrets;\n      const files = a.secretPaths ?? agentLifecycleSecretFilePaths(this.workspaceRoot, this.space, a.name, a.lifecycleUid);\n      if (files.creds) {\n        await secrets.delete(agentSecretKeyForFile(files.creds, this.space));\n        rmSync(files.creds, { force: true });\n      }\n      await this.deprovisionBroker(a);\n    };",
+      "replace": "    const cleanup = async (): Promise<void> => {\n      const secrets = this.secrets;\n      const files = a.secretPaths ?? agentLifecycleSecretFilePaths(this.workspaceRoot, this.space, a.name, a.lifecycleUid);\n      if (files.creds) await secrets.delete(agentSecretKeyForFile(files.creds, this.space));\n      await this.deprovisionBroker(a);\n    };",
       "expectRed": "no credential file remains after retirement",
       "cell": "no credential file remains after retirement"
     }

@@ -14,6 +14,8 @@ import { createConnection, createServer, type AddressInfo } from "node:net";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, statSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { canonicalLocalProcessPath, MANAGER_PIDFILE } from "@cotal-ai/workspace";
+import { assertSmokeSandboxDown, recordSmokeSandbox } from "@cotal-ai/smoke-kit";
 
 // Ephemeral free ports + a per-run space: repeated or concurrent runs never collide on a fixed port
 // nor contaminate each other's `supervise` scan (the old fixed 14311 / "upf-live" flaked locally).
@@ -33,7 +35,9 @@ const TSX = join(WT, "node_modules", ".bin", "tsx");
 
 const home = mkdtempSync(join(tmpdir(), "cotal-upf-home-"));
 const root = mkdtempSync(join(tmpdir(), "cotal-upf-root-"));
-const env = { ...process.env, COTAL_HOME: home };
+const configDir = join(home, "xdg");
+const sandbox = recordSmokeSandbox({ root, cotalHome: home, xdgConfigHome: configDir });
+const env = { ...process.env, COTAL_HOME: home, XDG_CONFIG_HOME: configDir };
 
 let pass = 0;
 const ok = (name: string, cond: boolean, extra?: unknown) => {
@@ -41,7 +45,11 @@ const ok = (name: string, cond: boolean, extra?: unknown) => {
   pass++;
   console.log(`  ✓ ${name}`);
 };
-const cli = (...args: string[]) => spawnSync(TSX, [CLI, ...args], { cwd: root, env, encoding: "utf8" });
+const cli = (...args: string[]) => {
+  const options = { cwd: root, env, encoding: "utf8" as const };
+  assertSmokeSandboxDown(sandbox, args, options);
+  return spawnSync(TSX, [CLI, ...args], options);
+};
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const portOpen = (port: number) =>
   new Promise<boolean>((res) => {
@@ -51,7 +59,7 @@ const portOpen = (port: number) =>
   });
 
 function down(): void {
-  spawnSync(TSX, [CLI, "down"], { cwd: root, env, encoding: "utf8" });
+  cli("down");
 }
 
 const alive = (pid: number) => {
@@ -95,7 +103,7 @@ try {
   await sleep(1500);
   ok("broker bound the --server OVERRIDE port (not the manifest's)", await portOpen(PORT));
   ok("manifest's declared port was NOT used (override won)", !(await portOpen(DECOY_PORT)));
-  mgrPid = Number(readFileSync(join(root, ".cotal", "manager.pid"), "utf8").trim());
+  mgrPid = Number(readFileSync(canonicalLocalProcessPath(MANAGER_PIDFILE, { root, space: SPACE }), "utf8").trim());
   ok("the recorded manager is alive (not a lease-race loser)", Number.isFinite(mgrPid) && alive(mgrPid), mgrPid);
   const mgrCmd = spawnSync("ps", ["-p", String(mgrPid), "-o", "command="], { encoding: "utf8" }).stdout;
   ok("the recorded manager carries the launch spec", /--launch\b/.test(mgrCmd), mgrCmd);

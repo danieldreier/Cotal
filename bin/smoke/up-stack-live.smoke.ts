@@ -21,6 +21,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { renderDetachedSummary } from "../../implementations/cli/src/lib/up-report.js";
+import { assertSmokeSandboxDown, recordSmokeSandbox } from "@cotal-ai/smoke-kit";
+import { DEFAULT_SPACE } from "@cotal-ai/core";
+import { canonicalLocalProcessPath, DELIVERY_PIDFILE, MANAGER_DELIVERY_AWARE_MARKER, MANAGER_PIDFILE } from "@cotal-ai/workspace";
 
 // Ephemeral OS-assigned port: no fixed-port collision across back-to-back / concurrent runs.
 const freePort = (): Promise<number> =>
@@ -40,7 +43,13 @@ const home = mkdtempSync(join(tmpdir(), "cotal-upstack-home-"));
 const root = mkdtempSync(join(tmpdir(), "cotal-upstack-root-"));
 const autoRoot = mkdtempSync(join(tmpdir(), "cotal-upstack-auto-"));
 const occupantRoot = mkdtempSync(join(tmpdir(), "cotal-upstack-occupant-"));
-const env = { ...process.env, COTAL_HOME: home };
+const configDir = join(home, "xdg");
+const anchors = new Map([
+  [root, recordSmokeSandbox({ root, cotalHome: home, xdgConfigHome: configDir })],
+  [autoRoot, recordSmokeSandbox({ root: autoRoot, cotalHome: home, xdgConfigHome: configDir })],
+  [occupantRoot, recordSmokeSandbox({ root: occupantRoot, cotalHome: home, xdgConfigHome: configDir })],
+]);
+const env = { ...process.env, COTAL_HOME: home, XDG_CONFIG_HOME: configDir };
 
 let pass = 0;
 const ok = (name: string, cond: boolean, extra?: unknown) => {
@@ -48,7 +57,12 @@ const ok = (name: string, cond: boolean, extra?: unknown) => {
   pass++;
   console.log(`  ✓ ${name}`);
 };
-const cli = (...args: string[]) => spawnSync(TSX, [CLI, ...args], { cwd: root, env, encoding: "utf8", timeout: 120_000 });
+const cliIn = (cwd: string, ...args: string[]) => {
+  const options = { cwd, env, encoding: "utf8" as const, timeout: 120_000 };
+  assertSmokeSandboxDown(anchors.get(cwd), args, options);
+  return spawnSync(TSX, [CLI, ...args], options);
+};
+const cli = (...args: string[]) => cliIn(root, ...args);
 const plain = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid: number) => {
@@ -60,6 +74,10 @@ const alive = (pid: number) => {
   }
 };
 const pidOf = (file: string) => Number(readFileSync(join(root, ".cotal", file), "utf8").trim());
+// The runtime records are per-space now, so their names come from the SHIPPED expansion rather than
+// a literal. This suite ups without `--space`, which is the default space.
+const record = (template: string) => canonicalLocalProcessPath(template, { root, space: DEFAULT_SPACE });
+const recordName = (template: string) => record(template).slice(join(root, ".cotal").length + 1);
 const portOpenAt = (port: number) =>
   new Promise<boolean>((res) => {
     const s = createConnection({ host: "127.0.0.1", port }, () => { s.destroy(); res(true); });
@@ -67,7 +85,6 @@ const portOpenAt = (port: number) =>
     s.setTimeout(400, () => { s.destroy(); res(false); });
   });
 const portOpen = () => portOpenAt(PORT);
-const cliIn = (cwd: string, ...args: string[]) => spawnSync(TSX, [CLI, ...args], { cwd, env, encoding: "utf8", timeout: 120_000 });
 
 const pids: number[] = [];
 let startedOccupant = false;
@@ -110,12 +127,12 @@ try {
     up.stdout,
   );
   ok("old generic background wording is absent", !/mesh running in the background/.test(up.stdout), up.stdout);
-  for (const [file, label] of [["nats.pid", "nats-server"], ["delivery.pid", "delivery daemon"], ["manager.pid", "manager"]] as const) {
+  for (const [file, label] of [["nats.pid", "nats-server"], [recordName(DELIVERY_PIDFILE), "delivery daemon"], [recordName(MANAGER_PIDFILE), "manager"]] as const) {
     const pid = pidOf(file);
     pids.push(pid);
     ok(`${label} is up (${file} + alive)`, Number.isFinite(pid) && alive(pid), pid);
   }
-  ok("delivery-aware marker is bound to the manager pid", pidOf("manager.delivery-aware") === pidOf("manager.pid"));
+  ok("delivery-aware marker is bound to the manager pid", pidOf(recordName(MANAGER_DELIVERY_AWARE_MARKER)) === pidOf(recordName(MANAGER_PIDFILE)));
   ok("auth material was provisioned (.cotal/auth)", existsSync(join(root, ".cotal", "auth")));
 
   // 2) the manager ANSWERS a real `cotal ps` — no pre-arranged creds, resolved from the folder's
@@ -138,7 +155,7 @@ try {
   //     daemon's, and report a healthy control plane over a child that was already dead.
   //     A LIVE holder rather than a SIGKILLed one's expiring record: the same code path, with no
   //     dependence on how much of the bucket TTL is left by the time the refresh reaches its CAS.
-  const deliveryPidFile = join(root, ".cotal", "delivery.pid");
+  const deliveryPidFile = record(DELIVERY_PIDFILE);
   const liveDelivery = readFileSync(deliveryPidFile, "utf8");
   rmSync(deliveryPidFile);
   const lost = cli("up", "--server", SERVER);
@@ -159,7 +176,7 @@ try {
     await sleep(500);
     dead = pids.every((p) => !alive(p)) && !(await portOpen());
   }
-  ok("all pid files removed by down", (["nats.pid", "delivery.pid", "manager.pid"] as const).every((f) => !existsSync(join(root, ".cotal", f))));
+  ok("all pid files removed by down", [join(root, ".cotal", "nats.pid"), record(DELIVERY_PIDFILE), record(MANAGER_PIDFILE)].every((f) => !existsSync(f)));
   ok("all three processes are dead + broker port closed", dead, pids.filter(alive));
 
   // Open mode in the SAME root retains static-auth files from the prior boot. Reporting follows the
@@ -178,9 +195,9 @@ try {
 
   console.log(`\nUP-STACK LIVE SMOKE OK ✅ (${pass} checks)`);
 } finally {
-  spawnSync(TSX, [CLI, "down"], { cwd: root, env, encoding: "utf8" });
-  spawnSync(TSX, [CLI, "down"], { cwd: autoRoot, env, encoding: "utf8" });
-  if (startedOccupant) spawnSync(TSX, [CLI, "down"], { cwd: occupantRoot, env, encoding: "utf8" });
+  cliIn(root, "down");
+  cliIn(autoRoot, "down");
+  if (startedOccupant) cliIn(occupantRoot, "down");
   for (const p of pids) if (alive(p)) { try { process.kill(p, "SIGTERM"); } catch { /* gone */ } }
   rmSync(home, { recursive: true, force: true });
   for (const d of [root, autoRoot, occupantRoot]) rmSync(d, { recursive: true, force: true });

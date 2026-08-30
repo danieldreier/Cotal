@@ -26,13 +26,13 @@
  */
 import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { connect, type NatsConnection } from "@nats-io/transport-node";
 import { Kvm, type KV } from "@nats-io/kv";
 import {
-  createSpaceAuth, isReachable, mintCreds, newIdentity, serverConfig, setupSpaceStreams,
+  composeSpaceAuth, createBrokerAuth, createSpaceAccountAuth, isReachable, mintCreds, newIdentity, serverConfig, setupSpaceStreams,
   mintMembershipObserverCreds, mintConnectionEvictorCreds,
   principalKey, standaloneConnectOpts, epAuthBucket, DEV_OWNER,
   provisionEndpointGateOpen, serveIssuanceGateKv, endpointRegistrationBarrier,
@@ -78,20 +78,31 @@ const check = (name: string, cond: boolean, extra?: unknown) => {
 };
 
 const space = `gate391cli-${randomUUID().slice(0, 8)}`;
-const auth = await createSpaceAuth(space);
+const broker = await createBrokerAuth(space);
+const auth = composeSpaceAuth(broker, await createSpaceAccountAuth(broker, space));
+const foreignSpace = `${space}-foreign`;
+const foreignAuth = composeSpaceAuth(broker, await createSpaceAccountAuth(broker, foreignSpace));
 const observerCreds = await mintMembershipObserverCreds(auth, newIdentity());
 const evictorCreds = await mintConnectionEvictorCreds(auth, newIdentity());
+const foreignObserverCreds = await mintMembershipObserverCreds(foreignAuth, newIdentity());
+const foreignEvictorCreds = await mintConnectionEvictorCreds(foreignAuth, newIdentity());
 
 const dir = mkdtempSync(join(tmpdir(), SMOKE_BROKER_TOKEN));
 // THE SEEDED WORKSPACE ROOT the command will resolve from: its own scratch dir, never the
 // operator's. `findCotalRoot()` walks up for a `.cotal/`, so an unanchored cwd would reach the real
 // mesh root — the command runs with cwd set HERE, and this directory is what it must find.
-const ROOT = join(dir, "mesh-root");
-mkdirSync(join(ROOT, ".cotal"), { recursive: true });
+// REALPATH'D, and only after the directory exists (`realpathSync` needs a real target). The daemon
+// pins its scan root from `findCotalRoot()`, which returns a RESOLVED path; where TMPDIR is itself a
+// symlink the literal `join(...)` and the resolved path differ by the link alone, and the root-pin
+// guard below would then refuse a drift that is not one — a false red that says "root drift" while
+// the roots are the same directory.
+const rootPath = join(dir, "mesh-root");
+mkdirSync(join(rootPath, ".cotal"), { recursive: true });
+const ROOT = realpathSync(rootPath);
 
 writeFileSync(
   join(dir, "server.conf"),
-  serverConfig(auth, [auth], { transport: { kind: "plaintext" }, port: PORT, storeDir: join(dir, "js") }),
+  serverConfig(broker, [auth, foreignAuth], { transport: { kind: "plaintext" }, port: PORT, storeDir: join(dir, "js") }),
 );
 const srv = spawn("nats-server", ["-c", join(dir, "server.conf")], { stdio: "ignore" });
 const releaseBroker = teardownOnSignal(srv, dir);
@@ -103,6 +114,7 @@ const awaitExit = (proc: ReturnType<typeof spawn>, timeoutMs = 5000): Promise<vo
   });
 
 let daemon: ReturnType<typeof spawn> | undefined;
+let poisonDaemon: ReturnType<typeof spawn> | undefined;
 const holderConns: NatsConnection[] = [];
 const execConns: NatsConnection[] = [];
 
@@ -121,6 +133,7 @@ try {
   for (let i = 0; i < 50; i++) { if (await isReachable(SERVERS)) { up = true; break; } await wait(200); }
   if (!up) throw new Error(`the ephemeral broker did not come up on ${PORT}`);
   await setupSpaceStreams({ servers: SERVERS, space, creds: await mintCreds(auth, newIdentity(), "provisioner") });
+  await setupSpaceStreams({ servers: SERVERS, space: foreignSpace, creds: await mintCreds(foreignAuth, newIdentity(), "provisioner") });
 
   // ---- Seed the workspace root exactly as a real machine carries it ----
   await putSpaceAuth(workspaceSecretStore(ROOT), auth);
@@ -191,19 +204,65 @@ try {
     check("CLI (no daemon): the gate is untouched — still frozen", still.state === "frozen", still);
   }
 
-  // ---- Bring the delivery daemon up: the liveness oracle the rail needs -----------------------
-  daemon = spawn("npx", ["tsx", join(REPO, "bin", "cotal.ts"), "deliver", "--space", space, "--server", SERVERS, "--dev-mint"], {
-    cwd: ROOT, stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, COTAL_SERVER: "", COTAL_SERVERS: "", COTAL_CREDS: "", NATS_URL: "" },
-  });
-  let daemonLog = "";
-  daemon.stdout?.on("data", (b) => { daemonLog += String(b); });
-  daemon.stderr?.on("data", (b) => { daemonLog += String(b); });
+  // ---- PRODUCTION SHAPE (#856): a wrong-root daemon must fail before lease acquisition ----------
+  // Authenticate as the target account while resolving a root whose system observer material belongs
+  // to another account on the same broker. The invalid process must exit before it can hold lease.0;
+  // then the correctly-rooted daemon must acquire immediately and make reconcile-gate usable.
   {
+    const foreignRootPath = join(dir, "foreign-root");
+    mkdirSync(join(foreignRootPath, ".cotal"), { recursive: true });
+    const FOREIGN_ROOT = realpathSync(foreignRootPath);
+    await putSpaceAuth(workspaceSecretStore(FOREIGN_ROOT), foreignAuth);
+    writeFileSync(join(FOREIGN_ROOT, ".cotal", "membership-observer.creds"), foreignObserverCreds);
+    writeFileSync(join(FOREIGN_ROOT, ".cotal", "connection-evictor.creds"), foreignEvictorCreds);
+    writeFileSync(join(FOREIGN_ROOT, ".cotal", "membership.json"), JSON.stringify({ accountId: foreignAuth.account.pub }));
+    const targetDeliveryCreds = join(dir, "target-delivery.creds");
+    writeFileSync(targetDeliveryCreds, await mintCreds(auth, newIdentity(), "delivery"));
+
+    let poisonLog = "";
+    poisonDaemon = spawn("npx", ["tsx", join(REPO, "bin", "cotal.ts"), "deliver", "--space", space, "--server", SERVERS, "--creds", targetDeliveryCreds], {
+      cwd: FOREIGN_ROOT, stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, COTAL_SERVER: "", COTAL_SERVERS: "", COTAL_CREDS: "", NATS_URL: "" },
+    });
+    poisonDaemon.stdout?.on("data", (b) => { poisonLog += String(b); });
+    poisonDaemon.stderr?.on("data", (b) => { poisonLog += String(b); });
+    const poisonExited = await new Promise<boolean>((resolve) => {
+      if (poisonDaemon!.exitCode !== null || poisonDaemon!.signalCode !== null) return resolve(true);
+      poisonDaemon!.once("exit", () => resolve(true));
+      setTimeout(() => resolve(false), 10_000);
+    });
+    check("POISONED LEASE: account A with account B root exits before holding lease.0",
+      poisonExited && poisonLog.includes(auth.account.pub) && poisonLog.includes(foreignAuth.account.pub), poisonLog.slice(-1200));
+
+    daemon = spawn("npx", ["tsx", join(REPO, "bin", "cotal.ts"), "deliver", "--space", space, "--server", SERVERS, "--dev-mint"], {
+      cwd: ROOT, stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, COTAL_SERVER: "", COTAL_SERVERS: "", COTAL_CREDS: "", NATS_URL: "" },
+    });
+    let daemonLog = "";
+    daemon.stdout?.on("data", (b) => { daemonLog += String(b); });
+    daemon.stderr?.on("data", (b) => { daemonLog += String(b); });
     let ready = false;
-    for (let i = 0; i < 120; i++) { if (/delivery daemon up/.test(daemonLog)) { ready = true; break; } await wait(500); }
-    check("the delivery daemon came up on the ephemeral mesh (the liveness oracle is reachable)", ready, daemonLog.slice(-800));
-    if (!ready) throw new Error("the delivery daemon never reported ready; the remaining cells would be meaningless");
+    for (let i = 0; i < 120; i++) { if (/delivery daemon up/.test(daemonLog)) { ready = true; break; } await wait(250); }
+    check("POISONED LEASE: correctly-rooted daemon acquires immediately", ready, daemonLog.slice(-1200));
+    if (!ready) {
+      if (poisonDaemon.exitCode === null && poisonDaemon.signalCode === null) { poisonDaemon.kill("SIGKILL"); await awaitExit(poisonDaemon); }
+      await wait(35_000);
+      daemon = spawn("npx", ["tsx", join(REPO, "bin", "cotal.ts"), "deliver", "--space", space, "--server", SERVERS, "--dev-mint"], {
+        cwd: ROOT, stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, COTAL_SERVER: "", COTAL_SERVERS: "", COTAL_CREDS: "", NATS_URL: "" },
+      });
+      daemonLog = "";
+      daemon.stdout?.on("data", (b) => { daemonLog += String(b); });
+      daemon.stderr?.on("data", (b) => { daemonLog += String(b); });
+      for (let i = 0; i < 120; i++) { if (/delivery daemon up/.test(daemonLog)) { ready = true; break; } await wait(250); }
+    }
+
+    const { conn } = await buildResidue({ holderLive: true });
+    await conn!.close();
+    await wait(500);
+    const repaired = runCli(["reconcile-gate", "--space", space, "--server", SERVERS]);
+    check("POISONED LEASE: public reconcile-gate completes through the healthy replacement",
+      repaired.code === 0 && /gate reopened at generation/.test(repaired.out), { code: repaired.code, out: repaired.out.slice(-500), err: repaired.err.slice(-1200) });
   }
 
   // ---- CELL 2: the holder is ALIVE and the oracle CAN be reached -------------------------------
@@ -263,10 +322,18 @@ try {
     const cwdBefore = process.cwd();
     try {
       process.chdir(ROOT); // so the root-drift guard is satisfied and the TENANCY guard is what speaks
+      // The WORKSTATION composition (`injected: false`), which is what this smoke exercises: the
+      // $SYS pair resolves through the FS store under `.cotal/`, and `membership.json` is still
+      // cross-checked as the second source. A hosted composition injects its own store instead and
+      // has no such file — that path is covered by the delivery $SYS-injection smoke.
+      // The `space` is part of the source as of P7: all five kinds are per-space, so the pair AND
+      // the cross-checked config are addressed inside THIS tenant's segment. A tenancy guard reading
+      // a root-wide location would be checking a file that belongs to whichever tenant wrote last.
+      const source = { secrets: workspaceSecretStore(ROOT), space, injected: false as const, root: ROOT };
       const foreignAccount = `A${"B".repeat(55)}`;
       let tenancyErr = "";
       try {
-        await executePrincipalLiveness(SERVERS, { root: ROOT, expectedAccount: foreignAccount }, principalKey(DEV_OWNER, "whoever").key);
+        await executePrincipalLiveness(SERVERS, { root: ROOT, expectedAccount: foreignAccount, source }, principalKey(DEV_OWNER, "whoever").key);
       } catch (e) { tenancyErr = (e as Error).message; }
       check("TENANCY: disk material naming a different account than the daemon authenticates as REFUSES (never a confident sweep of a foreign tenant)",
         /names account/.test(tenancyErr) && tenancyErr.includes(foreignAccount), tenancyErr);
@@ -275,7 +342,7 @@ try {
       // tenant, not every tenant.
       let okErr = "";
       try {
-        await executePrincipalLiveness(SERVERS, { root: ROOT, expectedAccount: auth.account.pub }, principalKey(DEV_OWNER, "whoever").key);
+        await executePrincipalLiveness(SERVERS, { root: ROOT, expectedAccount: auth.account.pub, source }, principalKey(DEV_OWNER, "whoever").key);
       } catch (e) { okErr = (e as Error).message; }
       check("TENANCY control: the correctly-seeded root is accepted and answers (the guard rejects the wrong tenant, not all of them)", okErr === "", okErr);
 
@@ -284,7 +351,7 @@ try {
       process.chdir(cwdBefore);
       let driftErr = "";
       try {
-        await executePrincipalLiveness(SERVERS, { root: ROOT, expectedAccount: auth.account.pub }, principalKey(DEV_OWNER, "whoever").key);
+        await executePrincipalLiveness(SERVERS, { root: ROOT, expectedAccount: auth.account.pub, source }, principalKey(DEV_OWNER, "whoever").key);
       } catch (e) { driftErr = (e as Error).message; }
       check("ROOT DRIFT: a request-time root different from the daemon's start root REFUSES (the scan account cannot follow process.cwd())",
         /is not the one this daemon started in/.test(driftErr), driftErr);
@@ -299,6 +366,7 @@ try {
   process.exitCode = 1;
 } finally {
   for (const nc of [...holderConns, ...execConns]) { try { await nc?.close(); } catch { /* */ } }
+  if (poisonDaemon && poisonDaemon.exitCode === null && poisonDaemon.signalCode === null) { poisonDaemon.kill("SIGKILL"); await awaitExit(poisonDaemon); }
   if (daemon) { daemon.kill("SIGKILL"); await awaitExit(daemon); } // exact PID — never pkill
   srv.kill("SIGKILL");
   await awaitExit(srv);

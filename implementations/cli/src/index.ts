@@ -1,5 +1,9 @@
 import { registry, type Command } from "@cotal-ai/core";
-import { serverFlag, spaceFlag, targetFlags, type LocalProcess } from "@cotal-ai/workspace";
+import {
+  serverFlag, spaceFlag, targetFlags,
+  DELIVERY_PIDFILE, MANAGER_DELIVERY_AWARE_MARKER, MANAGER_PIDFILE,
+  type LocalProcess,
+} from "@cotal-ai/workspace";
 import { up, upComplete, upFlags } from "./commands/up.js";
 import { runtimes } from "./commands/runtimes.js";
 import { down, downComplete } from "./commands/down.js";
@@ -42,7 +46,7 @@ const baseCommands: Command[] = [
     kind: "command",
     name: "setup",
     group: "Setup",
-    summary: "guided setup (configure-only: installs + seeds, launches nothing) - --yes non-interactive, --full to redo",
+    summary: "guided setup (configure-only: installs + seeds, launches nothing) - --yes non-interactive, --full to redo, --skills for skills only",
     flags: setupFlags,
     run: setup,
   },
@@ -214,7 +218,7 @@ const baseCommands: Command[] = [
     positionals: "<name>",
     flags: [
       { name: "profile", type: "string", value: "<agent|observer|admin>", description: "cred profile (default agent)" },
-      { name: "out", type: "string", value: "<path>", description: "output path (default .cotal/auth/creds/<name>.creds)" },
+      { name: "out", type: "string", value: "<path>", description: "output path (default .cotal/auth/creds/space.<key>/<name>.creds)" },
       { name: "signer", type: "boolean", description: "emit a stripped account-signing file instead" },
       { name: "force", type: "boolean", description: "with --signer: overwrite an existing file" },
       { name: "allow-subscribe", type: "string", value: "<a,b>", description: "agent profile: read ACL override (comma-separated); refused off it" },
@@ -438,21 +442,24 @@ const baseCommands: Command[] = [
   // `cotal ext add`, it self-registers here and appears in this same surface.
 ];
 
+// The runtime rows name their pidfile through the workspace constants, which are `{space}`
+// TEMPLATES like `auth-service.{space}.pid` already was. A copied literal here is the defect this
+// closes: the manager and the daemon write one name and status/down looked up another.
 const baseProcesses: LocalProcess[] = [
   {
     kind: "local-process",
     name: "manager",
     label: "manager",
     order: 10,
-    pidFile: "manager.pid",
-    artifacts: ["manager.delivery-aware"],
+    pidFile: MANAGER_PIDFILE,
+    artifacts: [MANAGER_DELIVERY_AWARE_MARKER],
   },
   {
     kind: "local-process",
     name: "delivery",
     label: "delivery daemon",
     order: 20,
-    pidFile: "delivery.pid",
+    pidFile: DELIVERY_PIDFILE,
     artifacts: ["delivery.creds"],
   },
   {
@@ -477,9 +484,11 @@ const baseProcesses: LocalProcess[] = [
 registry.register(...baseCommands, ...baseProcesses);
 
 export { runCli } from "./command.js";
+export { setInstalledExtensionsEnabled } from "./ext-loader.js";
 export { c, statusBadge } from "./ui.js";
 // The full spawn grammar, for the composition root's launch-parity smoke (grammar ⊆ start-op ⊆ MCP).
 export { spawnFlags } from "./commands/spawn.js";
+export { spawnRequiredExtensions } from "./commands/spawn.js";
 export { updateFlags } from "./commands/update.js";
 // The launch-client timeout + the manifest launch client, for the same smoke: every launch door
 // must outlive the manager's readiness wait (#159 B1).

@@ -51,9 +51,12 @@ import { spawnSync, spawn as spawnProc } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DEFAULT_SPACE } from "@cotal-ai/core";
+import { canonicalLocalProcessPath, DELIVERY_PIDFILE } from "@cotal-ai/workspace";
 import net from "node:net";
 import tls from "node:tls";
 import { connect, credsAuthenticator } from "@nats-io/transport-node";
+import { assertSmokeSandboxDown, recordSmokeSandbox, type SmokeSandboxAnchor } from "@cotal-ai/smoke-kit";
 
 const CLI = join(import.meta.dirname, "..", "cotal.ts");
 
@@ -131,7 +134,7 @@ let caFile = "";
 
 interface Run { status: number | null; out: string }
 function cotal(args: string[], home: string, cwd: string, env: Record<string, string> = {}): Run {
-  const r = spawnSync("npx", ["tsx", CLI, ...args], {
+  const options = {
     encoding: "utf8", cwd, timeout: 180_000,
     // `up` verifies the broker it just started with its OWN client, and `EndpointOptions.tls` is a
     // boolean that cannot carry a CA file — so against a private CA that verification fails and the
@@ -139,8 +142,10 @@ function cotal(args: string[], home: string, cwd: string, env: Record<string, st
     // through the documented escape hatch is not a workaround for the test's benefit: it is the
     // exact remedy the changeset tells private-CA operators to use, so this exercises it rather than
     // asserting it works.
-    env: { ...process.env, COTAL_HOME: home, NODE_EXTRA_CA_CERTS: caFile, ...env },
-  });
+    env: { ...process.env, COTAL_HOME: home, XDG_CONFIG_HOME: join(home, "xdg"), NODE_EXTRA_CA_CERTS: caFile, ...env },
+  } as const;
+  assertSmokeSandboxDown(sandboxAnchors.get(cwd), args, options);
+  const r = spawnSync("npx", ["tsx", CLI, ...args], options);
   return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
 
@@ -283,6 +288,11 @@ function admitOverTls(port: number, caFile: string, servername: string, timeoutM
 }
 
 const homes: { home: string; port: number; cwd: string }[] = [];
+const sandboxAnchors = new Map<string, SmokeSandboxAnchor>();
+function rememberSandbox(home: string, port: number, cwd: string): void {
+  sandboxAnchors.set(cwd, recordSmokeSandbox({ root: cwd, cotalHome: home, xdgConfigHome: join(home, "xdg") }));
+  homes.push({ home, port, cwd });
+}
 /** The live delivery child's argv for a given broker port, or "" when there is none. Routes M and
  *  S11 both gate on the FLAG the launcher passed, not on daemon readiness: a flagless daemon is
  *  healthy-looking by construction, so readiness cannot distinguish it.
@@ -339,7 +349,7 @@ async function main(): Promise<void> {
   await route("--detach", async () => {
     const { home, cwd } = sandbox();
     const port = await freePort();
-    homes.push({ home, port, cwd });
+    rememberSandbox(home, port, cwd);
     const r = cotal(["up", "--detach", "--open", "--server", `nats://127.0.0.1:${port}`,
       "--tls-cert", pkiFiles.cert, "--tls-key", pkiFiles.key], home, cwd);
 
@@ -366,7 +376,7 @@ async function main(): Promise<void> {
   await route("-f manifest", async () => {
     const { home, cwd } = sandbox();
     const port = await freePort();
-    homes.push({ home, port, cwd });
+    rememberSandbox(home, port, cwd);
     writeFileSync(join(cwd, "cotal.yaml"),
       `apiVersion: cotal/v1\nkind: Mesh\nspace: tlsmanifest\nbroker:\n  servers: nats://127.0.0.1:${port}\n  auth: false\nchannels:\n  general:\n    subscribe: []\n`);
     const r = cotal(["up", "-f", "cotal.yaml", "--tls-cert", pkiFiles.cert, "--tls-key", pkiFiles.key], home, cwd);
@@ -387,7 +397,7 @@ async function main(): Promise<void> {
   await route("refresh", async () => {
     const { home, cwd } = sandbox();
     const port = await freePort();
-    homes.push({ home, port, cwd });
+    rememberSandbox(home, port, cwd);
     const first = cotal(["up", "--detach", "--open", "--server", `nats://127.0.0.1:${port}`], home, cwd);
     assert.equal(first.status, 0, `plaintext mesh must start for the refresh case:\n${first.out}`);
 
@@ -408,7 +418,7 @@ async function main(): Promise<void> {
   await route("expired-cert", async () => {
     const { home, cwd } = sandbox();
     const port = await freePort();
-    homes.push({ home, port, cwd });
+    rememberSandbox(home, port, cwd);
     const r = cotal(["up", "--detach", "--open", "--server", `nats://127.0.0.1:${port}`,
       "--tls-cert", pkiFiles.expiredCert, "--tls-key", pkiFiles.expiredKey], home, cwd);
     assert.notEqual(r.status, 0, `an EXPIRED certificate must not yield a started mesh:\n${r.out}`);
@@ -421,7 +431,7 @@ async function main(): Promise<void> {
   await route("wrong-host", async () => {
     const { home, cwd } = sandbox();
     const port = await freePort();
-    homes.push({ home, port, cwd });
+    rememberSandbox(home, port, cwd);
     const r = cotal(["up", "--detach", "--open", "--server", `nats://127.0.0.1:${port}`,
       "--tls-cert", pkiFiles.otherCert, "--tls-key", pkiFiles.otherKey], home, cwd);
     assert.notEqual(r.status, 0, `a certificate that does not cover the dial host must refuse:\n${r.out}`);
@@ -438,7 +448,7 @@ async function main(): Promise<void> {
   await route("authed", async () => {
     const { home, cwd } = sandbox();
     const port = await freePort();
-    homes.push({ home, port, cwd });
+    rememberSandbox(home, port, cwd);
 
     // No --open: auth is the default, so the CLI provisions the space and we never touch
     // `setupSpaceStreams` or the JS API. Both of those carry fixture traps that present as a
@@ -513,7 +523,7 @@ async function main(): Promise<void> {
     for (const command of ["web", "status"] as const) {
       const { home, cwd } = sandbox();
       const port = await freePort();
-      homes.push({ home, port, cwd });
+      rememberSandbox(home, port, cwd);
 
       const up = cotal(["up", "--detach", "--open", "--server", `nats://127.0.0.1:${port}`,
         "--tls-cert", pkiFiles.cert, "--tls-key", pkiFiles.key], home, cwd);
@@ -630,7 +640,7 @@ async function main(): Promise<void> {
   await route("no-orphan-on-postfail", async () => {
     const { home, cwd } = sandbox();
     const port = await freePort();
-    homes.push({ home, port, cwd });
+    rememberSandbox(home, port, cwd);
     // NODE_EXTRA_CA_CERTS deliberately BLANK: this is the operator who forgot it.
     const r = cotal(["up", "--detach", "--open", "--server", `nats://127.0.0.1:${port}`,
       "--tls-cert", pkiFiles.cert, "--tls-key", pkiFiles.key], home, cwd, { NODE_EXTRA_CA_CERTS: "" });
@@ -670,8 +680,8 @@ async function main(): Promise<void> {
     mkdirSync(home, { recursive: true });
     const parentPort = await freePort();
     const childPort = await freePort();
-    homes.push({ home, port: parentPort, cwd: parent });
-    homes.push({ home, port: childPort, cwd: child });
+    rememberSandbox(home, parentPort, parent);
+    rememberSandbox(home, childPort, child);
 
     const parentUp = cotal(["up", "--detach", "--space", "parent-space",
       "--server", `nats://127.0.0.1:${parentPort}`], home, parent);
@@ -750,8 +760,8 @@ async function main(): Promise<void> {
     mkdirSync(home, { recursive: true });
     const parentPort = await freePort();
     const childPort = await freePort();
-    homes.push({ home, port: parentPort, cwd: parent });
-    homes.push({ home, port: childPort, cwd: child });
+    rememberSandbox(home, parentPort, parent);
+    rememberSandbox(home, childPort, child);
 
     const parentUp = cotal(["up", "--detach", "--space", "parent-oa",
       "--server", `nats://127.0.0.1:${parentPort}`], home, parent);
@@ -810,7 +820,7 @@ async function main(): Promise<void> {
   await route("refresh-refuse-no-policy-write", async () => {
     const { home, cwd } = sandbox();
     const port = await freePort();
-    homes.push({ home, port, cwd });
+    rememberSandbox(home, port, cwd);
 
     const plain = cotal(["up", "--detach", "--open", "--server", `nats://127.0.0.1:${port}`], home, cwd);
     assert.equal(plain.status, 0, `plaintext mesh must start:\n${plain.out}`);
@@ -878,7 +888,7 @@ async function main(): Promise<void> {
   await route("delivery-launches-with-tls", async () => {
     const { home, cwd } = sandbox();
     const port = await freePort();
-    homes.push({ home, port, cwd });
+    rememberSandbox(home, port, cwd);
     const up = cotal(["up", "--detach", "--server", `nats://127.0.0.1:${port}`,
       "--tls-cert", pkiFiles.cert, "--tls-key", pkiFiles.key], home, cwd);
     assert.equal(up.status, 0, `TLS auth mesh must start:\n${up.out}`);
@@ -909,7 +919,7 @@ async function main(): Promise<void> {
   await route("delivery-refresh-keeps-tls", async () => {
     const { home, cwd } = sandbox();
     const port = await freePort();
-    homes.push({ home, port, cwd });
+    rememberSandbox(home, port, cwd);
     const up = cotal(["up", "--detach", "--server", `nats://127.0.0.1:${port}`,
       "--tls-cert", pkiFiles.cert, "--tls-key", pkiFiles.key], home, cwd);
     assert.equal(up.status, 0, `TLS auth mesh must start:\n${up.out}`);
@@ -917,7 +927,7 @@ async function main(): Promise<void> {
     // Stop ONLY the delivery daemon, so the refresh below has one to relaunch — and so the argv
     // grepped afterwards is provably the NEW child. Without this control the assertion would be
     // satisfied by the original, correctly-flagged daemon still running.
-    const pidFile = join(cwd, ".cotal", "delivery.pid");
+    const pidFile = canonicalLocalProcessPath(DELIVERY_PIDFILE, { root: cwd, space: DEFAULT_SPACE });
     assert.ok(existsSync(pidFile), `CONTROL: fresh TLS up must leave a delivery pidfile:\n${up.out}`);
     const oldPid = Number(readFileSync(pidFile, "utf8").trim());
     try { process.kill(oldPid, "SIGTERM"); } catch { /* already gone */ }
@@ -958,7 +968,7 @@ async function main(): Promise<void> {
   await route("s10-no-ca-keeps-registry", async () => {
     const { home, cwd } = sandbox();
     const port = await freePort();
-    homes.push({ home, port, cwd });
+    rememberSandbox(home, port, cwd);
     const up = cotal(["up", "--detach", "--open", "--server", `nats://127.0.0.1:${port}`,
       "--tls-cert", pkiFiles.cert, "--tls-key", pkiFiles.key], home, cwd);
     assert.equal(up.status, 0, `TLS mesh must start:\n${up.out}`);

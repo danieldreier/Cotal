@@ -351,7 +351,7 @@ export async function runCodexHost(): Promise<void> {
   const agent = new MeshAgent(config);
 
   const codexHome = prepareCodexHome(config.space, config.name);
-  const codexBin = process.env.COTAL_CODEX_BIN?.trim() || undefined;
+  const codexBin = process.env.COTAL_CODEX_BIN?.trim() || process.env.COTAL_CODEX_RESOLVED_BIN?.trim() || undefined;
   // Validate the operator's launch config BEFORE anything is listening, so a bad launch throws
   // with nothing left behind to reap.
   const baseOverrides = configOverrides(model, variant);
@@ -389,7 +389,7 @@ export async function runCodexHost(): Promise<void> {
    *  Nothing outside a test sets this, and unset is not a shorter wait, it is no wait and no call:
    *  absent, empty, zero, negative, and unparseable all resolve to 0 and the branch below is not
    *  taken. */
-  const startDelayMs = ((): number => {
+  let startDelayMs = ((): number => {
     const ms = Number(process.env.COTAL_EVENTS_TEST_START_DELAY_MS ?? "");
     return Number.isFinite(ms) && ms > 0 ? ms : 0;
   })();
@@ -399,12 +399,17 @@ export async function runCodexHost(): Promise<void> {
    *  names the file the emitter is already reading rather than re-deriving it, and a NEW thread
    *  gets a new holder rather than a second adopt (see `bindEvents`). */
   let rollout: string | undefined;
-  const newEventHolder = (startCursor: string): AguiEmitterHolder<CodexRecord> =>
-    new AguiEmitterHolder<CodexRecord>(
+  const newEventHolder = (startCursor: string): AguiEmitterHolder<CodexRecord> => {
+    // The widening belongs to the first bind only. A recovery holder must exercise the ordinary
+    // startup path; repeating the test delay there adds no coverage and turns every recovery proof
+    // into another artificial setup-window proof.
+    const holderStartDelayMs = startDelayMs;
+    startDelayMs = 0;
+    return new AguiEmitterHolder<CodexRecord>(
       async (rolloutPath: string) => {
         // The test-only widening of this setup, at the top of it so a fixture's write lands in the
         // real window rather than beside it. Zero unless a test set it, and zero does not await.
-        if (startDelayMs > 0) await new Promise<void>((r) => setTimeout(r, startDelayMs));
+        if (holderStartDelayMs > 0) await new Promise<void>((r) => setTimeout(r, holderStartDelayMs));
         // Throws rather than defaulting to the working directory: a write-ahead log written
         // somewhere no later start looks is a silent loss.
         const workspaceRoot = resolveEventsStateRoot(process.env);
@@ -418,7 +423,11 @@ export async function runCodexHost(): Promise<void> {
         const { walPath, subjectPath } = await ensureEventWalDir({ workspaceRoot, space: config.space, principal, threadId });
         const subjectFrontier = await FileSubjectFrontier.open(subjectPath, { space: config.space, principal });
         const wal = await EventWal.open(walPath, { space: config.space, threadId, principal, subjectMayExist: false });
-        mapper = createCodexMapper({ threadId, mintRunId: () => randomUUID() });
+        // `AguiEmitter.start` settles `pending` before the first pump. Seed the mapper from the
+        // bracket state that will exist AFTER that recovery, not from the folded state before it:
+        // a pending terminal closes the WAL's run without passing through this new mapper.
+        const resumeRunId = wal.pending === null ? wal.brackets?.run : wal.pending.brackets.run;
+        mapper = createCodexMapper({ threadId, mintRunId: () => randomUUID(), resumeRunId });
         return AguiEmitter.start<CodexRecord>({
           endpoint: agent.ep,
           wal,
@@ -437,6 +446,7 @@ export async function runCodexHost(): Promise<void> {
       // would attribute the next records to a run the published stream has already finished.
       (runId: string) => mapper?.forgetOpenRun(runId),
     );
+  };
 
   // Presence is best-effort and must never throw into the turn loop — but it must also never
   // LIE. The mesh connect runs in the background, so an auto-prompt (`--prompt`) can open a real
@@ -1161,7 +1171,7 @@ export async function runCodexHost(): Promise<void> {
   // PATH preflight (parity with the manager's `requires` check, for a foreground `--live-only`
   // launch that bypasses it): fail with a clear message naming the binary rather than a raw
   // ENOENT from the spawn. An absolute COTAL_CODEX_BIN override (tests) skips the PATH scan.
-  const bin = process.env.COTAL_CODEX_BIN?.trim() || "codex";
+  const bin = process.env.COTAL_CODEX_BIN?.trim() || process.env.COTAL_CODEX_RESOLVED_BIN?.trim() || "codex";
   if (!bin.includes(sep) && !onPath(bin)) {
     await mcp.close();
     throw new Error(`the codex connector needs \`${bin}\` on PATH — install the Codex CLI and authenticate it`);

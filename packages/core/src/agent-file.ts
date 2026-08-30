@@ -14,6 +14,7 @@
  *   model: opus                # optional CLI/model override
  *   variant: high              # optional connector-defined model variant
  *   capabilities: [spawn]  # control-plane capabilities (spawn → may start/despawn others)
+ *   agent: jcode           # optional connector/harness pin (flag > file > COTAL_DEFAULT_AGENT > default)
  *   theme: dark            # any unmodelled key is kept verbatim in AgentDef.meta, so a
  *                          #   connector can read its own launcher hints without core knowing them
  *   ---
@@ -24,7 +25,7 @@
  * session reads its own card from it. Part of the wire contract's onboarding
  * half, alongside the join link.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { EndpointKind } from "./types.js";
@@ -37,6 +38,11 @@ export interface AgentDef {
   kind?: EndpointKind;
   description?: string;
   tags?: string[];
+  /** The connector/harness this persona pins (e.g. `claude`, `jcode`). Honored with the same
+   *  precedence as {@link model}/{@link variant}: an explicit `--agent` flag wins over the file,
+   *  the file wins over `COTAL_DEFAULT_AGENT`, which wins over the product default. A value
+   *  naming an unregistered connector fails loud at spawn (registry resolve, no fallback). */
+  agent?: string;
   /** The *active* read set: channels this agent subscribes to at boot (the live chat-durable
    *  filter; mutable at runtime via join/leave). Must be ⊆ {@link allowSubscribe}. Omitted or
    *  empty ⇒ NO channels: an agent reads exactly the channels it lists, and a file that names
@@ -204,7 +210,7 @@ export function loadAgentFile(path: string): AgentDef {
 
   // Sweep every scalar frontmatter key we don't model into meta, verbatim — connector launcher
   // hints ride here so core stays ignorant of surface-specific keys.
-  const known = new Set(["name", "role", "kind", "description", "tags", "subscribe", "allowSubscribe", "allowPublish", "quiet", "muted", "model", "variant", "launchOptions", "capabilities", "owner"]);
+  const known = new Set(["name", "role", "kind", "description", "tags", "subscribe", "allowSubscribe", "allowPublish", "quiet", "muted", "agent", "model", "variant", "launchOptions", "capabilities", "owner"]);
   const meta: Record<string, string> = {};
   for (const [k, v] of Object.entries(fm)) if (!known.has(k) && v !== null && typeof v !== "object") meta[k] = String(v);
 
@@ -214,6 +220,7 @@ export function loadAgentFile(path: string): AgentDef {
     kind: kind as EndpointKind | undefined,
     description: str("description"),
     tags: list("tags"),
+    agent: str("agent"),
     subscribe,
     allowSubscribe,
     allowPublish,
@@ -267,6 +274,7 @@ export function saveAgentFile(path: string, def: AgentDef): void {
   if (def.allowPublish) fm.allowPublish = def.allowPublish;
   if (def.quiet?.length) fm.quiet = def.quiet;
   if (def.muted?.length) fm.muted = def.muted;
+  if (def.agent) fm.agent = def.agent;
   if (def.model) fm.model = def.model;
   if (def.variant) fm.variant = def.variant;
   if (def.launchOptions && Object.keys(def.launchOptions).length) fm.launchOptions = def.launchOptions;
@@ -287,6 +295,51 @@ export function agentFilePath(root: string, nameOrPath: string): string {
   if (nameOrPath.includes("/") || nameOrPath.includes("\\") || nameOrPath.endsWith(".md"))
     return resolve(root, nameOrPath);
   return join(root, ".cotal", "agents", `${nameOrPath}.md`);
+}
+
+/** One `.cotal/agents/*.md` catalog entry. A malformed file is an `error` row, not a throw —
+ *  a list that crashed on one bad card could not tell the caller which names exist. */
+export interface PersonaCatalogEntry {
+  name: string;
+  path: string;
+  def?: AgentDef;
+  error?: string;
+}
+
+/** The workspace persona catalog: every `.cotal/agents/*.md` under `root`, sorted by filename
+ *  stem. Filesystem-only — no mesh. Missing directory ⇒ empty catalog, not an error. */
+export function listPersonaCatalog(root: string): PersonaCatalogEntry[] {
+  const dir = join(root, ".cotal", "agents");
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".md"));
+  } catch {
+    return [];
+  }
+  return files.sort().map((f) => {
+    const name = f.slice(0, -3);
+    const path = join(dir, f);
+    try {
+      return { name, path, def: loadAgentFile(path) };
+    } catch (e) {
+      return { name, path, error: (e as Error).message };
+    }
+  });
+}
+
+/** The one-line description `cotal personas list` prints: `description:` if set, else the
+ *  first non-empty persona line. Truncated to 100 characters, matching the CLI. */
+export function personaCatalogDescription(def: AgentDef): string | undefined {
+  const raw = def.description ?? def.persona?.split("\n").find((l) => l.trim())?.trim();
+  if (!raw) return undefined;
+  return raw.length > 100 ? `${raw.slice(0, 99)}…` : raw;
+}
+
+/** Same ownership as `definePersona` redefine: the creator, or admin. Ownerless files
+ *  (legacy / operator-written) are admin-only. Used by the mesh catalog read so a peer
+ *  cannot pull role/model/description/body of a card it could not rewrite. */
+export function personaCatalogReadable(owner: string | undefined, caller: string, admin: boolean): boolean {
+  return admin || owner === caller;
 }
 
 /** The separator the auto-numbering scheme appends a counter with. `_`, NOT `-`: in user mode the

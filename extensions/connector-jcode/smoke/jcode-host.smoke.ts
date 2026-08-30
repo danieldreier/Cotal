@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { once } from "node:events";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,6 +40,51 @@ const shimDir = join(root, "bin");
 const shim = join(shimDir, "jcode");
 const log = join(root, "fake.jsonl");
 const nats = spawn("nats-server", ["-js", "-p", String(port), "-sd", join(root, "js")], { stdio: "ignore" });
+const hosts: ChildProcess[] = [];
+
+function spawnHost(opts: SpawnOptions): ChildProcess {
+  const proc = spawn(tsx, [host], { ...opts, detached: true });
+  hosts.push(proc);
+  return proc;
+}
+
+function groupAlive(proc: ChildProcess): boolean {
+  if (proc.pid === undefined) return false;
+  try {
+    process.kill(-proc.pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function stopHostTree(proc: ChildProcess, signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
+  const leaderAlive = (): boolean => proc.exitCode === null && proc.signalCode === null;
+  if (signal === "SIGTERM" && leaderAlive()) {
+    // Grace belongs to the host leader. Signalling its whole group here kills the fake bridge before
+    // the host can retire it and turns a clean shutdown into a restart race.
+    try { proc.kill("SIGTERM"); } catch { /* already gone */ }
+  } else if (proc.pid !== undefined && groupAlive(proc)) {
+    try { process.kill(-proc.pid, signal); } catch { /* already gone */ }
+  } else if (leaderAlive()) {
+    try { proc.kill(signal); } catch { /* already gone */ }
+  }
+  // The host's own shutdown can spend 3s gracefully stopping the bridge, 2s escalating it, then
+  // repeat that budget for descendants before its quiescence window and mesh close. The outer
+  // harness must outlive that whole path before it decides the leader is wedged.
+  const leaderDeadline = Date.now() + 15_000;
+  while (leaderAlive() && Date.now() < leaderDeadline) await sleep(50);
+  // Whether the leader exited cleanly or was already gone, the process group may still contain a
+  // reparented api-bridge. The group is the ownership unit and is never allowed past this helper.
+  if (groupAlive(proc) && proc.pid !== undefined) {
+    try { process.kill(-proc.pid, "SIGKILL"); } catch { /* already gone */ }
+  }
+  for (let i = 0; i < 100 && (leaderAlive() || groupAlive(proc)); i++) await sleep(50);
+  proc.stdin?.destroy();
+  proc.stdout?.destroy();
+  proc.stderr?.destroy();
+}
+
 let child: ChildProcess | undefined;
 let outage: ChildProcess | undefined;
 let outageNats: ChildProcess | undefined;
@@ -50,8 +96,28 @@ const check = (name: string, condition: boolean, actual?: unknown): void => {
   pass++;
   console.log(`  ✓ ${name}`);
 };
+function readJsonLines<T>(path: string): T[] {
+  if (!existsSync(path)) return [];
+  const raw = readFileSync(path, "utf8");
+  const lines = raw.split("\n");
+  if (!raw.endsWith("\n")) lines.pop();
+  return lines.filter(Boolean).map((line) => JSON.parse(line) as T);
+}
 const entries = (): Array<{ ev: string; [key: string]: unknown }> =>
-  existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
+  readJsonLines(log);
+
+function managedHome(space: string, name: string): string {
+  const slug = `${space}-${name}`.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+  const key = createHash("sha256").update(`${space}\0${name}`).digest("hex").slice(0, 12);
+  return join(root, ".cotal", "jcode", `${slug || "agent"}-${key}`);
+}
+
+function connectorLog(home: string): string {
+  const logs = join(home, "logs");
+  const files = readdirSync(logs).filter((file) => /^connector-.*\.log$/.test(file));
+  assert.equal(files.length, 1, `expected one connector log in ${logs}, found ${files.join(", ")}`);
+  return readFileSync(join(logs, files[0]!), "utf8");
+}
 
 type JcodeMcpEntry = { command: string; args: string[]; env: Record<string, string> };
 
@@ -73,7 +139,7 @@ async function callJcodeMcp(
     args: entry.args,
     cwd: root,
     env: { ...entry.env, COTAL_JCODE_MCP_SOCKET: socket, COTAL_JCODE_MCP_TOKEN: token },
-    stderr: "pipe",
+    stderr: "ignore",
   });
   try {
     await client.connect(transport);
@@ -98,29 +164,88 @@ async function callJcodeMcpRaw(
   const entry = jcodeMcpEntry(home);
   const bridge = spawn(entry.command, entry.args, {
     cwd: root,
-    env: { ...entry.env, COTAL_JCODE_MCP_SOCKET: socket, COTAL_JCODE_MCP_TOKEN: token },
+    // PATH only: the tsx shim needs `node`, matching StdioClientTransport. Do not copy COTAL_*.
+    env: {
+      ...(process.env.PATH !== undefined ? { PATH: process.env.PATH } : {}),
+      ...entry.env,
+      COTAL_JCODE_MCP_SOCKET: socket,
+      COTAL_JCODE_MCP_TOKEN: token,
+    },
     stdio: ["pipe", "pipe", "pipe"],
   });
+  // An unread stderr pipe fills (64 KiB on Linux, smaller on macOS) and the child
+  // blocks on write, so it never answers the JSON-RPC frame. Bridge stderr is
+  // diagnostic only: the suite asserts on stdout frames and exit codes, so
+  // discarding it here is acceptable; leaving it unread is not.
+  bridge.stderr?.resume();
   let pending = "";
-  const frames = new Map<number, (frame: Record<string, unknown>) => void>();
+  const MAX_PENDING_STDOUT_BYTES = 64 * 1024;
+  const garbage: string[] = [];
+  type FrameWaiter = {
+    resolve: (frame: Record<string, unknown>) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  };
+  const frames = new Map<number, FrameWaiter>();
+  const describeGarbage = (): string =>
+    garbage.length === 0
+      ? ""
+      : `; child also wrote ${garbage.length} unparseable line(s), first: ${garbage[0]}`;
+  const settleFrame = (id: number, fn: (waiter: FrameWaiter) => void): void => {
+    const waiter = frames.get(id);
+    if (!waiter) return;
+    frames.delete(id);
+    clearTimeout(waiter.timer);
+    fn(waiter);
+  };
+  const rejectAll = (error: Error): void => {
+    for (const id of [...frames.keys()]) settleFrame(id, (waiter) => waiter.reject(error));
+  };
   bridge.stdout?.setEncoding("utf8");
   bridge.stdout?.on("data", (chunk: string) => {
+    if (Buffer.byteLength(pending) + Buffer.byteLength(chunk) > MAX_PENDING_STDOUT_BYTES) {
+      rejectAll(new Error(`callJcodeMcpRaw exceeded ${MAX_PENDING_STDOUT_BYTES} buffered stdout bytes without a complete response`));
+      return;
+    }
     pending += chunk;
     for (;;) {
       const newline = pending.indexOf("\n");
       if (newline < 0) return;
       const line = pending.slice(0, newline);
       pending = pending.slice(newline + 1);
-      const frame = JSON.parse(line) as Record<string, unknown>;
-      if (typeof frame.id === "number") frames.get(frame.id)?.(frame);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        if (garbage.length < 5) garbage.push(line.slice(0, 200));
+        continue;
+      }
+      if (parsed === null || typeof parsed !== "object") {
+        if (garbage.length < 5) garbage.push(line.slice(0, 200));
+        continue;
+      }
+      const frame = parsed as Record<string, unknown>;
+      if (typeof frame.id !== "number" || !frames.has(frame.id)) continue;
+      if (frame.jsonrpc !== "2.0" || (!Object.hasOwn(frame, "result") && !Object.hasOwn(frame, "error"))) {
+        settleFrame(frame.id, (waiter) =>
+          waiter.reject(new Error(`callJcodeMcpRaw received an invalid JSON-RPC response for id ${frame.id}`)),
+        );
+        continue;
+      }
+      settleFrame(frame.id, (waiter) => waiter.resolve(frame));
     }
   });
+  const frameName = (id: number): string => (id === 1 ? "initialize" : id === 2 ? "tools/call" : `id ${id}`);
+  bridge.once("close", (code, signal) =>
+    rejectAll(new Error(`callJcodeMcpRaw child closed (code=${code} signal=${signal}) before its response${describeGarbage()}`)),
+  );
   const request = (id: number, json: string): Promise<Record<string, unknown>> =>
-    new Promise((resolve) => {
-      frames.set(id, (frame) => {
-        frames.delete(id);
-        resolve(frame);
-      });
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => settleFrame(id, (waiter) => waiter.reject(new Error(`callJcodeMcpRaw timed out waiting for frame id ${id} (${frameName(id)})${describeGarbage()}`))),
+        10_000,
+      );
+      frames.set(id, { resolve, reject, timer });
       bridge.stdin?.write(json + "\n");
     });
 
@@ -135,8 +260,14 @@ async function callJcodeMcpRaw(
       isError: result.isError,
     };
   } finally {
-    bridge.kill("SIGTERM");
-    await Promise.race([once(bridge, "exit"), sleep(5_000)]);
+    bridge.stdin?.end();
+    if (bridge.exitCode === null && bridge.signalCode === null) bridge.kill("SIGTERM");
+    for (let i = 0; i < 20 && bridge.exitCode === null && bridge.signalCode === null; i++) await sleep(50);
+    if (bridge.exitCode === null && bridge.signalCode === null) bridge.kill("SIGKILL");
+    for (let i = 0; i < 100 && bridge.exitCode === null && bridge.signalCode === null; i++) await sleep(50);
+    bridge.stdin?.destroy();
+    bridge.stdout?.destroy();
+    bridge.stderr?.destroy();
   }
 }
 
@@ -162,7 +293,7 @@ try {
   const inheritedJcodeHome = join(root, "source-jcode");
   mkdirSync(inheritedJcodeHome, { recursive: true, mode: 0o700 });
   writeFileSync(join(inheritedJcodeHome, "auth.json"), "host-smoke-token", { mode: 0o600 });
-  child = spawn(tsx, [host], {
+  child = spawnHost({
     cwd: root,
     env: {
       ...env,
@@ -201,21 +332,21 @@ try {
   // the Jcode server counts as a client; nothing re-attaches, and the server's idle reaper kills
   // the seat mid-turn five minutes later. The seat's version is fixed at spawn time.
   check("host pins the seat binary against background self-update", argv.env?.JCODE_NO_AUTO_UPDATE === "1", argv.env);
-  const managedHome = join(root, ".cotal", "jcode", "jcodehost-jcodepeer-3276792e8714");
-  check("host copies auth mirror rather than linking it", lstatSync(join(managedHome, "auth.json")).isFile() && !lstatSync(join(managedHome, "auth.json")).isSymbolicLink());
-  check("host copied auth mirror is owner-only", (statSync(join(managedHome, "auth.json")).mode & 0o777) === 0o600);
+  const peerHome = managedHome("jcodehost", "jcodepeer");
+  check("host copies auth mirror rather than linking it", lstatSync(join(peerHome, "auth.json")).isFile() && !lstatSync(join(peerHome, "auth.json")).isSymbolicLink());
+  check("host copied auth mirror is owner-only", (statSync(join(peerHome, "auth.json")).mode & 0o777) === 0o600);
 
   // Jcode invokes this actual stdio MCP bridge, which relays across the live per-seat Unix socket
   // into the host's MeshAgent. A schema-valid explicit `peek:false` must not be rejected by either
   // hop: the bug was an adapter-only no-argument branch that advertised this input then refused it.
-  const privateMcp = JSON.parse(readFileSync(join(managedHome, "mcp.json"), "utf8")) as {
+  const privateMcp = JSON.parse(readFileSync(join(peerHome, "mcp.json"), "utf8")) as {
     servers: { cotal: { env: Record<string, string> } };
   };
   const relaySocket = privateMcp.servers.cotal.env.COTAL_JCODE_MCP_SOCKET!;
   const relayToken = privateMcp.servers.cotal.env.COTAL_JCODE_MCP_TOKEN!;
   await operator.multicast("quiet buffered", { channel: "team" });
   await sleep(100);
-  const peekFalse = await callJcodeMcp(managedHome, relaySocket, relayToken, {
+  const peekFalse = await callJcodeMcp(peerHome, relaySocket, relayToken, {
     peek: false,
     accept_large_output: true,
     intent: "read buffered messages",
@@ -224,19 +355,19 @@ try {
 
   await operator.multicast("peek survives", { channel: "team" });
   await sleep(100);
-  const peekTrue = await callJcodeMcp(managedHome, relaySocket, relayToken, { peek: true });
+  const peekTrue = await callJcodeMcp(peerHome, relaySocket, relayToken, { peek: true });
   check("Jcode cotal_inbox peek:true reaches the host and returns buffered traffic", !peekTrue.isError && peekTrue.text.includes("peek survives"), peekTrue);
-  const afterPeek = await callJcodeMcp(managedHome, relaySocket, relayToken, {});
+  const afterPeek = await callJcodeMcp(peerHome, relaySocket, relayToken, {});
   check("Jcode cotal_inbox peek:true leaves the returned message for the following normal read", !afterPeek.isError && afterPeek.text.includes("peek survives"), afterPeek);
-  const unknownInboxArg = await callJcodeMcp(managedHome, relaySocket, relayToken, { unknown: true });
+  const unknownInboxArg = await callJcodeMcp(peerHome, relaySocket, relayToken, { unknown: true });
   check("Jcode cotal_inbox still refuses unknown non-metadata arguments", unknownInboxArg.isError === true && unknownInboxArg.text.includes("unknown"), unknownInboxArg);
 
   // JSON.parse is required: an object-literal __proto__ is special syntax, not an own JSON key.
   // A rejected unknown argument must not fall through to the destructive default inbox read.
   await operator.multicast("prototype-key witness", { channel: "team" });
   await sleep(100);
-  const protoInboxArg = await callJcodeMcpRaw(managedHome, relaySocket, relayToken, '{"__proto__":true}');
-  const afterProtoInboxArg = await callJcodeMcp(managedHome, relaySocket, relayToken, {});
+  const protoInboxArg = await callJcodeMcpRaw(peerHome, relaySocket, relayToken, '{"__proto__":true}');
+  const afterProtoInboxArg = await callJcodeMcp(peerHome, relaySocket, relayToken, {});
   check(
     "Jcode cotal_inbox refuses JSON-own __proto__ without consuming the buffered message",
     protoInboxArg.isError === true && protoInboxArg.text.includes("__proto__") &&
@@ -248,8 +379,8 @@ try {
     const witness = `${key}-key witness`;
     await operator.multicast(witness, { channel: "team" });
     await sleep(100);
-    const rejected = await callJcodeMcp(managedHome, relaySocket, relayToken, { [key]: true });
-    const afterRejected = await callJcodeMcp(managedHome, relaySocket, relayToken, {});
+    const rejected = await callJcodeMcp(peerHome, relaySocket, relayToken, { [key]: true });
+    const afterRejected = await callJcodeMcp(peerHome, relaySocket, relayToken, {});
     check(
       `Jcode cotal_inbox refuses ${key} without consuming the buffered message`,
       rejected.isError === true && rejected.text.includes(key) && !afterRejected.isError && afterRejected.text.includes(witness),
@@ -272,14 +403,13 @@ try {
   const firstTurnAt = requests.findIndex((entry) => (entry.frame as { req?: string; no_reply?: boolean }).req === "send_message" && !(entry.frame as { no_reply?: boolean }).no_reply);
   check("reasoning effort is set before the session's first turn", effortAt >= 0 && firstTurnAt > effortAt, { effortAt, firstTurnAt });
 
-  child.kill("SIGTERM");
-  await Promise.race([once(child, "exit"), sleep(10_000)]);
+  await stopHostTree(child, "SIGTERM");
   check("host exits cleanly on SIGTERM", child.exitCode === 0, { code: child.exitCode, stderr });
 
   // #777 reproduction: Jcode can lock the first turn's tool snapshot before cotal connects. The
   // old host makes one proof turn and rejects this otherwise healthy launch before it can join.
   const raceLog = join(root, "readiness-race.jsonl");
-  const race = spawn(tsx, [host], {
+  const race = spawnHost({
     cwd: root,
     env: {
       ...env,
@@ -304,17 +434,16 @@ try {
   let raceErr = "";
   race.stderr?.on("data", (chunk: Buffer) => (raceErr += chunk.toString()));
   await Promise.race([once(race, "exit"), sleep(20_000)]);
-  const raceEntries = readFileSync(raceLog, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)) as Array<{ ev: string; frame?: { req?: string; content?: string; no_reply?: boolean } }>;
+  const raceEntries = readJsonLines<{ ev: string; frame?: { req?: string; content?: string; no_reply?: boolean } }>(raceLog);
   const raceTurns = raceEntries.filter((entry) => entry.ev === "request" && entry.frame?.req === "send_message" && !entry.frame?.no_reply && String(entry.frame?.content).includes("cotal_orientation"));
   check("a first-turn MCP snapshot race recovers on one bounded retry", announced.has("racepeer") && raceTurns.length === 2, { code: race.exitCode, turns: raceTurns, stderr: raceErr });
-  if (race.exitCode === null) race.kill("SIGTERM");
-  await Promise.race([once(race, "exit"), sleep(10_000)]);
+  await stopHostTree(race, "SIGTERM");
   check("the recovered readiness launch exits cleanly", race.exitCode === 0, { code: race.exitCode, stderr: raceErr });
 
   // A bridge that never publishes the tool must still fail loud after the bounded retry and must
   // never advertise presence. This distinguishes the recovery from a false-online fallback.
   const absentLog = join(root, "readiness-absent.jsonl");
-  const absent = spawn(tsx, [host], {
+  const absent = spawnHost({
     cwd: root,
     env: {
       ...env,
@@ -340,8 +469,8 @@ try {
   absent.stderr?.on("data", (chunk: Buffer) => (absentErr += chunk.toString()));
   await Promise.race([once(absent, "exit"), sleep(20_000)]);
   const absentCode = absent.exitCode;
-  if (absentCode === null) absent.kill("SIGKILL");
-  const absentEntries = readFileSync(absentLog, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)) as Array<{ ev: string; frame?: { req?: string; content?: string; no_reply?: boolean } }>;
+  await stopHostTree(absent, "SIGKILL");
+  const absentEntries = readJsonLines<{ ev: string; frame?: { req?: string; content?: string; no_reply?: boolean } }>(absentLog);
   const absentTurns = absentEntries.filter((entry) => entry.ev === "request" && entry.frame?.req === "send_message" && !entry.frame?.no_reply && String(entry.frame?.content).includes("cotal_orientation"));
   check("a permanently absent cotal tool gets exactly two readiness turns", absentTurns.length === 2, absentTurns);
   check("a permanently absent cotal tool ends the launch", absentCode !== null && absentCode !== 0, { code: absentCode, stderr: absentErr });
@@ -352,7 +481,7 @@ try {
   const effortCanary = "JCODE-REFUSAL-CANARY-3c5e9d77-DO-NOT-PRINT";
   const acceptedLadder = "minimal, low, high";
   const refusedLog = join(root, "refused-effort.jsonl");
-  const refused = spawn(tsx, [host], {
+  const refused = spawnHost({
     cwd: root,
     env: {
       ...env,
@@ -380,7 +509,7 @@ try {
   refused.stderr?.on("data", (chunk: Buffer) => (refusedErr += chunk.toString()));
   await Promise.race([once(refused, "exit"), sleep(20_000)]);
   const refusedCode = refused.exitCode;
-  if (refusedCode === null) refused.kill("SIGKILL");
+  await stopHostTree(refused, "SIGKILL");
   check("a tier the provider refuses ends the launch", refusedCode !== null && refusedCode !== 0, { code: refusedCode, stderr: refusedErr });
   check(
     "effort refusal keeps only its requested tier, effective model, fixed provider code, and accepted ladder",
@@ -398,12 +527,75 @@ try {
     refusedErr,
   );
   check("a seat whose effort was refused never reaches the roster", !announced.has("refusedpeer"), [...announced]);
-  const refusedEntries = existsSync(refusedLog) ? readFileSync(refusedLog, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)) as Array<{ ev: string; frame?: { req?: string; no_reply?: boolean } }> : [];
+  const refusedEntries = readJsonLines<{ ev: string; frame?: { req?: string; no_reply?: boolean } }>(refusedLog);
   check(
     "a seat whose effort was refused never takes a turn",
     !refusedEntries.some((entry) => entry.ev === "request" && entry.frame?.req === "send_message" && !entry.frame?.no_reply),
     refusedEntries.filter((entry) => entry.ev === "request").map((entry) => entry.frame?.req),
   );
+
+  const modelCanary = "MODEL-REFUSAL-CANARY-985-DO-NOT-PRINT";
+  const modelCases = [
+    {
+      name: "prefixmodel",
+      model: "cliproxy/fake-model",
+      code: "model_prefix_rejected",
+      env: {},
+      request: "create_session",
+    },
+    {
+      name: "refusedmodel",
+      model: "refused-model",
+      code: "model_refused",
+      env: { FAKE_JCODE_REFUSE_MODEL: "refused-model", FAKE_JCODE_MODEL_ERROR: `invalid_request: ${modelCanary}` },
+      request: "set_model",
+    },
+    {
+      name: "mismatchedmodel",
+      model: "requested-model",
+      code: "model_mismatch",
+      env: { FAKE_JCODE_RUNTIME_MODEL: "different-model" },
+      request: "get_runtime_info",
+    },
+  ] as const;
+  for (const modelCase of modelCases) {
+    const caseLog = join(root, `${modelCase.name}.jsonl`);
+    const failed = spawnHost({
+      cwd: root,
+      env: {
+        ...env,
+        PATH: `${shimDir}:${env.PATH ?? ""}`,
+        FAKE_JCODE_LOG: caseLog,
+        ...modelCase.env,
+        JCODE_HOME: inheritedJcodeHome,
+        COTAL_SPACE: "jcodehost",
+        COTAL_NAME: modelCase.name,
+        COTAL_ID: modelCase.name,
+        COTAL_SERVERS: servers,
+        COTAL_SUBSCRIBE: "team",
+        COTAL_ALLOW_SUBSCRIBE: "team",
+        COTAL_ALLOW_PUBLISH: "team",
+        COTAL_JCODE_HOME: root,
+        COTAL_JCODE_TUI: "0",
+        COTAL_MODEL: modelCase.model,
+        COTAL_CONTROL_SOCKET: join(root, `${modelCase.name}-control.sock`),
+        COTAL_CONTROL_TOKEN: `${modelCase.name}-control-token`,
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let failedErr = "";
+    failed.stderr?.on("data", (chunk: Buffer) => (failedErr += chunk.toString()));
+    await Promise.race([once(failed, "exit"), sleep(20_000)]);
+    const failedCode = failed.exitCode;
+    await stopHostTree(failed, "SIGKILL");
+    const expected = `Jcode host startup failed (${modelCase.code})`;
+    const persisted = connectorLog(managedHome("jcodehost", modelCase.name));
+    check(`${modelCase.code} names the connector-owned refusal`, failedCode === 1 && failedErr.includes(expected), { failedCode, failedErr });
+    check(`${modelCase.code} fatal is persisted in the seat connector log`, persisted.includes(expected), persisted);
+    check(`${modelCase.code} keeps downstream model text scrubbed`, !failedErr.includes(modelCanary) && !persisted.includes(modelCanary), { failedErr, persisted });
+    const caseEntries = readFileSync(caseLog, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)) as Array<{ ev?: string; frame?: { req?: string } }>;
+    check(`${modelCase.code} reaches its real startup boundary`, caseEntries.some((entry) => entry.ev === "request" && entry.frame?.req === modelCase.request), caseEntries);
+  }
 
   // #845 reproduction: `MeshAgent.start()` retries in the background. A post-join notice sent
   // immediately after it is not evidence of a completed join: the broker below is deliberately
@@ -411,7 +603,7 @@ try {
   const outagePort = await freePort();
   const outageServers = `nats://127.0.0.1:${outagePort}`;
   const outageLog = join(root, "join-outage.jsonl");
-  outage = spawn(tsx, [host], {
+  outage = spawnHost({
     cwd: root,
     env: {
       ...env,
@@ -435,7 +627,7 @@ try {
   let outageErr = "";
   outage.stderr?.on("data", (chunk: Buffer) => (outageErr += chunk.toString()));
   const outageEntries = (): Array<{ ev: string; frame?: { req?: string; content?: string; no_reply?: boolean } }> =>
-    existsSync(outageLog) ? readFileSync(outageLog, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
+    readJsonLines(outageLog);
   await waitFor("outage readiness proof", () => outageEntries().find((entry) => entry.ev === "orientation_done") ? true : undefined);
   await waitFor("outage broker refusal", () => /mesh unreachable/.test(outageErr) ? true : undefined);
   const findOutageNotice = () =>
@@ -460,14 +652,13 @@ try {
   const joinedNotice = await waitFor("post-join notice after the recovered mesh join", () => findOutageNotice());
   await waitFor("recovered mesh presence", () => outagePeerId);
   check("post-join notice fires only after the later real mesh join", Boolean(joinedNotice) && Boolean(outagePeerId), { joinedNotice, outagePeerId });
-  outage.kill("SIGTERM");
-  await Promise.race([once(outage, "exit"), sleep(10_000)]);
+  await stopHostTree(outage, "SIGTERM");
   check("the outage launch exits cleanly", outage.exitCode === 0, { code: outage.exitCode, stderr: outageErr });
 
   // #779 reproduction: the foreground observer belongs beside the session, before the slow
   // readiness request. The old host only spawns it after that request has completed.
   const tuiLog = join(root, "tui-order.jsonl");
-  const foreground = spawn(tsx, [host], {
+  const foreground = spawnHost({
     cwd: root,
     env: {
       ...env,
@@ -492,18 +683,17 @@ try {
   let foregroundErr = "";
   foreground.stderr?.on("data", (chunk: Buffer) => (foregroundErr += chunk.toString()));
   await waitFor("foreground readiness proof", () => existsSync(tuiLog) && readFileSync(tuiLog, "utf8").includes('"ev":"orientation_done"') ? true : undefined);
-  const tuiEntries = readFileSync(tuiLog, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)) as Array<{ ev: string; frame?: { req?: string; content?: string; no_reply?: boolean } }>;
+  const tuiEntries = readJsonLines<{ ev: string; frame?: { req?: string; content?: string; no_reply?: boolean } }>(tuiLog);
   const tuiAt = tuiEntries.findIndex((entry) => entry.ev === "tui");
   const readinessDoneAt = tuiEntries.findIndex((entry) => entry.ev === "orientation_done");
   check("foreground TUI starts before its readiness turn finishes", tuiAt >= 0 && tuiAt < readinessDoneAt, { tuiAt, readinessDoneAt, entries: tuiEntries });
-  foreground.kill("SIGTERM");
-  await Promise.race([once(foreground, "exit"), sleep(10_000)]);
+  await stopHostTree(foreground, "SIGTERM");
   check("the early foreground TUI launch exits cleanly", foreground.exitCode === 0, { code: foreground.exitCode, stderr: foregroundErr });
 
   // Deliberate failing case: project MCP files would override Jcode's private cotal config, so the
   // host must refuse before it starts an API bridge rather than silently loading another server.
   writeFileSync(join(root, ".mcp.json"), '{"mcpServers":{}}');
-  const blocked = spawn(tsx, [host], {
+  const blocked = spawnHost({
     cwd: root,
     env: {
       ...env,
@@ -533,7 +723,7 @@ try {
   // turns into HarnessError and assert the bounded public diagnostic, not private child text.
   rmSync(join(root, ".mcp.json"), { force: true });
   const refusalLog = join(root, "readiness-refusal.jsonl");
-  const refusal = spawn(tsx, [host], {
+  const refusal = spawnHost({
     cwd: root,
     env: {
       ...env,
@@ -557,7 +747,7 @@ try {
   refusal.stderr?.on("data", (chunk: Buffer) => (refusalErr += chunk.toString()));
   await waitFor("provider refusal readiness request", () => {
     if (!existsSync(refusalLog)) return undefined;
-    return readFileSync(refusalLog, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)).find(
+    return readJsonLines<{ ev?: string; frame?: { req?: string; content?: string } }>(refusalLog).find(
       (entry: { ev?: string; frame?: { req?: string; content?: string } }) =>
         entry.ev === "request" && entry.frame?.req === "send_message" && entry.frame.content?.includes("cotal_orientation"),
     );
@@ -570,7 +760,7 @@ try {
       exitCode: refusal.exitCode,
       signalCode: refusal.signalCode,
       stderr: refusalErr,
-      fakeEvents: existsSync(refusalLog) ? readFileSync(refusalLog, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [],
+      fakeEvents: readJsonLines(refusalLog),
     },
   );
   check(
@@ -578,14 +768,22 @@ try {
     !refusalErr.includes("was refused by provider"),
     refusalErr,
   );
-  console.log(`\nJCODE HOST SMOKE PASSED (${pass} checks)`);
 } finally {
-  if (child && child.exitCode === null) child.kill("SIGKILL");
-  if (outage && outage.exitCode === null) outage.kill("SIGKILL");
+  for (const proc of hosts) await stopHostTree(proc, "SIGKILL");
+  check("teardown: every Jcode host process group is gone", hosts.every((proc) => !groupAlive(proc)), {
+    started: hosts.length,
+    alive: hosts.filter(groupAlive).map((proc) => proc.pid),
+  });
   await operator?.stop().catch(() => {});
   await outageOperator?.stop().catch(() => {});
   nats.kill("SIGKILL");
   outageNats?.kill("SIGKILL");
-  await sleep(100);
+  for (let i = 0; i < 100; i++) {
+    if ((nats.exitCode !== null || nats.signalCode !== null) &&
+        (outageNats === undefined || outageNats.exitCode !== null || outageNats.signalCode !== null)) break;
+    await sleep(50);
+  }
   rmSync(root, { recursive: true, force: true });
 }
+
+console.log(`\nJCODE HOST SMOKE PASSED (${pass} checks)`);

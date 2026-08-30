@@ -91,7 +91,7 @@ launcher. Comma-separated lists are trimmed.
 | `COTAL_CHANNEL` | Claude connector | Force channel wake-nudges on (`1`) / off; set to `1` by the Claude launcher | auto-detect |
 | `COTAL_EVENTS` | connector session | Arm this session's event plane (`1`); set by the launcher for `--events` spawns | off |
 | `COTAL_EVENTS_DEFAULT` | manager | Default event plane for managed spawns (`1`) | off |
-| `COTAL_DEFAULT_AGENT` | `cotal spawn` | Default connector type for a bare spawn | `claude` |
+| `COTAL_DEFAULT_AGENT` | `cotal spawn` | Default connector type for a bare spawn (below an explicit `--agent` and the persona's `agent:` pin) | `claude` |
 | `COTAL_DEFAULT_PERSONA` | `cotal spawn` | Default persona for a bare spawn | `default` |
 | `COTAL_SKIP_CONNECTOR_SEED` | boot gate | Skip the automatic built-in-connector seed/refresh on a command (`1`); `cotal ext seed` still works | off |
 | `COTAL_DETACH_KEY` | `cotal attach` | Detach escape key (`ctrl-<char>` / `^<char>`) | `ctrl-]` |
@@ -229,18 +229,24 @@ A project's state lives in `.cotal/` at the mesh root (found by walking up from 
 | `auth/broker.json` | Broker trust material: the operator seed and the system account (secret; the system-account signing seed is stripped before writing). One per broker, shared by every space on it |
 | `auth/account.<key>.json` | One space's own NATS data account and signing seed (secret). One file per space, all signed by the broker above; `<key>` is a stable, case-safe hex encoding of the space name (never the raw name, so two case-differing spaces can't collide) |
 | `auth/space.<key>/` | One space's user-auth state (IdP pin, issuer keys, owner secret, callout account), present only when that space enables per-user auth. Keyed by the same case-safe hex encoding; pre-hex layouts (`auth/<space>/`) are renamed here on first touch |
-| `auth/creds/<name>.creds` | Per-agent minted NATS credentials |
+| `auth/creds/space.<key>/<name>.creds` | Per-agent minted NATS credentials, under the segment of the space they belong to - same case-safe hex encoding as the rows above. Pre-segment layouts (`auth/creds/<name>.creds`) are moved here on first touch. The `creds` directory itself stays shared, so a root's tenants keep their agent material in sibling segments rather than sibling roots |
 | `auth/server.conf` | Generated nats-server config for the broker. The core renderer accepts every space on the broker; `cotal up` currently orchestrates one space per root, so it renders that one space's account |
 | `broker-policy.json` | Durable broker **launch** policy (TLS-required cert/key path references, or plaintext). Survives `cotal down` so a bare re-`up` cannot silently drop TLS. Under the project root: **not** under `COTAL_HOME` |
 | `agents/<name>.md` | Persona / agent files ([Agent files](agent-files.md)) |
 | `manifests/<hash>.json` | Manifest-deploy ledger (records of `up -f` / `spawn -f` runs) |
 | `config.json` | Space-local connector config (the override layer above) |
 | `nats.pid` · `nats.log` | Background nats-server pid + log |
-| `manager.pid` · `manager.log` | Manager (supervisor) pid + log; `manager.delivery-aware` marks a delivery-aware build. The manager writes the pid itself, whatever started it, and removes it on a clean stop only while it still names that process. A reader treats the record as a running manager only if the pid is alive **and** the process is a supervisor: a recycled pid belonging to something else is reported as a stale record, never signalled |
-| `delivery.pid` · `delivery.log` · `delivery.creds` | Delivery daemon pid, log, and scoped cred (auth mode) |
+| `manager.<key>.pid` · `manager.<key>.log` | Manager (supervisor) pid + log for one space; `manager.<key>.delivery-aware` marks a delivery-aware build. `<key>` is the same case-safe hex space key as the rows above, so one root can run a manager per space. A pre-segmentation root-scoped `manager.pid` is still read while it is the only spelling present, and is removed as the new record is written; both spellings present is reported as ambiguous rather than guessed. The manager writes the pid itself, whatever started it, and removes it on a clean stop only while it still names that process. A reader treats the record as a running manager only if the pid is alive **and** the process is a supervisor: a recycled pid belonging to something else is reported as a stale record, never signalled |
+| `delivery.<key>.pid` · `delivery.<key>.log` · `delivery.creds` | Delivery daemon pid and log for one space, and its scoped cred (auth mode). Per-space and compatible with a pre-segmentation `delivery.pid` on the same terms as the manager row |
 | `web.pid` · `web.log` | Web dashboard pid + log |
 | `membership.json` · `membership-*.creds` | Membership feed state + its scoped creds |
 | `setup.log` | Last `cotal setup` run |
+
+A command that acts on the whole folder without being told a space reads one off these runtime
+records: `<key>` decodes back to the space name, and a space whose record is running wins over
+residue from a stopped one. Two spaces running under one root is reported rather than arbitrated.
+This is what lets `cotal status` and `cotal down` work in a folder whose mesh runs with
+`broker: { auth: false }`, where there is no `auth/account.<key>.json` to name the space.
 
 ### Machine files
 

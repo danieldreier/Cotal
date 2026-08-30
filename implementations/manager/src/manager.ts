@@ -20,6 +20,9 @@ import {
   idFromCreds,
   inspectCredHealth,
   loadAgentFile,
+  listPersonaCatalog,
+  personaCatalogDescription,
+  personaCatalogReadable,
   loadCotalConfig,
   mintCreds,
   mintLifecycleUid,
@@ -44,7 +47,7 @@ import {
   controlServiceSubject,
   eventChannelPrincipal,
 } from "@cotal-ai/core";
-import { agentAuthState, agentCredsDir, agentLifecycleSecretFilePaths, agentSecretFilePaths, agentSecretKeyForFile, authDir, connectorInstallHint, DEFAULT_CONNECTOR, defaultAgentType, DELIVERY_CREDS_KEY, findCotalRoot, getSpaceAuth, hasUserAuthState, loadManagerInstanceIdentity, loadMeshes, manifestExtensionNames, materializeFromManifest, materializeSecretToFile, MEMBERSHIP_RW_CREDS_KEY, mergeLaunchOptions, remintDaemonCreds, resolveOnPath, saveManagerInstanceIdentity, SYSTEM_CREDS_FILES, userAuthStateDir, workspaceSecretStore, writeRenewalRecord, type RenewalRecord } from "@cotal-ai/workspace";
+import { agentAuthState, agentCredsDir, agentLifecycleSecretFilePaths, agentSecretFilePaths, agentSecretKeyForFile, authDir, connectorInstallHint, DEFAULT_CONNECTOR, defaultAgentType, DELIVERY_CREDS_KIND, extensionConnectors, findCotalRoot, getSpaceAuth, hasUserAuthState, loadExtensionsManifest, loadManagerInstanceIdentity, loadMeshes, manifestExtensionNames, materializeFromManifest, materializeSecretToFile, MEMBERSHIP_RW_CREDS_KIND, mergeLaunchOptions, remintDaemonCreds, resolveOnPath, saveManagerInstanceIdentity, spaceMaterialKey, SYSTEM_CREDS_FILES, userAuthStateDir, workspaceSecretStore, writeRenewalRecord, type RenewalRecord } from "@cotal-ai/workspace";
 import type { ActionContext, AgentDef, AttachSession, Connector, ConnectorModelCatalog, ControlReply, CredHealth, LaunchOpts, LaunchSpec, ManagerLeaseInfo, MeshLaunchAgent, Presence, SecretStore, SpaceAuth } from "@cotal-ai/core";
 import {
   createRuntime,
@@ -53,7 +56,7 @@ import {
   type RuntimeMode,
 } from "./runtime/index.js";
 import { AttachEndpoint, type SessionEstablishment } from "./attach-endpoint.js";
-import { makeManagerEndpointEvictor } from "./endpoint-evict.js";
+import { makeManagerEndpointEvictionEvidence, makeManagerEndpointEvictor } from "./endpoint-evict.js";
 import { makeManagerHolderLivenessProbe } from "./holder-liveness.js";
 import { GateReconcileRefused, reconcileEndpointGate } from "./reconcile-gate.js";
 import { launchSpecForRun, materializePersona, launchAgentToStartOpts, parseLaunchSpec, persistLaunchSpec } from "./launch.js";
@@ -138,7 +141,7 @@ import {
   type Identity,
   type ServiceNameAuthority,
 } from "@cotal-ai/core";
-import { MANAGER_ENDPOINT, managerClusterArtifacts, managerCommandDefs, managerContractArtifactValues, type ManagerStatus } from "./manager-service-contract.js";
+import { MANAGER_ENDPOINT, managerClusterArtifacts, managerCommandDefs, managerContractArtifactValues, type ManagerConnectorStatus, type ManagerStatus } from "./manager-service-contract.js";
 import type { NatsConnection, Subscription } from "@nats-io/transport-node";
 import type { KV } from "@nats-io/kv";
 import {
@@ -424,6 +427,9 @@ export interface StartAgentOpts {
   name: string;
   /** Connector / agent type — resolved from the registry. Defaults to `COTAL_DEFAULT_AGENT`, else `"cotal"`. */
   agent?: string;
+  /** Detached caller's default connector, kept separate from an explicit flag so the persona file
+   *  can outrank it. Imperative control requests only; direct and manifest launches omit it. */
+  defaultAgent?: string;
   role?: string;
   /** Explicit agent-file path that overrides the `name` ref for *which file to load* (identity still
    *  comes from that file's `name:`). The file must exist. */
@@ -596,6 +602,9 @@ export interface SpawnAcceptance {
   uid: string;
   goalId: string;
   fingerprint: string;
+  /** The connector-selected readiness budget persisted on this goal. A synchronous follower must
+   *  outlive it; otherwise it can time out while the manager is still legitimately waiting. */
+  readinessDeadlineMs: number;
   executor: { lifecycleUid: string; epoch: number };
 }
 
@@ -695,6 +704,8 @@ export class Manager {
   /** See {@link ManagerOptions.installedExtensions}. */
   private readonly installedExtensions: boolean;
   private readonly runtime: Runtime;
+  /** Internal test seam. Production leaves this undefined and uses the scoped delivery-admin evictor. */
+  private staticLifecycleEvict?: (principal: string) => Promise<import("@cotal-ai/core").EvictionResult>;
   private readonly preserveStopTimeoutMs: number;
   private readonly agents = new Map<string, ManagedAgent>();
   /** Names whose spawn is in flight (reserved synchronously before the provision await) — counted
@@ -797,6 +808,9 @@ export class Manager {
   private agentGoals = new Map<string, GoalRef>();
   /** Process start, for the served `status` uptime. */
   private readonly startedAtMs = Date.now();
+  /** Connector harness paths resolved ONCE at boot. Missing binaries do not stop unrelated manager
+   * work, but they are named before the manager reports ready and remain visible in manager status. */
+  private connectorStatuses: ManagerConnectorStatus[] = [];
   /** Static aliases whose startup exact-op terminal is still in flight. Scoped per alias: control
    * serves during the sweep, but no caller can reuse or attach an alias the sweep still owns. */
   private readonly reconcilingAliases = new Set<string>();
@@ -945,6 +959,7 @@ export class Manager {
   }
 
   async start(): Promise<void> {
+    await this.inspectConnectorsAtBoot();
     await this.attach.start();
     // In auth mode the manager is just another user in the space's account — it mints
     // itself creds from the same signing key it uses for the agents it spawns. The signer comes
@@ -1141,8 +1156,8 @@ export class Manager {
         // re-signed) so its reply proves it adopted THIS generation, not merely re-read some file.
         const expected: { delivery?: string; membership?: string } = {};
         for (const r of resigned) {
-          if (r.file === DELIVERY_CREDS_KEY && r.fingerprint) expected.delivery = r.fingerprint;
-          else if (r.file === MEMBERSHIP_RW_CREDS_KEY && r.fingerprint) expected.membership = r.fingerprint;
+          if (r.file === DELIVERY_CREDS_KIND && r.fingerprint) expected.delivery = r.fingerprint;
+          else if (r.file === MEMBERSHIP_RW_CREDS_KIND && r.fingerprint) expected.membership = r.fingerprint;
         }
         try {
           const reply = await this.ep.requestDeliveryAdmin("reloadCreds", { expected }, DELIVERY_ADMIN_RELOAD_TIMEOUT_MS);
@@ -1177,7 +1192,7 @@ export class Manager {
           // optimisation into the whole guard, and nothing fails at the moment of the change.
           if (a.userOwner || a.terminalizing || !a.seed || !a.secretPaths?.creds) continue;
           try {
-            const stored = await this.secrets.get(agentSecretKeyForFile(a.secretPaths.creds));
+            const stored = await this.secrets.get(agentSecretKeyForFile(a.secretPaths.creds, this.space));
             if (stored === undefined) continue; // no materialized cred (never minted here) - nothing to renew
             const health = inspectCredHealth(stored);
             if (health.state === "healthy") continue;
@@ -1268,10 +1283,17 @@ export class Manager {
    *  attempt it. An absent file is the unprovisioned space, reported by the daemon that needs it. */
   private warnOnSystemCredExpiry(): void {
     for (const file of SYSTEM_CREDS_FILES) {
-      const path = join(this.workspaceRoot, ".cotal", file);
-      if (!existsSync(path)) continue;
       let health: CredHealth;
       try {
+        // The pair is PER-SPACE as of P7, so the location comes from the resolver and never from a
+        // path built here (§2 rule 1). Building `.cotal/<kind>` instead would not warn on a wrong
+        // file — it would silently warn on NOTHING, for every provisioned root, forever, which is
+        // exactly the signal #338 added this for. The resolver may also refuse (§2 rules 3, 4); that
+        // refusal is caught with the unreadable case for the reason on the tin — the daemon that
+        // NEEDS the pair resolves it through the same function and reports it loudly there, so a
+        // diagnostic pass has nothing to add by crashing renewal.
+        const path = join(this.workspaceRoot, ".cotal", spaceMaterialKey(file, this.space, { injected: false, root: this.workspaceRoot }));
+        if (!existsSync(path)) continue;
         health = inspectCredHealth(readFileSync(path, "utf8"));
       } catch {
         continue; // an unreadable $SYS file is the daemon's loud failure, not a renewal-pass crash
@@ -1652,18 +1674,32 @@ export class Manager {
    *  touches NEITHER the lease NOR the endpoints — the caller owns those. */
   private async teardownManagedAgents(): Promise<void> {
     const managed = [...this.agents.values()];
+    const failures: string[] = [];
     for (const a of managed) {
       // Free the slot + hard-stop each; `stopHandle` is best-effort (never throws — see it), so one bad
       // stop can't strand the rest, and every snapshot entry is deprovisioned below regardless.
       this.agents.delete(a.name);
       this.stopHandle(a, false);
     }
+    // A runtime stop request is not exit proof. Do not release the manager lease or registration
+    // while any seat may still hold this instance's broker rails: that creates the exact orphan
+    // window where a successor sees a dead manager but live predecessor authority. Every shipped
+    // runtime now supplies waitForExit; absence or timeout is a failed shutdown, never a clean one.
+    await Promise.all(managed.map(async (a) => {
+      try {
+        await this.awaitHandleExit(a.handle);
+      } catch (e) {
+        failures.push(`${a.name}: ${(e as Error).message}`);
+      }
+    }));
     // Deprovision EVERY snapshot entry regardless of whether its stop failed (allSettled + a loud log).
     await Promise.allSettled(
       managed.filter((a) => !a.suppressCleanup).map((a) =>
         this.deprovision(a).catch((e) => console.error(`deprovision ${a.name} (${a.id}) on shutdown: ${(e as Error).message}`)),
       ),
     );
+    if (failures.length)
+      throw new Error(`manager shutdown could not prove every seat exited: ${failures.join("; ")}`);
   }
 
   private async stopRetainedAgentsOnExit(): Promise<void> {
@@ -2163,6 +2199,16 @@ export class Manager {
       }),
       stopSelf: (ctx) => this.serveGated(ctx, () => unwrap(this.opStopSelf(callerOf(ctx), args(ctx)))),
       definePersona: (ctx) => this.serveGated(ctx, () => unwrap(this.opDefinePersona(args(ctx), callerOf(ctx), false))),
+      listPersonas: (ctx) => this.serveGated(ctx, () => unwrap(this.opListPersonas(callerOf(ctx), false))),
+      showPersona: (ctx) => this.serveGated(ctx, () => {
+        const r = this.opShowPersona(args(ctx), callerOf(ctx), false);
+        if (!r.ok) {
+          const msg = r.error ?? "not found";
+          if (msg.startsWith("no persona")) throw new EpEnvelopeError("not-found", msg);
+          throw new EpEnvelopeError("failed-precondition", msg);
+        }
+        return r.data;
+      }),
       purge: (ctx) => this.serveGated(ctx, () => adminGated(ctx, async () => unwrap(await this.opPurge(args(ctx), callerOf(ctx))))),
       // launch is OWNER-EQUALITY on the ep door for every caller (freelance HIGH #2): the deploy
       // path is the only launch consumer and its spec stamps the CALLER's own owner, so
@@ -2432,7 +2478,7 @@ export class Manager {
     const secrets = this.secrets;
     // LIFECYCLE-KEYED family (SPEC 13.1 name-disjointness on the FS): this incarnation's files
     // embed its uid, so no teardown addressed to another incarnation can ever reach them.
-    const files = agentLifecycleSecretFilePaths(this.workspaceRoot, name, opts.lifecycleUid);
+    const files = agentLifecycleSecretFilePaths(this.workspaceRoot, this.space, name, opts.lifecycleUid);
     const { actorToken: tokenPath, sentinelCreds: sentinelPath, health: healthPath } = files;
     try {
       // The GRANT first — it is the envelope-rule enforcement point (a delegation must sit within
@@ -2465,10 +2511,10 @@ export class Manager {
       // The store holds the source of truth; the bearer re-exec (`--token-file`) and the launch's
       // sentinel handoff read FILES, so materialize both at the canonical paths (under the local
       // FS composition, a byte-identical rewrite of the keys' own locations).
-      await secrets.put(agentSecretKeyForFile(tokenPath), grant.actorToken);
-      await secrets.put(agentSecretKeyForFile(sentinelPath), grant.sentinelCreds);
-      await materializeSecretToFile(secrets, agentSecretKeyForFile(tokenPath), tokenPath);
-      await materializeSecretToFile(secrets, agentSecretKeyForFile(sentinelPath), sentinelPath);
+      await secrets.put(agentSecretKeyForFile(tokenPath, this.space), grant.actorToken);
+      await secrets.put(agentSecretKeyForFile(sentinelPath, this.space), grant.sentinelCreds);
+      await materializeSecretToFile(secrets, agentSecretKeyForFile(tokenPath, this.space), tokenPath);
+      await materializeSecretToFile(secrets, agentSecretKeyForFile(sentinelPath, this.space), sentinelPath);
       rmSync(healthPath, { force: true }); // a fresh start opens a fresh health window
       const bearerCmd = [
         // The manager's own invocation prefix (node + loader flags + the cotal entry) — the agent
@@ -2494,8 +2540,8 @@ export class Manager {
       // may respawn the moment it reads the refusal, and a detached teardown would race (and
       // delete) that fresh spawn's just-provisioned durables.
       await provider.revokeAgent({ dir, owner, actor: name }).catch(() => {});
-      await secrets.delete(agentSecretKeyForFile(tokenPath)).catch(() => {});
-      await secrets.delete(agentSecretKeyForFile(sentinelPath)).catch(() => {});
+      await secrets.delete(agentSecretKeyForFile(tokenPath, this.space)).catch(() => {});
+      await secrets.delete(agentSecretKeyForFile(sentinelPath, this.space)).catch(() => {});
       rmSync(tokenPath, { force: true });
       rmSync(sentinelPath, { force: true });
       rmSync(healthPath, { force: true });
@@ -2544,8 +2590,9 @@ export class Manager {
 
   private freeSlot(a: ManagedAgent, floor: boolean, cause: FreeSlotCause, acceptedBeforeFence = false): void {
     if (this.agents.get(a.name) !== a) return; // already freed (exit raced despawn, etc.)
+    // F5 latch (Unit B): also covers exit/reap paths that never rode stopHandle.
     this.logSeatReaped(a, cause);
-    a.terminalizing = true; // F5 latch (Unit B): also covers exit/reap paths that never rode stopHandle
+    a.terminalizing = true;
     this.agents.delete(a.name);
     if (a.restart?.sessionStatePath) rmSync(a.restart.sessionStatePath, { force: true });
     // P2 item 6 (pin 4): end any live §13.6 attach session bound to THIS incarnation with the honest
@@ -2630,9 +2677,9 @@ export class Manager {
     // standing `cotal mint` cred, a seeded workstation cred, a pre-split leftover): deleting an
     // unowned same-name file is the exact successor-clobber this ownership discipline removes.
     const secrets = this.secrets;
-    const files = a.secretPaths ?? agentLifecycleSecretFilePaths(this.workspaceRoot, a.name, a.lifecycleUid);
+    const files = a.secretPaths ?? agentLifecycleSecretFilePaths(this.workspaceRoot, this.space, a.name, a.lifecycleUid);
     if (files.creds) {
-      await secrets.delete(agentSecretKeyForFile(files.creds));
+      await secrets.delete(agentSecretKeyForFile(files.creds, this.space));
       rmSync(files.creds, { force: true });
     }
     if (a.userOwner) {
@@ -2640,8 +2687,8 @@ export class Manager {
       // the agent's standing mint authority, so delete it (next exchange refused, next connect
       // denied) and shred the secret/sentinel/health files. A copied actor token dies here; a
       // still-LIVE connection ends at its bearer-bound JWT expiry (≤ the agent TTL).
-      if (files.actorToken) await secrets.delete(agentSecretKeyForFile(files.actorToken));
-      if (files.sentinelCreds) await secrets.delete(agentSecretKeyForFile(files.sentinelCreds));
+      if (files.actorToken) await secrets.delete(agentSecretKeyForFile(files.actorToken, this.space));
+      if (files.sentinelCreds) await secrets.delete(agentSecretKeyForFile(files.sentinelCreds, this.space));
       for (const f of [files.actorToken, files.sentinelCreds, files.health]) if (f) rmSync(f, { force: true });
       // The ledger row IS the agent's STANDING mint authority (a different store from the auth-plane
       // cred ledger the rail retirement covers): while it lives, a copied actor token can still mint a
@@ -3102,6 +3149,8 @@ export class Manager {
       return Promise.resolve({ ok: false, error: "resume: session id must not be empty" });
     if (args.variant !== undefined && !String(args.variant).trim())
       return Promise.resolve({ ok: false, error: "variant: must not be empty" });
+    if (args.defaultAgent !== undefined && !String(args.defaultAgent).trim())
+      return Promise.resolve({ ok: false, error: "defaultAgent: must not be empty" });
     // Opaque launch options, when present, must be a mapping — a raw control message could send a
     // scalar/array (the CLI never does). Core doesn't interpret the keys; the connector validates them.
     if (args.launchOptions !== undefined && (typeof args.launchOptions !== "object" || args.launchOptions === null || Array.isArray(args.launchOptions)))
@@ -3126,6 +3175,7 @@ export class Manager {
       {
         name: String(args.name ?? "").trim(),
         agent: args.agent ? String(args.agent) : undefined,
+        defaultAgent: args.defaultAgent ? String(args.defaultAgent) : undefined,
         role: args.role ? String(args.role) : undefined,
         config: args.config ? String(args.config) : undefined,
         identity: args.identity ? String(args.identity) : undefined,
@@ -3163,6 +3213,44 @@ export class Manager {
    *  else whatever a composition root registered. Drives the `models` catalog enumeration. */
   private connectorNames(): string[] {
     return this.installedExtensions ? manifestExtensionNames("connector") : registry.all<Connector>("connector").map((c) => c.name);
+  }
+
+  /** Resolve every installed/registered connector's declared harness binaries before the manager
+   * reports ready. A missing harness degrades only that connector, never unrelated lifecycle work:
+   * boot continues, but prints a named refusal and records it on both manager status surfaces. */
+  private async inspectConnectorsAtBoot(): Promise<void> {
+    const rows: ManagerConnectorStatus[] = [];
+    let declared: Array<{ name: string; requires: readonly string[] }>;
+    if (this.installedExtensions) {
+      try {
+        declared = loadExtensionsManifest().extensions.flatMap((ext) => extensionConnectors(ext));
+      } catch (error) {
+        const reason = (error as Error).message;
+        console.error(`! manager boot: connector inventory unavailable - ${reason}`);
+        this.connectorStatuses = [{ agent: "(inventory)", state: "unavailable", binaries: {}, reason }];
+        return;
+      }
+    } else {
+      declared = registry.all<Connector>("connector").map((connector) => ({ name: connector.name, requires: connector.requires ?? [] }));
+    }
+    for (const connector of declared) {
+      const name = connector.name;
+      const binaries: Record<string, string> = {};
+      const missing: string[] = [];
+      for (const bin of connector.requires) {
+        const path = resolveOnPath(bin);
+        if (path) binaries[bin] = path;
+        else missing.push(bin);
+      }
+      if (missing.length) {
+        const reason = `${name} harness needs ${missing.join(", ")} on PATH - not found`;
+        rows.push({ agent: name, state: "unavailable", binaries, reason });
+        console.error(`! manager boot: connector ${name} unavailable - ${reason}`);
+      } else {
+        rows.push({ agent: name, state: "available", binaries });
+      }
+    }
+    this.connectorStatuses = rows.sort((a, b) => a.agent.localeCompare(b.agent));
   }
 
   /** Return connector-provided model catalogs for selector UIs. Optional by connector: a host with no
@@ -3335,7 +3423,42 @@ export class Manager {
       const refErr = this.nameError(ref);
       if (refErr) return { ok: false, error: refErr };
     }
-    const agent = opts.agent ?? defaultAgentType(DEFAULT_CONNECTOR);
+
+    // Resolve the persona file (fail loud — NO silent default-ACL fallback). A missing persona used
+    // to mint DEFAULT creds (read `general` only, default-deny publish, no capabilities), so a
+    // typo'd / renamed / spawned-by-display-name agent became live with silently-wrong ACLs — a
+    // behavioral/security bug. Fail loud instead, matching `cotal spawn` (loadAgentFile throws).
+    // This runs BEFORE the connector resolution below: the file's `agent:` pin participates in the
+    // harness choice (flag > file > COTAL_DEFAULT_AGENT > default, #869), which is impossible if the
+    // connector is materialized first. Still synchronous (existsSync/readFileSync), so the capacity/
+    // reserve span below stays atomic.
+    let configPath: string;
+    if (opts.config) {
+      configPath = agentFilePath(this.workspaceRoot, opts.config);
+      if (!existsSync(configPath)) return { ok: false, error: `agent file not found: ${configPath}` };
+    } else {
+      configPath = agentFilePath(this.workspaceRoot, ref);
+      if (!existsSync(configPath))
+        return { ok: false, error: `no persona "${ref}" - ${configPath} not found; create it or pass --config (see \`cotal personas list\`)` };
+    }
+
+    // Load the persona ONCE, here, ahead of the connector choice. The file's `agent:` pin feeds the
+    // harness resolution below; the identity/ACL profile block later consumes the SAME def (no second
+    // load). A manifest launch (`resolved`) materializes its own transient persona and the file is
+    // NOT its authority, so its def (and its agent pin) is deliberately not consulted here — the
+    // manifest's own `agent:` field drove the launch object already.
+    let def: AgentDef | undefined;
+    if (!opts.resolved) {
+      try {
+        def = loadAgentFile(configPath);
+      } catch (e) {
+        return { ok: false, error: (e as Error).message };
+      }
+    }
+    // Harness precedence (#869): --agent flag > persona file `agent:` > detached caller default >
+    // this manager's COTAL_DEFAULT_AGENT > DEFAULT_CONNECTOR. Both environment values are defaults,
+    // never overrides: neither may beat a deliberate per-persona pin.
+    const agent = opts.agent ?? def?.agent ?? opts.defaultAgent ?? defaultAgentType(DEFAULT_CONNECTOR);
 
     // Materialize the requested connector up front — the ONE async step in the spawn path (a lazy
     // `cotal ext` manifest import on the published binary). It runs BEFORE the capacity/reserve span
@@ -3361,26 +3484,18 @@ export class Manager {
     if (this.agents.size + this.reserved.size + cooling >= MAX_AGENTS)
       return { ok: false, error: `at capacity (${MAX_AGENTS} agents incl. in-flight + cooling); despawn one or wait` };
 
-    // Resolve the persona file (fail loud — NO silent default-ACL fallback). A missing persona used
-    // to mint DEFAULT creds (read `general` only, default-deny publish, no capabilities), so a
-    // typo'd / renamed / spawned-by-display-name agent became live with silently-wrong ACLs — a
-    // behavioral/security bug. Fail loud instead, matching `cotal spawn` (loadAgentFile throws).
-    let configPath: string;
-    if (opts.config) {
-      configPath = agentFilePath(this.workspaceRoot, opts.config);
-      if (!existsSync(configPath)) return { ok: false, error: `agent file not found: ${configPath}` };
-    } else {
-      configPath = agentFilePath(this.workspaceRoot, ref);
-      if (!existsSync(configPath))
-        return { ok: false, error: `no persona "${ref}" - ${configPath} not found; create it or pass --config (see \`cotal personas list\`)` };
-    }
-
     // Harness preflight before reserving a slot or minting — a missing `claude`/`opencode` binary
     // fails here with a clear name, not obscurely at process spawn. No fallback. All synchronous, so
     // the reserve gate stays atomic. (The connector itself was resolved up top, before the capacity gate.)
-    const missing = (connector.requires ?? []).filter((bin) => !resolveOnPath(bin));
-    if (missing.length)
-      return { ok: false, error: `${agent} harness needs ${missing.join(", ")} on PATH - not found` };
+    const bootStatus = this.connectorStatuses.find((row) => row.agent === agent);
+    if (bootStatus?.state === "unavailable") return { ok: false, error: bootStatus.reason };
+    // A connector registered after boot has no inventory row. Keep the existing pre-mint backstop
+    // for that dynamic library-composition case; ordinary installed connectors were checked at boot.
+    if (!bootStatus) {
+      const missing = (connector.requires ?? []).filter((bin) => !resolveOnPath(bin));
+      if (missing.length)
+        return { ok: false, error: `${agent} harness needs ${missing.join(", ")} on PATH - not found` };
+    }
     // Resume is a connector capability: reject an unsupported resume HERE, before the reserve/mint, so
     // it can never provision creds + durables and then throw at buildLaunch (mint-then-orphan). Same
     // reject-before-side-effects window as the harness preflight above; buildLaunch stays the backstop.
@@ -3420,12 +3535,9 @@ export class Manager {
       prompt = r.prompt; // the guard above rejected an imperative prompt — one source
 
     } else {
-      let def: AgentDef;
-      try {
-        def = loadAgentFile(configPath);
-      } catch (e) {
-        return { ok: false, error: (e as Error).message };
-      }
+      // `def` was loaded once above the connector resolution (#869 ordering); consume it here.
+      // `resolved` is the only path that skips the load, and this is its opposite branch.
+      if (!def) return { ok: false, error: "internal: persona definition missing at launch profile" };
       // Identity: the `--name` override wins over the file's `name:` — foreground parity (there,
       // `requested = values.name ?? def.name`). The override is minted into the creds and rides
       // COTAL_NAME below, so the presence identity and its credential can't diverge.
@@ -3673,9 +3785,9 @@ export class Manager {
         const secrets = this.secrets;
         // LIFECYCLE-KEYED (SPEC 13.1 on the FS): the incarnation's cred file embeds its uid, so a
         // replayed/stale teardown can never address a same-name successor's credential.
-        credsPath = agentLifecycleSecretFilePaths(this.workspaceRoot, name, lifecycleUid).creds;
-        await secrets.put(agentSecretKeyForFile(credsPath), creds);
-        await materializeSecretToFile(secrets, agentSecretKeyForFile(credsPath), credsPath);
+        credsPath = agentLifecycleSecretFilePaths(this.workspaceRoot, this.space, name, lifecycleUid).creds;
+        await secrets.put(agentSecretKeyForFile(credsPath, this.space), creds);
+        await materializeSecretToFile(secrets, agentSecretKeyForFile(credsPath, this.space), credsPath);
         provisioned = { id: identity.id, name, lifecycleUid, secretPaths: { creds: credsPath } }; // footprint now exists — the finally rolls it back if the spawn throws
       }
       // Personal MCP servers the operator opted to share with manager-spawned agents of this type
@@ -3731,6 +3843,7 @@ export class Manager {
         events,
         mcpServers,
         envAllow,
+        resolvedBinaries: bootStatus?.binaries,
         // So a connector that keeps per-agent local state can root it at the workspace, not the
         // (possibly per-agent) launch cwd below. The cwd itself rides runtime.spawn, not the launch.
         workspaceRoot: this.workspaceRoot,
@@ -3994,8 +4107,8 @@ export class Manager {
       // layout) or the name-keyed one (a pre-split inventory being carried across the upgrade).
       // Anything else is a foreign path and refused exactly as before.
       const candidates = [
-        resolve(agentLifecycleSecretFilePaths(this.workspaceRoot, entry.name, entry.identity.lifecycleUid).creds),
-        resolve(agentSecretFilePaths(this.workspaceRoot, entry.name).creds),
+        resolve(agentLifecycleSecretFilePaths(this.workspaceRoot, this.space, entry.name, entry.identity.lifecycleUid).creds),
+        resolve(agentSecretFilePaths(this.workspaceRoot, this.space, entry.name).creds),
       ];
       const expected = resolve(entry.identity.credential.path);
       if (!candidates.includes(expected))
@@ -4007,7 +4120,7 @@ export class Manager {
         // composition resolves the key to this same path).
         const st = lstatSync(expected);
         if (!st.isFile() || st.isSymbolicLink()) throw new Error("not a regular non-symlink file");
-        const stored = await this.secrets.get(agentSecretKeyForFile(expected));
+        const stored = await this.secrets.get(agentSecretKeyForFile(expected, this.space));
         if (stored === undefined) throw new Error("the credential is not in the secret store");
         credentialText = stored;
         const actual = idFromCreds(credentialText);
@@ -4034,18 +4147,21 @@ export class Manager {
       // the atomic family closes both: `health` is pinned by PATH EQUALITY (never by file existence,
       // so a transiently-absent health file still validates), and the store reads below key off the
       // RECORDED path, so a foreign path can neither pass the pin nor address a different row.
-      const lifecycleFiles = agentLifecycleSecretFilePaths(this.workspaceRoot, entry.name, entry.identity.lifecycleUid);
-      const legacyFiles = agentSecretFilePaths(this.workspaceRoot, entry.name);
+      // Both triples are derived under THIS manager's space, and the key builder is given
+      // `this.space` rather than reading the segment out of the recorded path: an inventory row is
+      // caller data, and a recorded path may not choose which tenant's material is addressed.
+      const lifecycleFiles = agentLifecycleSecretFilePaths(this.workspaceRoot, this.space, entry.name, entry.identity.lifecycleUid);
+      const legacyFiles = agentSecretFilePaths(this.workspaceRoot, this.space, entry.name);
       const recordedToken = resolve(entry.identity.actorToken.path);
       const recordedSentinel = resolve(entry.identity.sentinelCredential.path);
       const recordedHealth = resolve(entry.identity.health.path);
       const matchesFamily = (f: { actorToken: string; sentinelCreds: string; health: string }): boolean =>
         recordedToken === resolve(f.actorToken) && recordedSentinel === resolve(f.sentinelCreds) && recordedHealth === resolve(f.health);
       if (!matchesFamily(lifecycleFiles) && !matchesFamily(legacyFiles))
-        throw new Error(`retained identity references for ${entry.name} are not one manager-owned secret family: all of actor-token, sentinel, and health must be the lifecycle-<uid> triple or the legacy name-keyed triple under ${agentCredsDir(this.workspaceRoot)} (no mixed families, no foreign health path)`);
+        throw new Error(`retained identity references for ${entry.name} are not one manager-owned secret family: all of actor-token, sentinel, and health must be the lifecycle-<uid> triple or the legacy name-keyed triple under ${agentCredsDir(this.workspaceRoot, this.space)} (no mixed families, no foreign health path)`);
       const secrets = this.secrets;
-      const actorToken = await secrets.get(agentSecretKeyForFile(recordedToken));
-      const sentinelCreds = await secrets.get(agentSecretKeyForFile(recordedSentinel));
+      const actorToken = await secrets.get(agentSecretKeyForFile(recordedToken, this.space));
+      const sentinelCreds = await secrets.get(agentSecretKeyForFile(recordedSentinel, this.space));
       if (actorToken === undefined || sentinelCreds === undefined)
         throw new Error("the retained actor token / sentinel credential is not in the secret store");
       const adopted = await provider.validateRetainedAgent({
@@ -4251,7 +4367,7 @@ export class Manager {
       // preserve/resume — without it the adopted cred would die loud at its TTL with no remint.
       let adoptedSeed: string | undefined;
       if (entry.identity.mode === "static") {
-        const stored = await this.secrets.get(agentSecretKeyForFile(resolve(entry.identity.credential.path)));
+        const stored = await this.secrets.get(agentSecretKeyForFile(resolve(entry.identity.credential.path), this.space));
         adoptedSeed = stored === undefined ? undefined : /-----BEGIN USER NKEY SEED-----\s*([A-Z0-9]+)\s*-----END USER NKEY SEED-----/.exec(stored)?.[1];
         if (adoptedSeed === undefined)
           console.error(`! resume ${entry.name}: the adopted credential carries no readable nkey seed - the manager cannot renew it (it dies loud at its exp)`);
@@ -4632,6 +4748,7 @@ export class Manager {
       runtime: this.runtime.kind,
       agentCount: this.agents.size,
       uptimeMs: Date.now() - this.startedAtMs,
+      connectors: this.connectorStatuses.map((row) => ({ ...row, binaries: { ...row.binaries } })),
     };
   }
 
@@ -4844,7 +4961,12 @@ export class Manager {
       // one). Key-pinned to this instance's own status key on the SAME executor.
       await writeServiceStatus(recordsKv, {
         endpoint: MANAGER_ENDPOINT, instanceId: iid, epoch: observed.processEpoch,
-        status: { state: SERVICE_READY, epoch: observed.processEpoch, observedSpecRevision: registrationRevision },
+        status: {
+          state: SERVICE_READY,
+          epoch: observed.processEpoch,
+          observedSpecRevision: registrationRevision,
+          connectors: this.connectorStatuses.map((row) => ({ ...row, binaries: { ...row.binaries } })),
+        },
         readProcessEpoch: async () => {
           const g = await fence.observe();
           if (g === null) throw new Error(`no issuance gate for ${MANAGER_ENDPOINT}/${iid}`);
@@ -5512,13 +5634,13 @@ export class Manager {
         // exists that early — the goal spec does not carry it and the terminal does not exist yet.
         // A same-goalId attempt that loses the bind while the winner is still in flight can then
         // serve what the winner actually allocated instead of inventing an empty identity.
-        const idx = await recordGoalIndex(gw.ctx, ref, executor.lifecycleUid, { name, actor: agentTriple.actor, uid: agentTriple.uid });
+        const idx = await recordGoalIndex(gw.ctx, ref, executor.lifecycleUid, { name, actor: agentTriple.actor, uid: agentTriple.uid, readinessDeadlineMs: readinessTimeoutMs });
         // A create loss is an idempotent retry ONLY for the same incarnation. A FOREIGN iid means a
         // sibling instance accepted this goalId (the live vector is a client retry over ANYCAST, not
         // a journal consumer): this attempt provisions nothing and answers with the winner's floor,
         // or refuses if that instance never persisted one.
         if (!idx.recorded && idx.existing.iid !== executor.lifecycleUid) {
-          acceptance = this.acceptanceFromIndex(idx.existing, goalId, fingerprint, executor);
+          acceptance = await this.acceptanceFromIndex(idx.existing, ref, goalId, fingerprint, executor);
           resolveAccept(acceptance);
           // No claim needed here: `ownsGoal` is still false, so the commit path refuses this attempt.
           throw new EpEnvelopeError("failed-precondition", `goal "${goalId}" was accepted by instance "${idx.existing.iid}"; that instance's acceptance is served and this attempt provisions nothing (SPEC 13.6)`);
@@ -5554,7 +5676,7 @@ export class Manager {
           acceptedAt,
           readinessDeadlineMs: readinessTimeoutMs,
         });
-        acceptance = { name, owner: agentTriple.owner, actor: agentTriple.actor, uid: agentTriple.uid, goalId, fingerprint, executor };
+        acceptance = { name, owner: agentTriple.owner, actor: agentTriple.actor, uid: agentTriple.uid, goalId, fingerprint, readinessDeadlineMs: readinessTimeoutMs, executor };
         this.goalAcceptances.set(goalId, acceptance);
         this.agentGoals.set(name, ref); // M4: a despawn of this name mid-goal drives the cancel path
         resolveAccept(acceptance);
@@ -5589,10 +5711,13 @@ export class Manager {
   /** H2: an acceptance served from a WINNER'S durable acceptance floor (the goal-index entry it
    *  wrote before its own ack). Refuses `unavailable` rather than inventing one — see
    *  {@link cachedSpawnAcceptance} for why an empty identity is never an acceptable answer. */
-  private acceptanceFromIndex(entry: GoalIndexEntry, goalId: string, fingerprint: string, executor: { lifecycleUid: string; epoch: number }): SpawnAcceptance {
+  private async acceptanceFromIndex(entry: GoalIndexEntry, ref: GoalRef, goalId: string, fingerprint: string, executor: { lifecycleUid: string; epoch: number }): Promise<SpawnAcceptance> {
     if (entry.allocated === undefined)
       throw new EpEnvelopeError("unavailable", `goal "${goalId}" was accepted by instance "${entry.iid}", which persisted no acceptance floor; its allocated identity is not readable from here (SPEC 13.6)`);
-    return { name: entry.allocated.name, owner: DEV_OWNER, actor: entry.allocated.actor, uid: entry.allocated.uid, goalId, fingerprint, executor };
+    const readinessDeadlineMs = entry.allocated.readinessDeadlineMs ?? (await readGoalSpec(this.goalWriter!.ctx, ref))?.value.readinessDeadlineMs;
+    if (readinessDeadlineMs === undefined)
+      throw new EpEnvelopeError("unavailable", `goal "${goalId}" is accepted but its readiness deadline is not readable; a synchronous follower cannot bound its wait honestly (SPEC 13.6)`);
+    return { name: entry.allocated.name, owner: DEV_OWNER, actor: entry.allocated.actor, uid: entry.allocated.uid, goalId, fingerprint, readinessDeadlineMs, executor };
   }
 
   /** Reconstruct a cached acceptance for a same-goalId retry NOT in the live map (a prior incarnation
@@ -5608,13 +5733,15 @@ export class Manager {
    *  `unavailable`, never a hollow success. */
   private async cachedSpawnAcceptance(ref: GoalRef, goalId: string, fingerprint: string, executor: { lifecycleUid: string; epoch: number }): Promise<SpawnAcceptance> {
     const entry = await readGoalIndex(this.goalWriter!.ctx, ref);
-    if (entry?.allocated !== undefined) return this.acceptanceFromIndex(entry, goalId, fingerprint, executor);
+    if (entry?.allocated !== undefined) return this.acceptanceFromIndex(entry, ref, goalId, fingerprint, executor);
     // The index is CLEARED at terminal, so a settled goal legitimately has no entry: fall back to
     // the terminal's data, which carries the same identity for exactly that case.
     const result = await readGoalResult(this.goalWriter!.ctx, ref);
     const d = (result?.data ?? {}) as { name?: string; id?: string; lifecycleUid?: string };
-    if (typeof d.name === "string" && d.name.length > 0 && typeof d.id === "string" && d.id.length > 0 && typeof d.lifecycleUid === "string" && d.lifecycleUid.length > 0)
-      return { name: d.name, owner: DEV_OWNER, actor: d.id, uid: d.lifecycleUid, goalId, fingerprint, executor };
+    const spec = await readGoalSpec(this.goalWriter!.ctx, ref);
+    const readinessDeadlineMs = spec?.value.readinessDeadlineMs;
+    if (typeof d.name === "string" && d.name.length > 0 && typeof d.id === "string" && d.id.length > 0 && typeof d.lifecycleUid === "string" && d.lifecycleUid.length > 0 && readinessDeadlineMs !== undefined)
+      return { name: d.name, owner: DEV_OWNER, actor: d.id, uid: d.lifecycleUid, goalId, fingerprint, readinessDeadlineMs, executor };
     throw new EpEnvelopeError("unavailable", `goal "${goalId}" is already accepted but its allocated identity is not readable (no acceptance floor, and no terminal carrying one); retry (SPEC 13.6)`);
   }
 
@@ -5655,11 +5782,17 @@ export class Manager {
     const acceptedRenewal = a.staticCredentialRenewal;
     if (acceptedRenewal) await acceptedRenewal.catch(() => {});
     const opId = retireOpId(a.lifecycleUid);
+    const evict = this.staticLifecycleEvict ?? makeManagerEndpointEvictionEvidence({
+      space: this.space,
+      servers: this.servers ?? DEFAULT_SERVER,
+      auth: this.auth!,
+      log: (line) => console.error(`static retirement ${a.name}: ${line}`),
+    });
     const cleanup = async (): Promise<void> => {
       const secrets = this.secrets;
-      const files = a.secretPaths ?? agentLifecycleSecretFilePaths(this.workspaceRoot, a.name, a.lifecycleUid);
+      const files = a.secretPaths ?? agentLifecycleSecretFilePaths(this.workspaceRoot, this.space, a.name, a.lifecycleUid);
       if (files.creds) {
-        await secrets.delete(agentSecretKeyForFile(files.creds));
+        await secrets.delete(agentSecretKeyForFile(files.creds, this.space));
         rmSync(files.creds, { force: true });
       }
       await this.deprovisionBroker(a);
@@ -5675,8 +5808,11 @@ export class Manager {
         }
         await runStaticTerminal(
           t,
-          { owner: DEV_OWNER, alias: a.name, actor: a.id, lifecycleUid: a.lifecycleUid, opId },
-          { cleanup, log: (line) => console.error(`static retirement ${a.name}: ${line}`) },
+          {
+            owner: DEV_OWNER, alias: a.name, actor: a.id, lifecycleUid: a.lifecycleUid, opId,
+            managerInstance: this.managerInstanceId, managerProcessUid: this.managerLifecycleUid,
+          },
+          { cleanup, evict, log: (line) => console.error(`static retirement ${a.name}: ${line}`) },
         );
       });
       this.retiredPrincipals.add(principalKey(DEV_OWNER, a.id).key);
@@ -5730,16 +5866,16 @@ export class Manager {
     });
     const secrets = this.secrets;
     const credsPath = a.secretPaths!.creds!;
-    await secrets.put(agentSecretKeyForFile(credsPath), creds);
-    await materializeSecretToFile(secrets, agentSecretKeyForFile(credsPath), credsPath);
+    await secrets.put(agentSecretKeyForFile(credsPath, this.space), creds);
+    await materializeSecretToFile(secrets, agentSecretKeyForFile(credsPath, this.space), credsPath);
     console.error(`managed cred renewal ${a.name}: re-signed for the same identity (exp +${MANAGED_STATIC_TTL_SEC}s); the agent endpoint's source re-read adopts it`);
   }
 
   /** The Unit B reconciliation (F3 "no active orphan"): ensure the authority stores, then sweep
    *  every durable slot row and act by the TOTAL resume table — `provisioning`/`terminalizing`
    *  re-drive the exact-op terminal; an `active` row survives ONLY when a LIVE managed agent this
-   *  process owns backs it at the same uid (`adopted`), else its process is gone and it
-   *  terminalizes; `retired` rows seed the F5 refusal index. Two call sites: the BOOT sweep
+   *  manager process owns backs it at the same uid (`adopted`), else no managed owner claimed it and
+   *  its broker authority is contained and terminalized; `retired` rows seed the F5 refusal index. Two call sites: the BOOT sweep
    *  (`postAdoption=false`, under the lease before control serving) DEFERS active-non-adopted
    *  slots while a resume is still pending (adoption runs after it); the POST-ADOPTION sweep
    *  (`postAdoption=true`, inside finalizeResume while `resumeRequired` still fences ordinary
@@ -5951,6 +6087,75 @@ export class Manager {
     return { ok: true, data: { name, path } };
   }
 
+  /** Whether this caller may READ a catalog card's details (role/model/description/body). Same
+   *  ownership rule as redefine: owner == caller, or admin. Ownerless / operator-written files are
+   *  admin-only. Names of parseable files still appear on the list so a definer can see a taken
+   *  spawn name; details stay off the wire unless this is true. */
+  private canReadPersona(owner: string | undefined, caller: string, admin: boolean): boolean {
+    return personaCatalogReadable(owner, caller, admin);
+  }
+
+  /** Mesh-side catalog list (#402). Every parseable name is returned so a definer can see a taken
+   *  spawn name. Role / model / description / owner ride only when the caller could redefine the
+   *  file (same ownership as `definePersona`); other cards are name-only, so a peer cannot read a
+   *  prompt it does not own. Unparseable files are omitted for non-admin (no existence leak of a
+   *  broken card). */
+  private opListPersonas(caller: string, admin: boolean): ControlReply {
+    const personas = [];
+    for (const e of listPersonaCatalog(this.workspaceRoot)) {
+      if (e.error) {
+        if (!admin) continue;
+        personas.push({ name: e.name, error: "unparseable" });
+        continue;
+      }
+      const def = e.def!;
+      if (!this.canReadPersona(def.owner, caller, admin)) {
+        personas.push({ name: e.name });
+        continue;
+      }
+      const description = personaCatalogDescription(def);
+      personas.push({
+        name: e.name,
+        ...(def.role ? { role: def.role } : {}),
+        ...(def.model ? { model: def.model } : {}),
+        ...(description ? { description } : {}),
+        ...(def.owner ? { owner: def.owner } : {}),
+      });
+    }
+    return { ok: true, data: { personas } };
+  }
+
+  /** Mesh-side catalog show (#402). Same ownership as list. Unknown, unauthorized, or unparseable
+   *  names are not-found (no existence or parser-diagnostic leak). The body is included so a peer can
+   *  inspect a prompt it owns before spawn; policy fields stay off the wire. */
+  private opShowPersona(args: Record<string, unknown>, caller: string, admin: boolean): ControlReply {
+    const name = String(args.name ?? "").trim();
+    if (!name) return { ok: false, error: "name required" };
+    const nameErr = this.nameError(name);
+    if (nameErr) return { ok: false, error: nameErr };
+    const path = agentFilePath(this.workspaceRoot, name);
+    if (!existsSync(path)) return { ok: false, error: `no persona "${name}"` };
+    let def;
+    try {
+      def = loadAgentFile(path);
+    } catch {
+      return { ok: false, error: `no persona "${name}"` };
+    }
+    if (!this.canReadPersona(def.owner, caller, admin)) return { ok: false, error: `no persona "${name}"` };
+    const description = personaCatalogDescription(def);
+    return {
+      ok: true,
+      data: {
+        name,
+        ...(def.role ? { role: def.role } : {}),
+        ...(def.model ? { model: def.model } : {}),
+        ...(description ? { description } : {}),
+        ...(def.owner ? { owner: def.owner } : {}),
+        ...(def.persona ? { persona: def.persona } : {}),
+      },
+    };
+  }
+
   /** The post-authorization `input` effect (C3): type `text` into the seat's terminal as if a human
    *  had. The single call an external UI needs to deliver a harness command (`/compact`, `/clear`,
    *  `/model`) without holding a terminal open on the caller's side.
@@ -6082,7 +6287,7 @@ export class Manager {
       // FAIL-CLOSED: a failed record is the failure + repair sentence; a missing/malformed or
       // stale record on a live agent is auth-unknown/auth-stale, NEVER silently healthy.
       const health = a.userOwner
-        ? agentAuthState(a.secretPaths?.health ?? agentLifecycleSecretFilePaths(this.workspaceRoot, a.name, a.lifecycleUid).health)
+        ? agentAuthState(a.secretPaths?.health ?? agentLifecycleSecretFilePaths(this.workspaceRoot, this.space, a.name, a.lifecycleUid).health)
         : undefined;
       return {
         name: a.name,

@@ -16,13 +16,13 @@ import {
   type ParsedArgs,
   type UserAuthStatus,
 } from "@cotal-ai/core";
-import { CLI_USER_ACTOR, accountInventory, authDir, extensionsDir, findCotalRoot, getCurrent, hasUserAuthState, isWorkspaceTargetError, loadExtensionsManifest, loadMeshes, loadSoleSpaceAuth, loadSpaceAuth, localProcessPath, localProcessVisible, parsePid, preflightTarget, probeLiveness, readProcessCommand, renderWorkspaceError, resolveMeshTarget, serverFlag, spaceFlag, type LocalProcess, type LocalProcessContext, type MeshTarget, userAuthStateDir, workspaceSecretStore } from "@cotal-ai/workspace";
+import { CLI_USER_ACTOR, accountInventory, authDir, extensionsDir, findCotalRoot, getCurrent, hasUserAuthState, isWorkspaceTargetError, loadExtensionsManifest, loadMeshes, loadSoleSpaceAuth, loadSpaceAuth, localProcessPath, localProcessVisible, parsePid, DELIVERY_PIDFILE, MANAGER_PIDFILE, preflightTarget, probeLiveness, readProcessCommand, renderWorkspaceError, resolveMeshTarget, serverFlag, spaceFlag, type LocalProcess, type LocalProcessContext, type MeshTarget, userAuthStateDir, workspaceSecretStore } from "@cotal-ai/workspace";
 import { connect } from "@nats-io/transport-node";
 import { localProcessSurface } from "../ext-loader.js";
-import { cliVersion, extensionVersions } from "../lib/version.js";
+import { cliVersion, cliProvenance, extensionVersions } from "../lib/version.js";
 import { agentSkillsSkew } from "../lib/agent-skills.js";
 import { managerHasDeliveryMarker } from "../lib/manager-proc.js";
-import { machineStatus, resolveSpace, webUp, WEB_URL, type MachineStatus } from "../lib/status.js";
+import { machineStatus, resolveRuntimeSpace, webUp, WEB_URL, type MachineStatus } from "../lib/status.js";
 import { pidfileState, type PidfileState } from "./down.js";
 import { displayCmd } from "../lib/self-exec.js";
 import { c, statusBadge } from "../ui.js";
@@ -71,8 +71,8 @@ function printExtensions(): void {
 
 /** Cotal's authored skills reach non-Claude harnesses through the cross-vendor `~/.agents/skills`
  *  directory (Codex, Cursor, OpenCode, Gemini CLI, Windsurf). Those harnesses have no remote update, so
- *  surface a stale/missing/retired drop here and point at the fix (`cotal setup` reconciles it). A corrupt
- *  skills bundle throws (fail-loud); we render that as a red integrity error rather than "none shipped". */
+ *  surface a stale/missing/retired drop here and point at the skills-only write (`cotal setup --skills`).
+ *  A corrupt skills bundle throws (fail-loud); we render that as a red integrity error rather than "none shipped". */
 function skillsSkewRow(): string {
   let skew;
   try {
@@ -82,25 +82,31 @@ function skillsSkewRow(): string {
   }
   const behind = skew.filter((s) => s.state !== "current");
   if (!behind.length) return c.green(`current (${skew.length})`);
-  if (behind.every((s) => s.state === "missing")) return c.dim(`not installed · ${displayCmd()} setup`);
+  if (behind.every((s) => s.state === "missing")) return c.dim(`not installed · ${displayCmd()} setup --skills`);
   const retired = behind.filter((s) => s.state === "retired").length;
   const label = retired ? `${behind.length} to reconcile (${retired} retired)` : `${behind.length}/${skew.length} out of date`;
-  return c.yellow(`${label} · ${displayCmd()} setup`);
+  return c.yellow(`${label} · ${displayCmd()} setup --skills`);
+}
+
+function cliProvenanceLabel(): string {
+  const provenance = cliProvenance();
+  const kind = provenance.kind === "source" ? "source checkout" : provenance.kind;
+  return `(${kind}: ${provenance.root})`;
 }
 
 /** The `cotal-skills` Claude Code plugin (user scope) vs this CLI release: stale means an update didn't
  *  take, missing means it isn't installed, broken means it is installed but failed to load; all point at
- *  `cotal setup` to fix. */
-function claudeSkillsLabel(state: MachineStatus["claudeSkills"]): string {
-  switch (state) {
+ *  `cotal setup --skills` so a read-path status user is not routed into unscoped setup writes. */
+function claudeSkillsLabel(skills: MachineStatus["claudeSkills"]): string {
+  switch (skills.state) {
     case "current":
       return c.green("current");
     case "stale":
-      return c.yellow(`stale · ${displayCmd()} setup`);
+      return c.yellow(`${skills.version ? `v${skills.version} ≠ v${cliVersion()} · ` : ""}stale · ${displayCmd()} setup --skills`);
     case "broken":
-      return c.red(`load error · ${displayCmd()} setup`);
+      return c.red(`load error · ${displayCmd()} setup --skills`);
     case "missing":
-      return c.dim(`not installed · ${displayCmd()} setup`);
+      return c.dim(`not installed · ${displayCmd()} setup --skills`);
     default:
       return c.dim("unknown");
   }
@@ -111,7 +117,7 @@ async function printMachine(): Promise<void> {
   const web = await webUp();
   const webExt = webInstalled();
   section("Machine");
-  row("cotal-ai", c.green(`v${cliVersion()}`));
+  row("cotal-ai", `${c.green(`v${cliVersion()}`)} ${c.dim(cliProvenanceLabel())}`);
   row("NATS", m.nats === "missing" ? c.red("missing") : c.green(m.nats));
   row("Claude plugin", m.claudePlugin ? c.green("installed") : c.dim("not installed"));
   row("Claude skills", claudeSkillsLabel(m.claudeSkills));
@@ -173,7 +179,20 @@ function printProject(root: string, cmd: string): void {
     return;
   }
   const userDisk = auth && hasUserAuthState(root, auth.space);
-  const context: LocalProcessContext = { root, space: auth?.space ?? resolveSpace(root), userAuth: Boolean(userDisk) };
+  // An open mesh has no account record to name its space, so the folder's space is read off its
+  // runtime records - and a root whose records show two spaces RUNNING has no single answer, the
+  // same shape as the multi-account case above. The process rows below are keyed by one space, so
+  // report that state and stop rather than crashing in the recovery command that names it.
+  let space: string;
+  try {
+    space = auth?.space ?? resolveRuntimeSpace(root);
+  } catch (e) {
+    row("auth", c.dim("none (open/local only)"));
+    row("hint", (e as Error).message);
+    row("personas", personaSummary(root));
+    return;
+  }
+  const context: LocalProcessContext = { root, space, userAuth: Boolean(userDisk) };
   row("auth", auth ? c.green(`space ${auth.space}${userDisk ? " · user-auth" : ""}`) : c.dim("none (open/local only)"));
   row("personas", personaSummary(root));
   let nats: Proc | undefined;
@@ -181,7 +200,7 @@ function printProject(root: string, cmd: string): void {
     const state = proc(localProcessPath(component.pidFile, context));
     if (component.name === "nats") nats = state;
     const detail = component.name === "manager" && state.live
-      ? c.dim(managerHasDeliveryMarker() ? " · delivery-aware" : " · old/unknown build")
+      ? c.dim(managerHasDeliveryMarker(context.space) ? " · delivery-aware" : " · old/unknown build")
       : "";
     row(component.name, `${formatProc(state)}${detail}`);
   }
@@ -511,7 +530,7 @@ async function managerServiceHealth(
 }
 
 async function managerHealth(target: MeshTarget, context: LocalProcessContext): Promise<ComponentHealth> {
-  const record = processRecord(localProcessPath("manager.pid", context));
+  const record = processRecord(localProcessPath(MANAGER_PIDFILE, context));
   const facts = pidFacts(record);
   // A corrupt or kernel-unreadable LOCAL record is neither evidence that the manager is absent nor
   // permission to replace it with a network answer.  Name that failed local control surface first.
@@ -568,7 +587,7 @@ async function managerHealth(target: MeshTarget, context: LocalProcessContext): 
  * adoption report is the renewal record it writes through the manager-owned renewal pass.  The
  * latter is intentionally not inferred from credential mtime or process output. */
 async function deliveryHealth(target: MeshTarget, context: LocalProcessContext): Promise<ComponentHealth> {
-  const record = processRecord(localProcessPath("delivery.pid", context));
+  const record = processRecord(localProcessPath(DELIVERY_PIDFILE, context));
   const facts = pidFacts(record);
   const stopped = processVerdict(record);
   const renewalPath = join(context.root, ".cotal", "renewal.json");
@@ -614,6 +633,38 @@ async function deliveryHealth(target: MeshTarget, context: LocalProcessContext):
 
 /** The web dashboard owns the HTTP listener and identifies itself through `/api/meta`, including
  * the serving PID.  A raw TCP success is insufficient: another program could own its port. */
+export function webProbeTarget(command: string):
+  | { host: string; port: number; url: URL }
+  | { refused: string } {
+  const portMatch = /(?:^|\s)--port(?:=|\s+)(\d{1,5})(?:\s|$)/.exec(command);
+  const hostMatch = /(?:^|\s)--host(?:=|\s+)([^\s]+)(?:\s|$)/.exec(command);
+  // A direct web process uses the documented defaults. A detached process is re-execed with `web`
+  // in argv; an arbitrary live PID record whose command has neither form is not evidence that the
+  // default endpoint is its control face, so decline the probe rather than test a bystander.
+  const isWebCommand = /(?:^|\s)web(?:\s|$)/.test(command);
+  if (!portMatch && !isWebCommand)
+    return { refused: "port probe refused (recorded PID is not a web command)" };
+  const port = portMatch ? Number(portMatch[1]) : 7799;
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    return { refused: "port probe refused (invalid process port)" };
+  const host = hostMatch?.[1] ?? "127.0.0.1";
+  try {
+    const unbracketed = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+    if (unbracketed.includes("[") || unbracketed.includes("]") || /[\s/?#@]/.test(unbracketed)) throw new Error("invalid");
+    const ipv6 = unbracketed.includes(":");
+    const parsed = new URL(`http://${ipv6 ? `[${unbracketed}]` : unbracketed}:${port}/api/meta`);
+    const normalized = ipv6 ? parsed.hostname.slice(1, -1) : parsed.hostname;
+    if (normalized === "0.0.0.0" || normalized === "::" || normalized === "::ffff:0:0") throw new Error("invalid");
+    return {
+      host: normalized,
+      port,
+      url: parsed,
+    };
+  } catch {
+    return { refused: "host probe refused (invalid process host)" };
+  }
+}
+
 async function webHealth(context: LocalProcessContext): Promise<ComponentHealth> {
   const record = processRecord(localProcessPath("web.pid", context));
   const facts = pidFacts(record);
@@ -632,29 +683,18 @@ async function webHealth(context: LocalProcessContext): Promise<ComponentHealth>
   const pid = record.pid;
   const command = readProcessCommand(pid);
   if (command.kind !== "command") return { name: "web", verdict: "refused", facts: [...facts, "port probe refused (process command unreadable)"] };
-  const portMatch = /(?:^|\s)--port(?:=|\s+)(\d{1,5})(?:\s|$)/.exec(command.command);
-  // A direct web process uses the documented 7799 default.  A detached process is re-execed with
-  // `web` in argv; an arbitrary live PID record whose command has neither form is not evidence
-  // that port 7799 is its control face, so decline the probe rather than test a bystander.
-  const isWebCommand = /(?:^|\s)web(?:\s|$)/.test(command.command);
-  if (!portMatch && !isWebCommand)
-    return { name: "web", verdict: "refused", facts: [...facts, "port probe refused (recorded PID is not a web command)"] };
-  const webPort = portMatch ? Number(portMatch[1]) : 7799;
-  if (!Number.isInteger(webPort) || webPort < 1 || webPort > 65535)
-    return { name: "web", verdict: "refused", facts: [...facts, "port probe refused (invalid process port)"] };
-  for (const port of [webPort]) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/api/meta`, { signal: AbortSignal.timeout(500) });
-      const meta = await response.json() as { pid?: unknown };
-      if (response.ok && meta.pid === pid) return { name: "web", verdict: "serving", facts: [...facts, `port ${port}`, "http reachable"] };
-      return { name: "web", verdict: "not-serving", facts: [...facts, `port ${port}`, "http identity mismatch"] };
-    } catch {
-      // The registered web process has no persistent port record on this base.  The default is a
-      // documented property of the component; if a custom-port dashboard is recorded live but its
-      // own HTTP surface cannot name its port, that is not a clean absence.
-    }
+  const target = webProbeTarget(command.command);
+  if ("refused" in target) return { name: "web", verdict: "refused", facts: [...facts, target.refused] };
+  try {
+    const response = await fetch(target.url, { signal: AbortSignal.timeout(500) });
+    const meta = await response.json() as { pid?: unknown };
+    if (response.ok && meta.pid === pid) return { name: "web", verdict: "serving", facts: [...facts, `host ${target.host}`, `port ${target.port}`, "http reachable"] };
+    return { name: "web", verdict: "not-serving", facts: [...facts, `host ${target.host}`, `port ${target.port}`, "http identity mismatch"] };
+  } catch {
+    // The registered web process has no persistent endpoint record beyond its own command. If that
+    // exact HTTP surface cannot identify the recorded PID, this component is present but not serving.
   }
-  return { name: "web", verdict: "not-serving", facts: [...facts, "port not answered on default 7799"] };
+  return { name: "web", verdict: "not-serving", facts: [...facts, `host ${target.host}`, `port ${target.port}`, "http not answered"] };
 }
 
 async function brokerHealth(target: MeshTarget): Promise<ComponentHealth> {

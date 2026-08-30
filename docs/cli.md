@@ -76,7 +76,7 @@ together under [Manifest deploys](#manifest-deploys).
 ## setup
 
 ```bash
-cotal setup [--full] [--demo] [--yes]
+cotal setup [--full] [--demo] [--yes] [--skills]
 ```
 
 | Flag | Default | Meaning |
@@ -84,11 +84,13 @@ cotal setup [--full] [--demo] [--yes]
 | `--full` | off | Redo the full guided flow (implies `--demo`) |
 | `--demo` | off | Also seed the guided expert team (`david`, `sven`, `me`) |
 | `--yes`, `-y` | off | Non-interactive accept-all (for agents / CI) |
+| `--skills` | off | Reconcile Cotal skills only through installed connector providers, plus `~/.agents/skills`. Refused with `--full` or `--demo`. |
 
-Guided setup is **configure-only**: it checks prerequisites, installs the Claude Code plugin, and
+Guided setup is **configure-only**: it checks prerequisites, invokes installed connectors' declared setup providers, and
 seeds persona files, and it launches nothing (no mesh, no web, no manager). First run gets the
 narrated flow; later runs print a status card. By default it seeds one `default` persona; the
-`david`/`sven`/`me` team is opt-in via `--demo`. See [Getting started](getting-started.md) and, for
+`david`/`sven`/`me` team is opt-in via `--demo`. `cotal status` points stale Claude skills and
+out-of-date `.agents` skills at `cotal setup --skills`, not unscoped `setup`. See [Getting started](getting-started.md) and, for
 maintainers, [setup internals](setup-internals.md).
 
 ## update
@@ -333,6 +335,11 @@ not restarted implicitly. Artifact destinations must not overlap the preserved s
 attempt tree. Restore artifacts and targets likewise cannot nest inside or contain each other, the
 preserved source, or the maintenance attempt tree.
 
+Stopped client-managed KV ordered consumers are ephemeral read residue, not backup state. Backup
+ignores only the pinned client's exact stopped shapes: ordinary last-value watchers and the
+whole-bucket scanner that uses all-history delivery to collapse concurrent tombstones. A bound
+consumer or any lookalike with a different filter, inbox, lifetime, or other config is still refused.
+
 `full` is the default and indivisible: channel registry, CHAT/DM/TASK/INBOX/DLV, ACL, MEMBERS, and
 validated durable checkpoints. `registry` is the sole partial artifact. Presence, derived membership
 feed, leases, native ephemeral/history consumers, credentials, keys, tokens, owner secrets, and actor
@@ -478,7 +485,8 @@ machine could write it back.
 including inside another mesh's project. `status` is a read-only report: machine prerequisites
 (starting with the installed `cotal-ai` version), the installed extensions and their versions, this
 folder's `.cotal/`, the recorded meshes, and a live snapshot of the selected mesh (roster, channels,
-membership feed). `status` takes `--space` / `--server` to pick the mesh to inspect; it starts
+membership feed). Stale Claude skills and out-of-date `.agents` skills recommend `cotal setup --skills`,
+not unscoped `cotal setup`. `status` takes `--space` / `--server` to pick the mesh to inspect; it starts
 nothing.
 
 `cotal status --components` adds a fail-loud per-component health pass. It reads **each
@@ -517,7 +525,7 @@ cotal spawn -f <cotal.yaml> [--dry-run]
 | `--creds <path>` | none | Control-caller creds for an off-registry manager (`--detach` only) |
 | `--name <n>` | persona's `name:` | Presence-name override (does not choose the persona) |
 | `--config <persona-or-path>` | none | Persona catalog name or file path; wins over the positional |
-| `--agent <a>` | `COTAL_DEFAULT_AGENT`, else `claude` | Connector type (`claude`, `opencode`, `jcode`, `hermes`, …) |
+| `--agent <a>` | persona's `agent:`, else `COTAL_DEFAULT_AGENT`, else `claude` | Connector type (`claude`, `opencode`, `jcode`, `hermes`, and so on) |
 | `--role <r>` | persona's `role:` | Role override |
 | `--model <m>` | persona's `model:` | Model override |
 | `--variant <v>` | persona's `variant:` | Model variant override (connector-defined; e.g. OpenCode reasoning tiers) |
@@ -572,8 +580,14 @@ cotal models [--agent <connector>] [--refresh]
 | `--refresh` | off | Ask the connector to refresh its provider cache |
 
 Asks the running manager for each connector's model catalog (model ids plus their variants)
-for connectors that expose one (OpenCode today; a connector without a catalog says so). Pick a
-result with `cotal spawn --model <provider/model> --variant <v>`.
+for connectors that expose one. OpenCode and Codex query harness/provider surfaces; Jcode reads
+providers that enable `model_catalog = true` in the operator Jcode `config.toml`. Jcode's listed
+effort tiers render as `variants (declared, not provider-verified)`, and launch can still refuse one.
+A connector without a catalog says so. Pick a result with `cotal spawn --model <id> --variant <v>`,
+where `<id>` is the model id as the catalog printed it. OpenCode and Codex ids are the full
+`provider/model`; Jcode ids are bare (`opus-5`, not `cliproxy/opus-5`), because the provider is
+selected by the operator's Jcode config and a prefixed id is refused at launch with the bare form
+named.
 
 ## endpoints
 
@@ -619,17 +633,24 @@ cotal attach --name <n> [--on <instance>] [--no-reconnect] [--space <s>]
 | `--space <s>` / `--server <url>` / `--creds <path>` | resolved mesh | Which manager to reach |
 | `--name <n>` | none | Managed agent to stop / attach (required) |
 | `--on <instance>` | class anycast (`ps`: class scatter) | Pin to one manager instance id (multi-manager space); takes the whole id as `ps` prints it, not a prefix. An empty value (`--on ""`, an unset shell variable) is refused, never treated as absent |
-| `--wide` (`ps`) | off | After each seat's compact row, print the per-seat facts the manager already records: model pin (and variant), `cwd`, `pid`, spawner, lifecycle uid, and the owning manager's instance id and host. A fact the manager did not record (no model pinned, or a runtime that owns no real process) prints nothing, never a placeholder |
+| `--wide` (`ps`) | off | After each seat's compact row, print extra operational facts the manager records: `cwd`, `pid`, spawner, lifecycle uid, and the owning manager's instance id and host. Model and requested variant stay in the identity row rather than printing twice. A fact the manager did not record (for example a runtime with no real process) prints nothing, never a placeholder |
 | `--json` (`ps`) | off | Machine-readable: one JSON object per seat per line, copied unchanged from the manager row. Instance headers and errors go to stderr, so stdout contains only rows. Mutually exclusive with `--wide` |
 | `--no-reconnect` (`attach`) | off | End the attach when its session ends, instead of re-establishing it. For scripts that want one run and one exit code |
 
-These are operator clients over the running manager's control plane. `ps` prints two facts per
-managed agent, because they answer different questions: the process fact from the manager's own
-runtime handle (`running` with its uptime, or `exited` with how long it ran), and the mesh fact from
-the roster (`idle` / `working` / `waiting` / `mesh offline`, or `not in roster` when the seat has no
-presence row at all: a seat that has not joined yet, or one that never did). A seat can be `running` and `mesh offline` at once: the process is alive and
-its presence has lapsed. On a user-auth mesh `ps` also renders each managed agent's last
-credential-refresh outcome, fail-closed.
+The human `ps` row is presentation text and is not a stable parsing target. Scripts use `--json`,
+which is the machine-readable row contract.
+
+These are operator clients over the running manager's control plane. The default row includes the
+connector, model pin, optional requested variant, and runtime as operational descriptors for the
+managed row. They do not make a shared display name a unique protocol identity; use `--json` when
+unambiguous owner+actor attribution is required. An omitted variant means no override was requested;
+Cotal does not invent an effective provider default it cannot observe. `ps` also prints two state
+facts per managed agent, because they answer different questions: the process fact from the manager's
+own runtime handle (`running` with its uptime, or `exited` with how long it ran), and the mesh fact
+from the roster (`idle` / `working` / `waiting` / `mesh offline`, or `not in roster` when the seat has
+no presence row at all: a seat that has not joined yet, or one that never did). A seat can be
+`running` and `mesh offline` at once: the process is alive and its presence has lapsed. On a user-auth
+mesh `ps` also renders each managed agent's last credential-refresh outcome, fail-closed.
 
 **Mode split (chosen up front, never try-scatter-then-degrade):**
 
@@ -855,6 +876,16 @@ directly to recover a dead manager or drive a custom runtime. Default runtime is
 optional provider first (`cotal ext add @cotal-ai/orca`, `@cotal-ai/tmux`, `@cotal-ai/cmux`, or `@cotal-ai/herdr`) and
 select it explicitly. A missing provider or app fails loudly; there is no fallback. See [Deploy](deploy.md).
 
+On a normal `SIGINT`/`SIGTERM`, the manager stops every seat and requires the selected runtime to
+prove the seat is gone before it releases the manager lease or service registration. A stop that
+cannot prove exit fails loud and keeps manager authority instead of reporting a clean shutdown while
+an orphan still holds broker rails. After an abrupt manager death, the same logical successor
+terminalizes only its own durable static slots, verify-evicts the predecessor's broker principal,
+records that result in the lifecycle's caller-readable audit detail, and only then retires the
+lifecycle and frees the alias. Missing or unverified broker evidence keeps the slot terminalizing.
+Delivery-admin does not terminate the orphan OS process; safe successor process reaping requires
+durable process start-identity pinning and is tracked separately.
+
 A `meshes add --mode user` entry is a **participant** registration, not hosting authority. A
 participant may run `supervise` only when the host advertises the remote manager authority service
 and the signed-in actor has the dedicated `supervise` ledger scope. The CLI obtains the closed,
@@ -896,6 +927,13 @@ non-manager endpoint, or you want to lift the freeze without starting a manager.
 holder really is gone, prints what it found, and then finishes the dead operation the same way as the
 interrupted restart would have: revoke the old credentials, evict their holders with verification,
 and reopen the gate.
+
+If verification is interrupted, the command leaves the gate frozen and durably records each holder
+whose eviction was already verified. A retry still repeats the freeze-holder liveness check, then
+skips only progress bound to the same registration operation, frozen-gate revision, and holder set.
+The output reports holders completed before this attempt, completed now, and still remaining. A new
+freeze or changed holder set starts from zero. Cursor cleanup happens only after reopen; a retained
+cursor is harmless because its old gate revision cannot authorize a later freeze.
 
 **It refuses far more often than it acts, on purpose**, and always says which check stopped it:
 
@@ -1054,12 +1092,13 @@ user-auth mesh it rides the read-only admin view over your login, which needs le
 ## web
 
 ```bash
-cotal web [--detach] [--port <n>] [--no-open] [--space <s>]
+cotal web [--detach] [--host <host>] [--port <n>] [--no-open] [--space <s>]
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--space <s>` / `--server <url>` / `--creds <path>` | resolved mesh | Space to serve |
+| `--host <host>` | `127.0.0.1` | Concrete HTTP bind and browser host; wildcard addresses are refused |
 | `--port <n>` | `7799` | HTTP port |
 | `--detach` | off | Run in the background; stop with `cotal down web` or bare `cotal down` |
 | `--no-open` | off | Don't open the browser |
@@ -1068,7 +1107,7 @@ The browser observability dashboard: presence, channels, and a live feed. It is 
 `cotal up`: it ships inside `cotal-ai` as the `@cotal-ai/web` extension, seeded automatically on first
 run (like the built-in connectors) so it always matches your CLI version. It self-registers `cotal web`
 into this surface and serves
-`http://cotal.localhost:7799` (loopback; `*.localhost` resolves in Chrome/Firefox/Edge; Safari may
+`http://cotal.localhost:7799` by default (loopback; `*.localhost` resolves in Chrome/Firefox/Edge; Safari may
 need `http://127.0.0.1:7799`). On a user-auth mesh the dashboard rides the read-only admin view
 over your login, and a channel purge asks for its own channel-purger view per click; both need
 ledger scope `admin`. Detached mode re-execs the current Cotal installation, writes diagnostics to
@@ -1086,7 +1125,7 @@ cotal mint <name> --provision [--role <role>] [--space <s>] [--server <url>]
 | Flag | Default | Meaning |
 |---|---|---|
 | `--profile <agent\|observer\|admin>` | `agent` | Credential profile |
-| `--out <path>` | `.cotal/auth/creds/<name>.creds` | Output path |
+| `--out <path>` | `.cotal/auth/creds/space.<key>/<name>.creds` | Output path - the default sits under the resolved space's segment (`<key>` is that space's hex encoding, as in [Project files](config.md#project-files)) |
 | `--signer` | off | Emit a stripped account-signing file instead |
 | `--force` | off | With `--signer`: overwrite an existing file |
 | `--allow-subscribe <a,b>` | the agent file's, else subscribe | Read-ACL override, **agent profile only**: `observer` and `admin` carry a fixed read set, and `mint` refuses this flag there rather than narrowing nothing |
@@ -1151,7 +1190,11 @@ re-grant **replaces the whole row**, not the one field you name, so to add a cap
 every field out: the new scope plus the row's current read set, post set, role and label
 (`cotal actor list` shows what a row holds). A field left off does not stay as it was, it
 reverts to the wide default in the table above, which is how a narrow reader becomes a reader
-of every channel. `supervise` is separate from `spawn` and `admin`: it only makes a signed-in
+of every channel. A re-grant retires the current interactive lifecycle through the running auth
+service before it rotates the row, so copied bearers cannot cross an authorization update. If that
+retirement cannot be confirmed, the row is left unchanged and the command fails with the recovery
+action. `revoke` uses the same retirement before deleting the row, which lets a later grant create a
+real successor instead of colliding with a live predecessor. `supervise` is separate from `spawn` and `admin`: it only makes a signed-in
 person eligible for the host-provided closed remote manager-service view; it does not grant
 management of another owner or a general host profile. `revoke` denies the next exchange and
 the next connect with no restart, and evicts the principal's live connections. Managed-agent rows
@@ -1259,8 +1302,16 @@ command of each boot, so you rarely call it):
 | `--reset` | Discard the record and re-seed all seven built-ins (the six connectors plus the web dashboard). **Resurrects any you removed.** Rebuilds cleanly over corrupt seed state. |
 | `--force` | Re-seed the built-ins even when the version stamp is current or a downgrade. |
 
-The default connector for a bare `cotal spawn` (no `--agent`) is `claude`; set `COTAL_DEFAULT_AGENT`
-(e.g. `opencode`) to change it. An `--agent` naming a removed connector fails loud with the exact
+When a newer `cotal` advances the operator-global seed store to its generation, it prints one
+migration line naming the old and new generations, the exact CLI entry that wrote the store, the
+commit timestamp, and `seed/stamp.json`. That writer and timestamp are kept in the stamp, so a later
+older CLI refusal can say which executable wrote the generation it will not overwrite and when.
+Legacy generation-only stamps remain readable; their refusal simply has no writer provenance to add.
+
+The default connector for a bare `cotal spawn` (no `--agent`) is the persona's `agent:` pin if it
+has one, else `claude`; set `COTAL_DEFAULT_AGENT` (e.g. `opencode`) to change the fallback. It is
+a default, so a persona that pins its harness still wins over it. An `--agent` naming a removed
+connector fails loud with the exact
 `cotal ext add` to restore it. Set `COTAL_SKIP_CONNECTOR_SEED=1` to turn off the automatic first-run
 seed/refresh entirely (for a controlled or offline setup that manages connectors by hand); `cotal ext
 seed` still runs on request.

@@ -1,5 +1,56 @@
 # @cotal-ai/manager
 
+## 0.36.0
+
+### Patch Changes
+
+- 7c5995b: Key per-tenant material per space instead of per root. The five root-scoped kinds (the `$SYS` cred pair, `membership.json`, `membership-rw.creds`, `delivery.creds`) and every per-agent standing secret now live under `space.<hex>/` segments, migrated on first touch through one choke point that refuses — loudly, with an honest remedy — on any root it cannot show to hold a single tenant. `space rm`'s step-7 reaps land with their step-1 preconditions ahead of the verb itself. Also: the delivery daemon's `$SYS` repair advice now asks the guard instead of printing commands that refuse on the roots that need them, expired user bearers stop being re-presented on reconnect (with the retry bounded), and `agentSecretKeyForFile` takes the caller's space and checks the recorded path against it, so a stored path can no longer address another tenant's material.
+- Updated dependencies [7c5995b]
+  - @cotal-ai/core@0.36.0
+  - @cotal-ai/workspace@0.36.0
+
+## 0.35.0
+
+### Patch Changes
+
+- Updated dependencies [4919a53]
+  - @cotal-ai/workspace@0.35.0
+  - @cotal-ai/core@0.35.0
+
+## 0.34.0
+
+### Minor Changes
+
+- 22c3182: Honor the persona file's `agent:` frontmatter when picking the spawn harness. The key existed in
+  half the fleet's personas but no code path read it: it swept into the verbatim `meta` bag, and both
+  launch paths resolved the connector before the persona file was loaded, so `COTAL_DEFAULT_AGENT`
+  silently beat a deliberate per-persona pin (a `jcode` persona ran `claude` with no complaint).
+
+  The harness now resolves once, on every spawn path, as: explicit `--agent` flag > persona `agent:` >
+  `COTAL_DEFAULT_AGENT` > the product default. That is the precedence `model:` and `variant:` already
+  have, keeping the env var a _default_ rather than an override. On `--detach` the CLI now threads
+  an explicit flag and the caller's environment default as separate control fields. The manager loads
+  the persona file before resolving its connector and applies the same precedence while preserving
+  the invoking operator's default when its own environment differs. A pin naming an unregistered
+  connector fails the spawn loudly with the connector install hint (no silent fallback).
+
+  `saveAgentFile` round-trips the field, so a runtime `cotal_persona` redefine preserves a pin.
+  Docs updated (`agent-files.md`, `connectors.md`, `cli.md`, `config.md`).
+
+### Patch Changes
+
+- 53b70cc: Install the NATS packages loaded directly by the published manager runtime.
+- Updated dependencies [22c3182]
+  - @cotal-ai/core@0.34.0
+  - @cotal-ai/workspace@0.34.0
+
+## 0.33.9
+
+### Patch Changes
+
+- @cotal-ai/core@0.33.9
+- @cotal-ai/workspace@0.33.9
+
 ## 0.33.8
 
 ### Patch Changes

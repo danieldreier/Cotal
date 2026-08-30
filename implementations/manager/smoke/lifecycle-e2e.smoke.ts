@@ -29,12 +29,13 @@ import { jetstreamManager } from "@nats-io/jetstream";
 import {
   isReachable, createSpaceAuth, mintCreds, serverConfig, newIdentity, setupSpaceStreams,
   openAclRegistry, readAcl, dmStream, dlvStream, dmDurable, dlvDurable, DEV_OWNER, principalKey,
-  mintLifecycleUid, presenceBucket,
+  mintLifecycleUid, presenceBucket, CotalEndpoint, evictDeniedPrincipalWithCreds,
+  mintConnectionEvictorCreds, mintMembershipObserverCreds,
 } from "@cotal-ai/core";
 import type { Connector, LaunchOpts, LaunchSpec } from "@cotal-ai/core";
 import { Manager } from "../src/manager.js";
 import { registry } from "@cotal-ai/core";
-import { authDir, saveSpaceAuth } from "@cotal-ai/workspace";
+import { agentCredsDir, agentLifecycleSecretFilePaths, authDir, saveSpaceAuth } from "@cotal-ai/workspace";
 import { SMOKE_BROKER_TOKEN, teardownOnSignal } from "@cotal-ai/smoke-kit";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -67,6 +68,7 @@ for (const n of ["w1", "w2", "bad1", "idle1", "nouid1", "wrong1", "wrongreg1", "
 writeFileSync(join(dir, "server.conf"), serverConfig(auth, [auth], { transport: { kind: "plaintext" }, port: PORT, storeDir: join(dir, "js") }));
 const srv = spawn("nats-server", ["-c", join(dir, "server.conf")], { stdio: "ignore" });
 const releaseBroker = teardownOnSignal(srv, dir);
+let delivery: CotalEndpoint | undefined;
 
 const DM = dmStream(space), DLV = dlvStream(space);
 const provId = newIdentity();
@@ -88,7 +90,7 @@ const uidOf = (name: string): string =>
 const aclPresent = (id: string, uid: string) => inspect(async (_j, nc) => (await readAcl(await openAclRegistry(nc, space), localPrincipal(id), uid)) !== undefined);
 // Lifecycle-keyed (`<name>.<uid>.creds`): the manager's spawn files the incarnation's cred under
 // its uid, never the bare name (that's the standing-cred namespace).
-const credsFile = (name: string, uid: string) => join(authDir(workspaceRoot), "creds", `${name}.${uid}.creds`);
+const credsFile = (name: string, uid: string) => agentLifecycleSecretFilePaths(workspaceRoot, space, name, uid).creds;
 /** Poll until `f()` matches `want`, up to `ms`. */
 async function until(f: () => Promise<boolean>, want: boolean, ms = 8000): Promise<boolean> {
   const end = Date.now() + ms;
@@ -153,6 +155,21 @@ try {
   for (let i = 0; i < 50; i++) { if (await isReachable(SERVERS)) { up = true; break; } await wait(200); }
   if (!up) throw new Error(`auth nats-server did not come up on ${PORT}`);
   await setupSpaceStreams({ servers: SERVERS, space, creds: provCreds });
+  const observerCreds = await mintMembershipObserverCreds(auth, newIdentity());
+  const evictorCreds = await mintConnectionEvictorCreds(auth, newIdentity());
+  const deliveryId = newIdentity();
+  delivery = new CotalEndpoint({
+    space, servers: SERVERS, creds: await mintCreds(auth, deliveryId, "delivery"),
+    card: { id: deliveryId.id, name: "delivery", role: "delivery", kind: "endpoint" },
+    channels: [], consume: false, registerPresence: false, watchPresence: false, watchChannels: false,
+  });
+  delivery.on("error", () => {});
+  await delivery.start();
+  await delivery.startPlane3(async () => undefined, {
+    evictPrincipal: (principal) => evictDeniedPrincipalWithCreds({
+      servers: SERVERS, observerCreds, evictorCreds, accountId: auth.account.pub, principal,
+    }),
+  });
   await mgr.start();
 
   // 0 — the manager is the CLASS-2 RENEWAL OWNER (D5 slice 5): a real start runs the ordered
@@ -201,7 +218,7 @@ try {
   await wait(2500);
   // The failed spawn's uid never came back, so sweep by prefix: no `bad1.<uid>.creds` (nor any
   // other `bad1.`-based secret) may remain.
-  check("bad1 creds file not left behind", !readdirSync(join(authDir(workspaceRoot), "creds")).some((f) => f.startsWith("bad1.")));
+  check("bad1 creds file not left behind", !readdirSync(agentCredsDir(workspaceRoot, space)).some((f) => f.startsWith("bad1.")));
 
   // 3b — UNCERTAIN: a process that runs but never joins presence → neither started nor failed within the
   // backstop → {ok:false} uncertain, and the agent is KEPT (not deprovisioned; it may still be booting).
@@ -273,6 +290,7 @@ try {
   process.exitCode = 1;
 } finally {
   try { await mgr.stop(); } catch { /* already stopped */ }
+  await delivery?.stop().catch(() => {});
   srv.kill("SIGKILL");
   await wait(300);
   rmSync(dir, { recursive: true, force: true });

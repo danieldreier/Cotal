@@ -21,6 +21,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { assertSmokeSandboxDown, assertSmokeSandboxTargetDown, recordSmokeSandbox } from "@cotal-ai/smoke-kit";
+import { canonicalLocalProcessPath, DELIVERY_PIDFILE, MANAGER_PIDFILE } from "@cotal-ai/workspace";
 
 // Ephemeral OS-assigned ports: no fixed-port collision across back-to-back / concurrent runs.
 const freePort = (): Promise<number> =>
@@ -39,6 +41,7 @@ const configDir = join(sandbox, "xdg");
 const home = join(sandbox, "home");
 const root = join(sandbox, "proj");
 for (const d of [configDir, home, root]) mkdirSync(d, { recursive: true });
+const sandboxAnchor = recordSmokeSandbox({ root, cotalHome: home, xdgConfigHome: configDir });
 
 let pass = 0;
 const ok = (name: string, cond: boolean, extra?: unknown) => {
@@ -51,8 +54,13 @@ const env = { ...process.env, XDG_CONFIG_HOME: configDir, COTAL_HOME: home };
 const realNode = spawnSync("which", ["node"], { encoding: "utf8" }).stdout.trim();
 const tsxCli = join(REPO, "node_modules", "tsx", "dist", "cli.mjs");
 const binCotal = join(REPO, "bin", "cotal.ts");
-const cotalAt = (cwd: string, args: string[], timeout = 180_000) =>
-  spawnSync(realNode, [tsxCli, binCotal, ...args], { encoding: "utf8", env, cwd, timeout });
+const cotalAt = (cwd: string, args: string[], timeout = 180_000) => {
+  const options = { encoding: "utf8" as const, env, cwd, timeout };
+  if (args[0] === "down" && args[1] === "web")
+    assertSmokeSandboxTargetDown(sandboxAnchor, args, options);
+  else assertSmokeSandboxDown(sandboxAnchor, args, options);
+  return spawnSync(realNode, [tsxCli, binCotal, ...args], options);
+};
 const cotal = (args: string[], timeout = 180_000) => cotalAt(root, args, timeout);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid: number) => {
@@ -91,8 +99,9 @@ try {
     const server = `nats://127.0.0.1:${AUTH_PORT}`;
     const up = cotal(["up", "--detach", "--space", SPACE, "--server", server]);
     ok("up --detach (auth) exits 0", up.status === 0, (up.stdout + up.stderr).slice(-400));
-    for (const f of ["nats.pid", "delivery.pid", "manager.pid"] as const) {
-      const pid = Number(readFileSync(join(root, ".cotal", f), "utf8").trim());
+    const record = (t: string) => canonicalLocalProcessPath(t, { root, space: SPACE });
+    for (const f of [join(root, ".cotal", "nats.pid"), record(DELIVERY_PIDFILE), record(MANAGER_PIDFILE)]) {
+      const pid = Number(readFileSync(f, "utf8").trim());
       ownPids.push(pid);
     }
 
@@ -140,7 +149,7 @@ try {
     ok("live /api/meta answers with the mesh's space and serving pid", meta.space === SPACE && meta.pid === foregroundPid && alive(foregroundPid), meta);
     const removeLive = cotal(["ext", "remove", "@cotal-ai/web"]);
     ok("ext remove refuses to orphan a running web process", removeLive.status === 1 && /cotal down web/.test(removeLive.stderr), removeLive.stderr.slice(-400));
-    const webDown = cotal(["down", "web"]);
+    const webDown = cotal(["down", "web", "--space", SPACE]);
     if (webChild.exitCode === null)
       await Promise.race([new Promise<void>((resolve) => webChild!.once("exit", () => resolve())), sleep(2_000)]);
     ok("down web stops the extension-owned process only", webDown.status === 0 && webChild.exitCode !== null, webDown.stdout + webDown.stderr);
@@ -199,7 +208,7 @@ try {
   console.log(`\nDOGFOOD LIVE SMOKE OK ✅ (${pass} checks)`);
 } finally {
   webChild?.kill("SIGKILL");
-  spawnSync(realNode, [tsxCli, binCotal, "down"], { encoding: "utf8", env, cwd: root });
+  cotal(["down"]);
   for (const p of ownPids) if (alive(p)) { try { process.kill(p, "SIGTERM"); } catch { /* gone */ } }
   rmSync(sandbox, { recursive: true, force: true });
 }

@@ -1,5 +1,49 @@
 # @cotal-ai/connector-core
 
+## 0.36.0
+
+## 0.35.0
+
+### Minor Changes
+
+- c5948e6: Seed the default persona with wildcard channel read and post ACLs while keeping its active
+  subscription set empty. A fresh default agent can now join and create channels on demand without
+  receiving every channel at boot. Repeat setup also upgrades the byte-exact legacy default while
+  leaving every edited persona unchanged. The guided demo personas retain their existing `welcome`
+  scope.
+
+  This is a minor release because packages are pre-1.0 and the shipped security default broadens the
+  default persona's broker-enforced publish authority. The connector-core bump ships the updated
+  version-matched operator docs bundle.
+
+- d457d7f: Show each managed seat's model and requested variant in the default `cotal ps` view, and expose Jcode's declared local model catalog without presenting configured effort tiers as provider-verified capabilities.
+
+## 0.34.0
+
+### Minor Changes
+
+- 22c3182: Honor the persona file's `agent:` frontmatter when picking the spawn harness. The key existed in
+  half the fleet's personas but no code path read it: it swept into the verbatim `meta` bag, and both
+  launch paths resolved the connector before the persona file was loaded, so `COTAL_DEFAULT_AGENT`
+  silently beat a deliberate per-persona pin (a `jcode` persona ran `claude` with no complaint).
+
+  The harness now resolves once, on every spawn path, as: explicit `--agent` flag > persona `agent:` >
+  `COTAL_DEFAULT_AGENT` > the product default. That is the precedence `model:` and `variant:` already
+  have, keeping the env var a _default_ rather than an override. On `--detach` the CLI now threads
+  an explicit flag and the caller's environment default as separate control fields. The manager loads
+  the persona file before resolving its connector and applies the same precedence while preserving
+  the invoking operator's default when its own environment differs. A pin naming an unregistered
+  connector fails the spawn loudly with the connector install hint (no silent fallback).
+
+  `saveAgentFile` round-trips the field, so a runtime `cotal_persona` redefine preserves a pin.
+  Docs updated (`agent-files.md`, `connectors.md`, `cli.md`, `config.md`).
+
+## 0.33.9
+
+### Patch Changes
+
+- a497dfc: Recover Codex event streams after broker outages without losing pending bracket state or the outage backlog.
+
 ## 0.33.8
 
 ## 0.33.7

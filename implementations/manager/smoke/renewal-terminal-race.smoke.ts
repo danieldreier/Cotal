@@ -17,7 +17,7 @@ import {
   standaloneConnectOpts, registry, DEV_OWNER, setupSpaceStreams, recordsBucket, epAuthBucket,
   parseLedgerRow, credRowKey, type AgentHandle, type AttachSession,
   type Connector, type LaunchSpec, type Presence, type CredentialLedgerRow,
-  type LifecycleStateTransport, type SecretStore,
+  type EvictionResult, type LifecycleStateTransport, type SecretStore,
 } from "@cotal-ai/core";
 import { agentSecretKeyForFile, putSpaceAuth } from "@cotal-ai/workspace";
 import {
@@ -173,6 +173,8 @@ for (const { name } of SCENARIOS)
 
 await putSpaceAuth(secrets, auth);
 const mgr = new Manager({ space, servers, runtime: "pty", workspaceRoot, secretStore: secrets });
+(mgr as unknown as { staticLifecycleEvict?: (principal: string) => Promise<EvictionResult> }).staticLifecycleEvict =
+  async (principal) => ({ principal, kicked: 0, remaining: 0, verifiedGone: true, scanComplete: true });
 (mgr as unknown as { auth: unknown }).auth = auth;
 const handles = new Map<string, ControlledHandle>();
 (mgr as unknown as { runtime: { kind: string; spawn: (name: string, spec: LaunchSpec) => AgentHandle } }).runtime = {
@@ -264,7 +266,7 @@ try {
 
     const credsPath = agent.secretPaths?.creds;
     if (!credsPath) throw new Error(`${name}: no managed credential path`);
-    const secretKey = agentSecretKeyForFile(credsPath);
+    const secretKey = agentSecretKeyForFile(credsPath, space);
     const view = await openLifecycleView(name, agent.id, agent.lifecycleUid);
     let pause: ReturnType<PausingSecretStore["armNextPut"]> | undefined;
     try {

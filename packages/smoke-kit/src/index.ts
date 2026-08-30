@@ -13,5 +13,12 @@
  * pointing straight at `.ts`, so there is no build step, no build ordering, and no second copy that
  * can disagree with this one.
  */
-export { SMOKE_BROKER_PREFIX, SMOKE_BROKER_TOKEN, killAndAwaitExit, teardownOnSignal } from "./broker-teardown.js";
+export { SMOKE_BROKER_PREFIX, SMOKE_BROKER_TOKEN, killAndAwaitExit, teardownOnSignal, teardownPathOnSignal } from "./broker-teardown.js";
+export {
+  assertSmokeSandboxDown,
+  assertSmokeSandboxTargetDown,
+  recordSmokeSandbox,
+  type SmokeCommandOptions,
+  type SmokeSandboxAnchor,
+} from "./sandbox-guard.js";
 export { memorySubjectFrontier, type MemorySubjectFrontier } from "./subject-frontier.js";
