@@ -381,6 +381,8 @@ export class CpnRuntime implements Runtime {
       throw new Error(`cpn runtime: persona ${JSON.stringify(context.persona)} resolved model ${JSON.stringify(context.model)}, expected ${JSON.stringify(selected.model)}`);
     if (selected.variant !== undefined && selected.variant !== context.variant)
       throw new Error(`cpn runtime: persona ${JSON.stringify(context.persona)} resolved variant ${JSON.stringify(context.variant)}, expected ${JSON.stringify(selected.variant)}`);
+    if (context.child.role !== undefined && context.child.role !== "helper")
+      throw new Error(`cpn runtime: child role ${JSON.stringify(context.child.role)} is not supported; omit the role override because the reviewed persona supplies "helper"`);
     const task = context.task?.trim();
     if (!task) throw new Error("cpn runtime: cotal_spawn requires a one-shot task");
     if (Buffer.byteLength(task, "utf8") > MAX_TASK_BYTES) throw new Error(`cpn runtime: task exceeds the ${MAX_TASK_BYTES}-byte limit`);
