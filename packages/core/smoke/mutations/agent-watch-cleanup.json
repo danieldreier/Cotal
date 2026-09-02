@@ -1,0 +1,34 @@
+{
+  "suite": "packages/core/smoke/manager-split-auth.smoke.ts",
+  "guard": "a minted agent credential can delete only its client-managed ordered consumers on the public presence and channel-registry KV streams",
+  "command": "corepack pnpm --filter @cotal-ai/core build && PATH=/workspace/state/tools/nats-server-v2.12.12-b:$PATH corepack pnpm smoke:manager-split",
+  "completionMarker": "MANAGER-SPLIT SMOKE",
+  "proveWith": "node scripts/mutation-proof.mjs --config packages/core/smoke/mutations/agent-watch-cleanup.json",
+  "why": [
+    "nats.js ordered KV watches explicitly delete their generated oc_* consumer when they reset or",
+    "stop. The agent profile already permits CREATE+INFO on the two public KV streams it watches,",
+    "but without DELETE those cleanup attempts are broker-refused and consumers persist until the",
+    "broker's inactivity reaper catches up. Each mutation removes one exact bucket grant; the real",
+    "JWT broker matrix must reject that cleanup while retaining the cross-bucket and stream denials."
+  ],
+  "mutations": [
+    {
+      "name": "drop the agent presence-watch consumer cleanup grant",
+      "file": "packages/core/src/provision.ts",
+      "find": "    `$JS.API.CONSUMER.DELETE.${KV}.>`,\n    \"$JS.FC.>\",",
+      "replace": "    \"$JS.FC.>\",",
+      "expectRed": "delete an ordered presence-watch consumer ALLOWED (watch reset/stop cleanup)",
+      "cell": "delete an ordered presence-watch consumer ALLOWED (watch reset/stop cleanup)",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
+    },
+    {
+      "name": "drop the agent channel-registry-watch consumer cleanup grant",
+      "file": "packages/core/src/provision.ts",
+      "find": "    `$JS.API.CONSUMER.DELETE.${CHKV}.>`,\n",
+      "replace": "",
+      "expectRed": "delete an ordered channel-registry-watch consumer ALLOWED (watch reset/stop cleanup)",
+      "cell": "delete an ordered channel-registry-watch consumer ALLOWED (watch reset/stop cleanup)",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
+    }
+  ]
+}
