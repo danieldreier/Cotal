@@ -274,7 +274,9 @@ const SEAMS: Seam[] = [
   // Every site states `tls`, so only the deliberate population census moved.
   // 101/74 -> 102/75: the remote-agent-bearer live smoke opens the already-enrolled managed
   // actor with bearer+sentinel and an explicit plaintext-broker `tls: false` decision.
-  { fn: "standaloneConnectOpts", key: "tls", sites: 102, untypecheckedSites: 75 },
+  // 102/75 -> 104/77: the boot-self-heal live smoke opens two explicit plaintext-broker
+  // connections so the stale-lease and successor paths share the same bounded fixture.
+  { fn: "standaloneConnectOpts", key: "tls", sites: 104, untypecheckedSites: 77 },
 ];
 
 /**
