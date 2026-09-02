@@ -80,6 +80,10 @@ async function coldRootHandshake(args: string[], cwd: string, env: NodeJS.Proces
   const started = Date.now();
   const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "cold-root-stdout-probe", version: "0.0.0" } } };
   child.stdin?.write(`${JSON.stringify(initialize)}\n`);
+  // Wait for a FRAME, not for the first newline: a newline is exactly what a polluted channel
+  // produces early, so waiting on one would stop the run mid-seed and turn the defect into a
+  // truncated transcript instead of a preamble the caller can measure.
+  const hasFrame = () => stdout.split("\n").some(isJsonRpcFrame);
   let exited: string | undefined;
   child.on("exit", (code, signal) => { exited = `exit code ${code}, signal ${signal}`; });
   let failure: Error | undefined;
@@ -88,8 +92,8 @@ async function coldRootHandshake(args: string[], cwd: string, env: NodeJS.Proces
     // npm cache; the deadline covers that rather than the handshake, which is immediate once the
     // gateway is up. An early child exit is a separate outcome from a slow one and is reported as
     // itself, so a crash can never be read as "still seeding".
-    await waitFor("the cold-root gateway's first stdio line", () => stdout.includes("\n") || exited !== undefined, 600_000);
-    if (exited && !stdout.includes("\n")) throw new Error(`the cold-root gateway exited before its first stdio line (${exited})`);
+    await waitFor("the cold-root gateway's first JSON-RPC frame", () => hasFrame() || exited !== undefined, 600_000);
+    if (exited && !hasFrame()) throw new Error(`the cold-root gateway exited before answering initialize (${exited})`);
   } catch (e) {
     failure = e as Error;
   }
