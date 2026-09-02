@@ -33,7 +33,7 @@
       "name": "route the authenticated agent through the stock generated presence watcher",
       "file": "packages/core/src/endpoint.ts",
       "find": "    if (this.usesLifecyclePinnedAgentWatch()) {\n      await this.startLifecyclePinnedAgentWatch(this.kv, \"presence\",",
-      "replace": "    if (false && this.usesLifecyclePinnedAgentWatch()) {\n      await this.startLifecyclePinnedAgentWatch(this.kv, \"presence\",",
+      "replace": "    if (this.card.kind === \"endpoint\" && this.usesLifecyclePinnedAgentWatch()) {\n      await this.startLifecyclePinnedAgentWatch(this.kv, \"presence\",",
       "expectRed": "real endpoint starts both lifecycle-pinned public-KV watchers",
       "cell": "real endpoint starts both lifecycle-pinned public-KV watchers",
       "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
