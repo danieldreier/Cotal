@@ -3,8 +3,9 @@
  * REAL subprocess in a sandboxed COTAL_HOME with claude/opencode OFF the PATH, and must:
  *   A. exit 0 — configuring a machine never depends on (or mutates) running state;
  *   B. LAUNCH NOTHING — no broker appears on the default port, no manager pid file lands;
- *   C. WRITE the default persona, install @cotal-ai/web in a sandboxed config dir, and write the
- *      onboarded stamp, with persona/stamp writes announced on stderr;
+ *   C. WRITE the default persona, install @cotal-ai/web in a sandboxed config dir, install Cotal
+ *      skills into sandboxed cross-vendor and Codex-native homes, and write the onboarded stamp,
+ *      with persona/stamp writes announced on stderr;
  *   D. `setup --demo` on an onboarded machine writes the guided team;
  *   E. a REPEAT run (now onboarded) prints the status card, still launches nothing, and exits 0;
  *   F. the removed `--open` flag and the deleted `go` command fail loud.
@@ -35,7 +36,18 @@ const realNode = spawnSync("which", ["node"], { encoding: "utf8" }).stdout.trim(
 const realNpm = spawnSync("which", ["npm"], { encoding: "utf8" }).stdout.trim();
 symlinkSync(realNode, join(binDir, "node"));
 symlinkSync(realNpm, join(binDir, "npm"));
-const env = { ...process.env, COTAL_HOME: home, XDG_CONFIG_HOME: configHome, PATH: binDir, COTAL_SKIP_ASSIST: "1" };
+const env = {
+  ...process.env,
+  // Agent Skills are intentionally installed under the OS home, not COTAL_HOME. Keep HOME sandboxed
+  // too, or this real setup subprocess would modify the operator's live Codex/Cursor skill roots.
+  HOME: home,
+  USERPROFILE: home,
+  CODEX_HOME: join(home, ".codex"),
+  COTAL_HOME: home,
+  XDG_CONFIG_HOME: configHome,
+  PATH: binDir,
+  COTAL_SKIP_ASSIST: "1",
+};
 const tsxCli = resolve(import.meta.dirname, "..", "..", "node_modules", "tsx", "dist", "cli.mjs");
 const binCotal = resolve(import.meta.dirname, "..", "cotal.ts");
 
@@ -131,6 +143,8 @@ for (const f of ["david.md", "sven.md", "me.md"]) {
 ok("onboarded stamp written", existsSync(join(home, "onboarded.json")));
 const extManifest = JSON.parse(readFileSync(join(configHome, "cotal", "extensions", "extensions.json"), "utf8"));
 ok("web extension installed in sandboxed config", extManifest.extensions?.some((e: { commands?: { name?: string }[] }) => e.commands?.some((c) => c.name === "web")) === true);
+ok("cross-vendor Cotal mesh skill installed under the sandboxed HOME", existsSync(join(home, ".agents", "skills", "cotal-mesh", "SKILL.md")));
+ok("Codex-native Cotal mesh skill and metadata installed under the sandboxed HOME", existsSync(join(home, ".codex", "skills", "cotal-mesh", "SKILL.md")) && existsSync(join(home, ".codex", "skills", "cotal-mesh", "agents", "openai.yaml")));
 ok("provenance announces default persona write", /→ wrote default persona: .*default\.md/.test(first.stderr), first.stderr.slice(-500));
 ok("provenance announces the onboarded stamp", /→ wrote onboarded stamp/.test(first.stderr));
 

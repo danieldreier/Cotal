@@ -1,0 +1,20 @@
+{
+  "command": "pnpm smoke:standalone-agent",
+  "mutations": [
+    {
+      "name": "PREDICTED KILLED (>=1 red) - static lifecycle retirement becomes a no-op, leaving the old credential able to bind its retired DM durable",
+      "file": "packages/workspace/src/standalone-agent.ts",
+      "find": "  await deprovisionAgent({\n    servers: target.server,\n    space: target.space,\n    targetId: id,\n    lifecycleUid,\n    creds: deprovisioner,\n    tls: target.tlsRequired,\n  });",
+      "replace": "  await Promise.resolve();",
+      "expectRed": "retirement removes exactly this lifecycle's DM durable"
+    },
+    {
+      "name": "PREDICTED KILLED (>=1 red) - open lifecycle retirement becomes a no-op, leaving the exact DM durable behind",
+      "file": "packages/workspace/src/standalone-agent.ts",
+      "find": "      retire: retirement(() => deprovisionAgent({\n        servers: target.server,\n        space: target.space,\n        targetId: identity.id,\n        lifecycleUid,\n        tls: target.tlsRequired,\n      })),",
+      "replace": "      retire: async () => {},",
+      "expectRed": "open retirement deletes exactly the prepared lifecycle's DM durable"
+    }
+  ],
+  "_note": "The smoke starts real open and JWT-auth JetStream brokers. It proves static teardown rejects an old lifecycle bind and open teardown deletes the exact caller-owned DM durable. Both retirement paths are reached through the public prepared.retire entry point."
+}

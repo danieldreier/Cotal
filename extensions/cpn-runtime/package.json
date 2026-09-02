@@ -1,7 +1,7 @@
 {
   "name": "@cotal-ai/cpn-runtime",
   "description": "Cotal CPN integration: a Kubernetes launcher Runtime provider.",
-  "version": "0.27.0",
+  "version": "0.34.0-cpn.1",
   "license": "Apache-2.0",
   "repository": { "type": "git", "url": "https://github.com/Cotal-AI/Cotal.git", "directory": "extensions/cpn-runtime" },
   "type": "module",

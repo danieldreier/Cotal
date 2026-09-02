@@ -1,0 +1,27 @@
+{
+  "name": "cotal-mesh",
+  "version": "0.34.0-cpn.1",
+  "description": "Cotal workflow skills and a trusted local MCP mesh gateway.",
+  "author": {
+    "name": "Cotal"
+  },
+  "repository": "https://github.com/Cotal-AI/Cotal",
+  "license": "Apache-2.0",
+  "keywords": ["cotal", "mesh", "coordination", "mcp", "agents"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Cotal Mesh",
+    "shortDescription": "Coordinate safely through a local Cotal mesh.",
+    "longDescription": "Packages Cotal workflow skills with the trusted local Cotal MCP gateway.",
+    "developerName": "Cotal",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": [
+      "Use $cotal-mesh to orient and coordinate this Cotal task.",
+      "Use $team-topology to propose a safe Cotal team topology.",
+      "Use $cotal-engineering to inspect this Cotal product task."
+    ],
+    "brandColor": "#2455A6"
+  }
+}

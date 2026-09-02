@@ -1,0 +1,15 @@
+{
+  "suite": "extensions/mcp/smoke/http.smoke.ts",
+  "guard": "the HTTP gateway refuses Host-header rebinding before a session can be initialized",
+  "command": "pnpm smoke:mcp-http",
+  "proveWith": "node scripts/mutation-proof.mjs --config extensions/mcp/smoke/mutations/http-loopback-guard.json",
+  "mutations": [
+    {
+      "name": "M1 accept every Host header on the loopback listener",
+      "file": "extensions/mcp/src/http.ts",
+      "find": "return host === `127.0.0.1:${port}` || host === `localhost:${port}` || host === `[::1]:${port}`;",
+      "replace": "return true;",
+      "expectRed": "exact loopback Host guard rejects rebinding"
+    }
+  ]
+}

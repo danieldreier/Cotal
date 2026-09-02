@@ -7,7 +7,8 @@
  *   role: builder
  *   description: …
  *   tags: [edit, test]
- *   subscribe: [general]       # channels this agent actively reads at boot (the live set)
+ *   subscribe: [general]       # channels this agent actively reads at boot (the live set);
+ *                              #   omit ⇒ NO channels (reachable by DM only)
  *   allowSubscribe: [general]  # read ACL — channels it MAY read; omit ⇒ same as `subscribe`
  *   allowPublish: [general]    # post ACL — channels it may publish to; omit ⇒ DENY (default-deny)
  *   agent: codex               # optional connector/harness; explicit spawn option still wins
@@ -29,7 +30,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { EndpointKind } from "./types.js";
 import { assertValidName } from "./resolve.js";
-import { assertValidChannel, channelInAllow, isConcreteChannel } from "./subjects.js";
+import { assertValidChannel, assertValidOwnerToken, channelInAllow, isConcreteChannel } from "./subjects.js";
 
 export interface AgentDef {
   name: string;
@@ -38,7 +39,9 @@ export interface AgentDef {
   description?: string;
   tags?: string[];
   /** The *active* read set: channels this agent subscribes to at boot (the live chat-durable
-   *  filter; mutable at runtime via join/leave). Must be ⊆ {@link allowSubscribe}. Default `[general]`. */
+   *  filter; mutable at runtime via join/leave). Must be ⊆ {@link allowSubscribe}. Omitted or
+   *  empty ⇒ NO channels: an agent reads exactly the channels it lists, and a file that names
+   *  none joins none (it stays reachable by DM, presence and anycast). List `general` to get it. */
   subscribe?: string[];
   /** The read **ACL**: channels this agent *may* read (auth mode → minted as per-channel
    *  history-consumer create grants; the live durable's filter is also held within it). Entries
@@ -160,8 +163,12 @@ export function loadAgentFile(path: string): AgentDef {
       throw new Error(`agent file ${path}: ${(e as Error).message}`);
     }
   // Invariant (fail-loud at load): the active read set must be within the read ACL. Defaults:
-  // subscribe ⇒ [general]; allowSubscribe ⇒ subscribe (read exactly what you subscribe to).
-  const effSubscribe = subscribe?.length ? subscribe : ["general"];
+  // subscribe ⇒ NOTHING; allowSubscribe ⇒ subscribe (read exactly what you subscribe to).
+  // An omitted or empty read set means NO channels, not `general`: a file that names no channel
+  // gets none, and the agent is reachable by DM/presence/anycast only. The old default put every
+  // persona that forgot the field onto `general`, including DM-only reviewers and probes, and
+  // minted the matching channel read row into its credential — a channel nobody chose.
+  const effSubscribe = subscribe ?? [];
   const effAllow = allowSubscribe?.length ? allowSubscribe : effSubscribe;
   for (const ch of effSubscribe)
     if (!channelInAllow(effAllow, ch))
@@ -287,14 +294,53 @@ export function agentFilePath(root: string, nameOrPath: string): string {
   return join(root, ".cotal", "agents", `${nameOrPath}.md`);
 }
 
-/** First free name in the series `base`, `base-2`, `base-3`, … — the first candidate for which
+/** The separator the auto-numbering scheme appends a counter with. `_`, NOT `-`: in user mode the
+ *  allocated name IS the mesh actor, and {@link assertValidOwnerToken} rejects `-` because it is the
+ *  sole separator of `principalKey`'s JetStream-name form. A `-` here made every name past the first
+ *  unmintable — spawn a persona twice and the second peer could not be granted at all. The failure
+ *  was invisible in static/open mode, which keys the actor on the minted nkey rather than the name,
+ *  so it fired only where per-user auth is on. Kept adjacent to the name rule below so the two
+ *  cannot drift: whatever this scheme can PRODUCE, that rule must ACCEPT. */
+const NUMBER_SEPARATOR = "_";
+
+/** First free name in the series `base`, `base_2`, `base_3`, … — the first candidate for which
  *  `taken` returns false. The single source of the spawn auto-numbering scheme, shared by the
  *  manager's funnel (checked against its live + reserved slots) and `cotal spawn` (checked against
  *  the live mesh roster), so a colliding name numbers up identically whichever path spawns it. */
 export function firstFreeName(base: string, taken: (name: string) => boolean): string {
   if (!taken(base)) return base;
   for (let n = 2; ; n++) {
-    const candidate = `${base}-${n}`;
+    const candidate = `${base}${NUMBER_SEPARATOR}${n}`;
     if (!taken(candidate)) return candidate;
   }
+}
+
+/** THE agent-name rule, in one place, for every door that accepts a model- or operator-supplied
+ *  name (the manager's spawn ref, identity, roster entry and persona-define; the CLI's `--name`).
+ *
+ *  Two constraints, and they are not the same constraint:
+ *   - ALWAYS: the name becomes a `.cotal/agents/<name>.md` path, so it must be a bare token and
+ *     never a path — this is the traversal guard, and it holds in every mode.
+ *   - USER MODE ONLY: the name is additionally the mesh ACTOR, so it must satisfy the principal
+ *     grammar, which is strictly narrower — no `-`. Static/open mode keys the actor on the freshly
+ *     minted nkey instead of the name, so the narrow rule does not apply there and an existing
+ *     `my-agent` persona keeps spawning across an upgrade.
+ *
+ *  The narrow half DELEGATES to {@link assertValidOwnerToken} rather than restating it as a second
+ *  regex. A copy of an authority's alphabet drifts silently, and the copy that drifts is the one on
+ *  the door nobody is reading — the same reason the persona doors share one ownership predicate.
+ *  Returns undefined when the name is acceptable, else the refusal to show the caller. */
+export function spawnNameError(name: string, opts: { userMode: boolean }): string | undefined {
+  if (!/^[A-Za-z0-9_-]+$/.test(name))
+    return `unsafe name ${JSON.stringify(name)} (allowed: letters, digits, _ -)`;
+  if (!opts.userMode) return undefined;
+  try {
+    assertValidOwnerToken(name);
+  } catch {
+    return (
+      `name ${JSON.stringify(name)} cannot be a mesh identity in user mode: the name becomes this ` +
+      `agent's actor token, and '-' is reserved as the principal name-form separator - use '_'`
+    );
+  }
+  return undefined;
 }

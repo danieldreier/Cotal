@@ -1,0 +1,15 @@
+{
+  "suite": "extensions/mcp/smoke/gateway.smoke.ts",
+  "guard": "a multi-identity gateway refuses actor-ambiguous Cotal calls instead of silently selecting one",
+  "command": "pnpm smoke:mcp-gateway",
+  "proveWith": "node scripts/mutation-proof.mjs --config extensions/mcp/smoke/mutations/gateway-identity-selection.json",
+  "mutations": [
+    {
+      "name": "M1 multiple identities silently select the first actor",
+      "file": "extensions/connector-core/src/gateway-identities.ts",
+      "find": "if (this.#byHandle.size === 1) return this.#byHandle.values().next().value!;",
+      "replace": "if (this.#byHandle.size >= 1) return this.#byHandle.values().next().value!;",
+      "expectRed": "multiple identities never guess an actor"
+    }
+  ]
+}
