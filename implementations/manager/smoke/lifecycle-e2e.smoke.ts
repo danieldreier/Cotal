@@ -136,7 +136,15 @@ const wrongUidRegCon: Connector = { kind: "connector", name: "e2e-wronguid-reg",
 // register-only + a lied uid. The manager readiness LIFECYCLE FENCE (presence uid == the minted
 // uid) must still reject it — client-authored kind is not the authority boundary.
 const bypassKindCon: Connector = { kind: "connector", name: "e2e-bypass-kind", requires: ["node"], buildLaunch: (o): LaunchSpec => ({
-  command: "node", args: [STUB], env: { ...envFor(o), COTAL_LIFECYCLE_UID: mintLifecycleUid(), COTAL_E2E_KIND: "endpoint" },
+  // Disable the public-KV watch only for this authority probe. Lifecycle-pinned watches now reject
+  // the lied uid at their own exact CREATE subject; this cell deliberately reaches the independent
+  // manager readiness fence and proves client-authored kind still cannot bypass it.
+  command: "node", args: [STUB], env: {
+    ...envFor(o),
+    COTAL_LIFECYCLE_UID: mintLifecycleUid(),
+    COTAL_E2E_KIND: "endpoint",
+    COTAL_E2E_WATCH_PRESENCE: "0",
+  },
 }) };
 registry.register(stubCon);
 registry.register(dieCon);
