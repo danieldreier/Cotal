@@ -1,0 +1,71 @@
+{
+  "suite": "extensions/connector-core/smoke/cpn-renew-adoption.smoke.ts",
+  "guard": "a CPN laptop session is fed its credential from an in-memory cell that IS the endpoint's creds source, adopts a same-nkey re-signed credential through the endpoint's prove-then-adopt transaction, swaps its live wire onto it, and — when either stage fails — leaves the cell and the endpoint's committed credential naming the SAME credential",
+  "command": "pnpm smoke:cpn-renew-adoption",
+  "completionMarker": "CPN RENEW ADOPTION SMOKE",
+  "proveWith": "node scripts/mutation-proof.mjs --config extensions/connector-core/smoke/mutations/cpn-renew-adoption.json",
+  "why": [
+    "The shipped defect: packages/core/src/endpoint.ts carries a complete prove-then-adopt renewal",
+    "system (fetch -> nkey pin -> preflight on a disposable connection -> commit -> re-arm) that is",
+    "armed by exactly one thing, `creds` being a FUNCTION. Every connector passed a STRING, so",
+    "`credsSource` was undefined and the whole apparatus was dead code on the laptop path: a CPN",
+    "session simply lost its mesh connection at its JWT's `exp`. M1 is that defect verbatim - the",
+    "endpoint handed a static string again - and it must redden the cell that asks the endpoint to",
+    "reload, not merely make some later check flaky.",
+    "",
+    "The rollback is the other half, and it is the half with no obvious failure signal. By the time",
+    "`reloadCreds` RETURNS, the endpoint has already committed the candidate to `currentCreds` and",
+    "re-armed its 75% timer on the candidate's `exp` - and the wire presents `currentCreds`, not the",
+    "source. So a rollback that reverts only the CELL leaves the endpoint presenting the new",
+    "credential while the source returns the old one, and the next timer tick reads a credential",
+    "whose renewal delay is already negative, floors at 1s and spins until expiry. A rollback that",
+    "re-proves only the ENDPOINT leaves the cell behind the wire. Both are silent, both survive every",
+    "check that only asks whether an adoption succeeded, and M5 and M6 are the two of them: they",
+    "mutate opposite halves of the same catch block and must redden the SAME cell, which is why that",
+    "cell asserts the endpoint's window and the cell's window in one breath."
+  ],
+  "mutations": [
+    {
+      "name": "M1 the shipped defect: the endpoint gets a static string again",
+      "file": "extensions/connector-core/src/agent.ts",
+      "find": "creds: this.credsCell ? () => Promise.resolve(this.credsCell!.current()) : config.creds,",
+      "replace": "creds: config.creds,",
+      "expectRed": "the endpoint was built on a creds SOURCE, not a static string"
+    },
+    {
+      "name": "M2 the cell's nkey pin is dropped",
+      "file": "extensions/connector-core/src/cpn-renew.ts",
+      "find": "    if (id !== this.id)",
+      "replace": "    if (false)",
+      "expectRed": "a credential naming a DIFFERENT nkey is refused by the cell before anything moves"
+    },
+    {
+      "name": "M3 adoption never swaps the wire",
+      "file": "extensions/connector-core/src/agent.ts",
+      "find": "      // failure into { ok: false } (agent.ts:307-309) and would hide it from the rollback below.\n      await this.ep.reconnect();",
+      "replace": "      // failure into { ok: false } (agent.ts:307-309) and would hide it from the rollback below.",
+      "expectRed": "adoption swaps the LIVE connection within 20 seconds"
+    },
+    {
+      "name": "M4 a refused candidate is left in the cell",
+      "file": "extensions/connector-core/src/agent.ts",
+      "find": "      // adopted and reverting the cell alone is sufficient HERE and only here.\n      cell.adopt(previous);",
+      "replace": "      // adopted and reverting the cell alone is sufficient HERE and only here.",
+      "expectRed": "a credential the broker refuses leaves the session on the previous credential"
+    },
+    {
+      "name": "M5 the reconnect rollback reverts the cell but not the endpoint",
+      "file": "extensions/connector-core/src/agent.ts",
+      "find": "      try { restored = await this.ep.reloadCreds(); } catch (e2) { restoreFailed = e2 as Error; }",
+      "replace": "      restored = undefined;",
+      "expectRed": "a failed wire swap puts BOTH the cell and the endpoint back on the previous credential"
+    },
+    {
+      "name": "M6 the reconnect rollback reverts the endpoint but not the cell",
+      "file": "extensions/connector-core/src/agent.ts",
+      "find": "    } catch (e) {\n      cell.adopt(previous);\n      let restored: CpnCredsWindow | undefined;",
+      "replace": "    } catch (e) {\n      let restored: CpnCredsWindow | undefined;",
+      "expectRed": "a failed wire swap puts BOTH the cell and the endpoint back on the previous credential"
+    }
+  ]
+}
