@@ -22,7 +22,7 @@ import {
 import {
   EpEnvelopeError, EP_UNBOUND_RESPONDER, EP_UNANSWERED, EP_REGISTRY_READ_FAILED, EP_BIND_REFUSED, registryReadFailed, bindRefusalMarked, parseEndpointReply, parseEndpointEvent, assertArgsValid, assertOutputValid,
   type EndpointRequest, type EndpointReply, type EndpointEvent, type EpCorrelation, type EpTargetBlock, type EpUnboundResponderDetail, type EpBindRefusedDetail,
-  type EpUnansweredDetail, type EpRegistryReadFailedDetail, type EpErrorDetail, type EpBindBlock,
+  type EpUnansweredDetail, type EpUnansweredObservation, type EpRegistryReadFailedDetail, type EpErrorDetail, type EpBindBlock,
 } from "./endpoint-envelope.js";
 import type { JetStreamManager } from "@nats-io/jetstream";
 import type { CompiledContract } from "./schema-profile.js";
@@ -146,7 +146,7 @@ function assertDeadline(deadlineMs: number, what = "deadlineMs"): number {
  *  A responder CAN attach a 503 header to its own reply, so this header alone is not proof of broker
  *  authorship: callers must trust it ONLY on the reserved no-responders sentinel subject (which carries
  *  no responder publish grant), never on a normal reply subject. */
-function isNoRespondersMsg(msg: Msg): boolean {
+export function isBrokerNoResponders(msg: Msg): boolean {
   const h = msg.headers as { code?: number; status?: string } | null | undefined;
   return h != null && (h.code === 503 || h.status === "503");
 }
@@ -214,7 +214,7 @@ export async function epProbeInstanceInterest(
       // still using that connection is therefore still running.
       timer.unref?.();
       sub = nc.subscribe(noRespReplyTo, {
-        callback: (err, msg) => { resolve(err === null && isNoRespondersMsg(msg) ? "gone" : "unknown"); },
+        callback: (err, msg) => { resolve(err === null && isBrokerNoResponders(msg) ? "gone" : "unknown"); },
       });
       nc.publish(subject, new TextEncoder().encode(JSON.stringify(env)), { reply: noRespReplyTo });
     });
@@ -238,7 +238,8 @@ async function raceBounded<T>(read: () => Promise<T> | T, ms: number, what: stri
 
 /** The {@link EP_UNANSWERED} detail for `op`: set ONLY where this module observed that nothing
  *  answered (the broker's no-responders control frame, or the reply deadline elapsing). */
-const unansweredDetail = (op: EpVerbOp): EpUnansweredDetail => ({ kind: EP_UNANSWERED, endpoint: op.endpoint, command: op.command });
+const unansweredDetail = (op: EpVerbOp, observation: EpUnansweredObservation): EpUnansweredDetail =>
+  ({ kind: EP_UNANSWERED, endpoint: op.endpoint, command: op.command, observation });
 /** The {@link EP_REGISTRY_READ_FAILED} detail for `op`: set where the scatter's OWN registry read
  *  (freeze or reconcile) failed, so the failure is never read as the responders' silence. */
 const registryReadDetail = (op: EpVerbOp): EpRegistryReadFailedDetail => ({ kind: EP_REGISTRY_READ_FAILED, endpoint: op.endpoint, command: op.command });
@@ -388,7 +389,7 @@ export async function epCall(
           // impersonate transport absence — so it takes the ordinary attributed-reply path below, never
           // the broker-control path.
           if (msg.subject === noRespReplyTo) {
-            if (isNoRespondersMsg(msg)) { reject(new EpEnvelopeError("unavailable", `no responder for ${op.endpoint}.${op.command} (SPEC 13.5)`, [unansweredDetail(op)])); return; }
+            if (isBrokerNoResponders(msg)) { reject(new EpEnvelopeError("unavailable", `no responder for ${op.endpoint}.${op.command} (SPEC 13.5)`, [unansweredDetail(op, "no-responders")])); return; }
             reject(new EpEnvelopeError("internal", `a non-503 message reached the reserved no-responders sentinel for ${op.endpoint}.${op.command}; nothing but the broker control frame is addressable there`)); return;
           }
           resolve({ subject: msg.subject, data: msg.data });
@@ -396,7 +397,7 @@ export async function epCall(
       });
     });
     nc.publish(req.subject, req.body, { reply: noRespReplyTo });
-    const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new EpEnvelopeError("deadline-exceeded", `no reply to ${op.endpoint}.${op.command} within the ${deadlineMs}ms budget (SPEC 13.5)`, [unansweredDetail(op)])), deadlineMs); });
+    const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new EpEnvelopeError("deadline-exceeded", `no reply to ${op.endpoint}.${op.command} within the ${deadlineMs}ms budget (SPEC 13.5)`, [unansweredDetail(op, "reply-deadline")])), deadlineMs); });
     const msg = await Promise.race([outcome, timeout]);
     const attributed = parseAttributedReply(space, msg.subject, msg.data, req.requestId, op, expect);
     // Taken BEFORE the currency check below, because a responder that fenced on the bind settled

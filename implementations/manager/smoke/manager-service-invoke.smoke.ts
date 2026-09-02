@@ -9,7 +9,9 @@
  * MANAGER_CONTRACTS. If this compiled and ran while secretly depending on the hand-written
  * contracts, that would defeat the test; it does not.
  *
- *  1. resolveService(manager) describes + fetches + recompiles the FULL visible surface (17
+ *  0. A real connector holding only a minted `spawn` credential reaches the typed `status`
+ *     handler; describe alone is not mistaken for invoke authority.
+ *  1. resolveService(manager) describes + fetches + recompiles the FULL visible surface (18
  *     commands), each with a recompiled input/output contract whose closureDigest MATCHES the
  *     registered declaration.
  *  2. invoke "status" (untargeted, void) returns the typed ManagerStatus.
@@ -32,10 +34,11 @@ import { connect } from "@nats-io/transport-node";
 import {
   isReachable, createSpaceAuth, serverConfig, setupSpaceStreams, mintCreds, newIdentity,
   mintLifecycleUid, standaloneConnectOpts, DEV_OWNER, EpEnvelopeError,
-  resolveService, invokeCommand, registry,
+  resolveService, invokeCommand, registry, CotalEndpoint, provisionAgent,
   type Connector, type ControlReply, type EpCaller, type LaunchOpts, type LaunchSpec,
 } from "@cotal-ai/core";
 import { authDir, saveSpaceAuth } from "@cotal-ai/workspace";
+import { MeshAgent, type AgentConfig } from "@cotal-ai/connector-core";
 import { Manager } from "../src/manager.js";
 // The endpoint NAME only — NOT the contract module. A generic caller never hand-imports schemas.
 import { MANAGER_ENDPOINT } from "../src/manager-service-contract.js";
@@ -86,8 +89,55 @@ try {
   let up = false;
   for (let i = 0; i < 50; i++) { if (await isReachable(SERVERS)) { up = true; break; } await wait(200); }
   if (!up) throw new Error(`auth nats-server did not come up on ${PORT}`);
-  await setupSpaceStreams({ servers: SERVERS, space, creds: await mintCreds(auth, newIdentity(), "provisioner") });
+  const provisionerCreds = await mintCreds(auth, newIdentity(), "provisioner");
+  await setupSpaceStreams({ servers: SERVERS, space, creds: provisionerCreds });
+  const provisioner = new CotalEndpoint({
+    space,
+    servers: SERVERS,
+    creds: provisionerCreds,
+    card: { name: "provisioner", kind: "endpoint" },
+    consume: false,
+    registerPresence: false,
+    watchPresence: false,
+  });
+  await provisioner.start();
   await mgr.start();
+
+  // The MCP tool is capability-gated on `spawn`, so prove that exact authenticated profile can
+  // reach the real typed status handler without a hidden endpointCapabilities override. A stubbed
+  // MeshAgent only proves the tool wrapper; this proves the broker grant and handler path agree.
+  const probeId = newIdentity();
+  const probeUid = mintLifecycleUid();
+  const probeCreds = await provisionAgent(provisioner, auth, probeId, {
+    lifecycleUid: probeUid,
+    capabilities: ["spawn"],
+    subscribe: ["general"],
+    allowSubscribe: ["general"],
+    allowPublish: [],
+  });
+  const probeConfig: AgentConfig = {
+    space,
+    name: "status-probe",
+    id: probeId.id,
+    lifecycleUid: probeUid,
+    capabilities: ["spawn"],
+    servers: SERVERS,
+    creds: probeCreds,
+    subscribe: ["general"],
+    allowSubscribe: ["general"],
+    allowPublish: [],
+    kind: "agent",
+    tls: false,
+  };
+  const probeAgent = new MeshAgent(probeConfig);
+  probeAgent.start(100);
+  for (let i = 0; i < 50 && !probeAgent.connected; i++) await wait(100);
+  check("spawn-capability connector probe is connected under its real authenticated credential", probeAgent.connected);
+  const probeReply = await probeAgent.managerControlStatus(2_000);
+  check("spawn-capability connector reaches the real typed manager.status handler without an override",
+    probeReply.ok === true && (probeReply.data as { runtime?: string } | undefined)?.runtime === "pty", probeReply);
+  await probeAgent.stop();
+  await provisioner.stop();
 
   // A caller cred with the ep BASELINE (describe + reply rail + the epc fetch grant) plus the
   // invoke capabilities for the commands it will call. spawn-cap gives spawn + owner despawn/attach.

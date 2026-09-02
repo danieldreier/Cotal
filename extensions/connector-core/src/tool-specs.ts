@@ -498,7 +498,8 @@ export function channelMeta(i: InboxItem): Record<string, string> {
 /** The full Cotal tool set for a given config. Renderers iterate this; `source` names the
  *  hosting connector and is stamped onto outgoing feedback. */
 export function cotalToolSpecs(config: AgentConfig, source = "connector"): CotalToolSpec[] {
-  // Manager-op tools (cotal_spawn / cotal_persona) ride the `spawn` capability — publish to the
+  // Manager-op tools (cotal_manager_status / cotal_spawn / cotal_persona) ride the `spawn`
+  // capability — they publish to the
   // privileged control subject. The AUTH layer is the real boundary: on an authed mesh an agent
   // without the capability is denied at the wire (nats-server); open mode mints no identity, so
   // anyone may spawn. Mirror that here so the advertised surface is truthful — an agent only sees
@@ -521,7 +522,7 @@ export function cotalToolSpecs(config: AgentConfig, source = "connector"): Cotal
         "bearings; it's read-only and safe to re-check anytime.",
       run(agent) {
         // Reflect the SAME gated tool list the connector exposes (cotalToolSpecs already filters
-        // spawn/persona by capability), so the card can't claim a tool the agent can't call.
+        // manager-op tools by capability), so the card can't claim a tool the agent can't call.
         const visible: OrientationTool[] = cotalToolSpecs(config, source).map((s) => ({
           name: s.name,
           title: s.title,
@@ -1011,6 +1012,31 @@ export function cotalToolSpecs(config: AgentConfig, source = "connector"): Cotal
       },
     },
     {
+      name: "cotal_manager_status",
+      title: "Cotal: probe manager control readiness",
+      description:
+        "Run one bounded, read-only request through the manager's real typed control handler. This is stronger than Kubernetes readiness, roster presence, or a registered service row. It distinguishes a broker-confirmed zero-subscriber result from a request that reached its deadline without a reply; the latter may be a slow or stalled handler and has unknown effect outcome. Requires the spawn capability on authenticated meshes.",
+      schema: {
+        timeout_ms: z
+          .number()
+          .int()
+          .min(100)
+          .max(10_000)
+          .optional()
+          .describe("Bound for the read-only manager status probe in milliseconds (default 2000; 100-10000)."),
+      },
+      async run(agent, _config, { timeout_ms }: { timeout_ms?: number }) {
+        if (!agent.connected) return err(`Not connected to the mesh yet (${config.servers}).`);
+        try {
+          const reply = await agent.managerControlStatus(timeout_ms ?? 2_000);
+          if (!reply.ok) return err(`Manager control is NOT READY: ${reply.error ?? "the probe failed without a diagnostic"}`);
+          return ok(`Manager control is READY: ${JSON.stringify(reply.data ?? {})}`);
+        } catch (e) {
+          return err(`Manager control is NOT READY: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      },
+    },
+    {
       name: "cotal_spawn",
       title: "Cotal: spawn a new teammate",
       description:
@@ -1254,6 +1280,6 @@ export function cotalToolSpecs(config: AgentConfig, source = "connector"): Cotal
   // it had closed the seam. A no-argument tool gets a closed EMPTY object, so the refusal is the
   // same refusal everywhere and "takes nothing" never degrades into "takes anything".
   return specs
-    .filter((spec) => canSpawn || (spec.name !== "cotal_spawn" && spec.name !== "cotal_persona"))
+    .filter((spec) => canSpawn || !["cotal_manager_status", "cotal_spawn", "cotal_persona"].includes(spec.name))
     .map((spec) => ({ ...spec, schema: z.strictObject(spec.schema ?? {}) }));
 }

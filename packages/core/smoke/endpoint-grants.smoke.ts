@@ -85,10 +85,10 @@ c("baseline: the reply rail is ALWAYS granted (no capability required)",
   baseline.sub.length === 1 && baseline.sub[0] === epCallerReplyGrantRow("demo", caller));
 c("baseline: no journal rows (the baseline is ephemeral request forms only)",
   baseline.pub.every((r) => !r.includes(".epj.")));
-c("the spawn set: spawn is UNTARGETED (virgin child); despawn/attach ride owner-mode (no owner-stop synonym of despawn); define-persona + inspect ride untargeted (the 1c table's connector reads)",
-  spawnCallerCapabilities("u_abc").length === 5
+c("the spawn set: status/spawn are UNTARGETED; despawn/attach ride owner-mode (no owner-stop synonym of despawn); define-persona + inspect ride untargeted (the connector reads)",
+  spawnCallerCapabilities("u_abc").length === 6
   && epCallerGrantRows("demo", spawnCallerCapabilities("u_abc"), caller).pub.join("|")
-  === `cotal.demo.ep.one.manager.spawn.u_abc.cli.${UID}.*|cotal.demo.ep.one.manager.despawn.owner.u_abc.u_abc.cli.${UID}.*|cotal.demo.ep.one.manager.attach.owner.u_abc.u_abc.cli.${UID}.*|cotal.demo.ep.one.manager.define-persona.u_abc.cli.${UID}.*|cotal.demo.ep.one.manager.inspect.u_abc.cli.${UID}.*`);
+  === `cotal.demo.ep.one.manager.spawn.u_abc.cli.${UID}.*|cotal.demo.ep.one.manager.despawn.owner.u_abc.u_abc.cli.${UID}.*|cotal.demo.ep.one.manager.attach.owner.u_abc.u_abc.cli.${UID}.*|cotal.demo.ep.one.manager.status.u_abc.cli.${UID}.*|cotal.demo.ep.one.manager.define-persona.u_abc.cli.${UID}.*|cotal.demo.ep.one.manager.inspect.u_abc.cli.${UID}.*`);
 // THE REGRESSION GUARD FOR THE `input` PLACEMENT, and it is a cell rather than a comment because
 // the mistake it stops is a ONE-WORD edit that reads as tidying: adding "input" to
 // SPAWN_OWNER_LIFECYCLE_COMMANDS beside its two obvious siblings. That edit hands every

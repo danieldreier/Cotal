@@ -84,6 +84,13 @@ const ANNOTATIONS = {
     notes: "If the channel replays, recent history lands in your inbox marked as catch-up.",
   },
   cotal_leave: { effect: "unsubscribes you from a channel", availability: "always" },
+  cotal_manager_status: {
+    effect: "read-only",
+    availability:
+      "capability-gated: injected only for personas declaring `capabilities: [spawn]` (auth mode); open mode is permissive",
+    notes:
+      "Probes the real typed manager handler under a caller-set bound; broker-confirmed zero subscribers and an elapsed reply deadline are reported separately.",
+  },
   cotal_spawn: {
     effect: "starts a new agent process via the manager",
     availability:
@@ -172,7 +179,7 @@ lines.push(
 );
 lines.push("");
 lines.push(
-  "`cotal_orientation` is the entry point. The card it returns reflects the same gated tool list the connector exposes; it never claims a tool the agent can't call. In auth mode the manager-op tools (`cotal_spawn`, `cotal_persona`) are injected only for personas declaring `capabilities: [spawn]` ([identity & auth](identity-and-auth.md)).",
+  "`cotal_orientation` is the entry point. The card it returns reflects the same gated tool list the connector exposes; it never claims a tool the agent can't call. In auth mode the manager-op tools (`cotal_manager_status`, `cotal_spawn`, `cotal_persona`) are injected only for personas declaring `capabilities: [spawn]` ([identity & auth](identity-and-auth.md)).",
 );
 lines.push("");
 lines.push(

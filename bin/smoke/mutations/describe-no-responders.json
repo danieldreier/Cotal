@@ -1,0 +1,25 @@
+{
+  "suite": "packages/core/smoke/endpoint-verbs.smoke.ts",
+  "guard": "the describe bootstrap carries the reserved reply-to so an absent endpoint produces broker-attested no-responders instead of consuming the full reply deadline",
+  "command": "PATH=/workspace/state/tools/nats-server-v2.12.12-b:$PATH corepack pnpm smoke:ep-verbs",
+  "completionMarker": "ENDPOINT VERBS SMOKE",
+  "proveWith": "node scripts/mutation-proof.mjs --config bin/smoke/mutations/describe-no-responders.json",
+  "why": [
+    "Every generic manager invocation starts with describe. epCall already used the reserved",
+    "no-responders sentinel, but describe did not request broker feedback at all, so a missing",
+    "manager and a subscribed-but-silent handler both became the same full-budget timeout.",
+    "This mutation restores that exact omission. The smoke uses a real NATS broker and an actually",
+    "absent endpoint; the named cell requires the broker's immediate unavailable verdict and its",
+    "no-responders observation rather than a hand-built error."
+  ],
+  "mutations": [
+    {
+      "name": "describe publishes without the reserved no-responders reply-to",
+      "file": "packages/core/src/endpoint-invoke.ts",
+      "find": "      nc.publish(subject, enc.encode(JSON.stringify(env)), { reply: noRespReplyTo });",
+      "replace": "      nc.publish(subject, enc.encode(JSON.stringify(env)));",
+      "expectRed": "describe with no subscriber gets the broker's immediate `unavailable`, not a reply deadline",
+      "cell": "describe with no subscriber gets the broker's immediate `unavailable`, not a reply deadline"
+    }
+  ]
+}

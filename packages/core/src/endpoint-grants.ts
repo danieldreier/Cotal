@@ -177,11 +177,14 @@ export const SPAWN_OWNER_LIFECYCLE_COMMANDS = Object.freeze(["despawn", "attach"
  *  rides OWNER reach on a user mesh (a bearer's one deterministic path). Granting only `any` there
  *  would leave `cotal input` broker-denied on exactly the mesh mode the feature is for. */
 export const OPERATOR_INPUT_COMMANDS = Object.freeze(["input"] as const);
-/** The spawn capability's UNTARGETED additions (the 1c grant-migration table): the connector's
- *  persona write (`define-persona`, caller-scoped by the pinned triple) and per-agent status read
- *  (`inspect` - the responder narrows the view to the caller's owner domain, like `ps`). These
- *  ride the v0.3 privileged tier today; minting them with `spawn` keeps that tier's surface 1:1. */
-export const SPAWN_SERVICE_COMMANDS = Object.freeze(["define-persona", "inspect"] as const);
+/** The spawn capability's UNTARGETED additions (the 1c grant-migration table): one bounded
+ *  control-readiness read (`status`), the connector's persona write (`define-persona`,
+ *  caller-scoped by the pinned triple), and per-agent status read (`inspect` - the responder
+ *  narrows the view to the caller's owner domain, like `ps`). `status` is deliberately the only
+ *  new manager.read row: advertising `cotal_manager_status` to spawn-capable connectors without
+ *  its exact request row lets describe succeed but the broker deny the probe before the typed
+ *  handler. It does not imply `ps` or `models`. */
+export const SPAWN_SERVICE_COMMANDS = Object.freeze(["status", "define-persona", "inspect"] as const);
 
 // ---- operator INSTRUMENT capability sets (the 1c grant-migration table's admin row) --------------
 /** The manager endpoint's read commands (`manager.read` class). */
@@ -285,10 +288,12 @@ export function baselineCallerCapabilities(): EpCapability[] {
   ];
 }
 
-/** The `spawn` capability's addition (Appendix B): the manager endpoint's lifecycle commands.
+/** The `spawn` capability's addition (Appendix B): the manager endpoint's lifecycle commands plus
+ *  its exact connector service rows (`status`, `define-persona`, `inspect`).
  *  `spawn` (creation) is UNTARGETED — a virgin child has no lifecycle UID to resolve against the
  *  current mapping, so an owner-mode row would be un-invokable under the verb grammar (§13.2). The
- *  three that act on an existing agent ride owner mode, target owner pinned to the CALLER's own
+ *  two lifecycle commands that act on an existing agent ride owner mode, target owner pinned to
+ *  the CALLER's own
  *  (§13.2: an owner-mode standing mint never names a foreign owner). */
 export function spawnCallerCapabilities(callerOwner: string): EpCapability[] {
   return [

@@ -4,7 +4,7 @@
 
 The tools are defined once, platform-neutrally, in `@cotal-ai/connector-core` and rendered onto each host's native tool API (an MCP server for [Claude Code](connect-claude.md) and [Codex](connect-codex.md), native plugin tools for [OpenCode](connect-opencode.md), [Hermes](connect-hermes.md), and [pi](connect-pi.md)), so the surface cannot drift across connectors. Argument defaults shown below assume the standard `general` setup; channel-scoped calls are bounded by your ACLs ([channels & permissions](channels-and-permissions.md)).
 
-`cotal_orientation` is the entry point. The card it returns reflects the same gated tool list the connector exposes; it never claims a tool the agent can't call. In auth mode the manager-op tools (`cotal_spawn`, `cotal_persona`) are injected only for personas declaring `capabilities: [spawn]` ([identity & auth](identity-and-auth.md)).
+`cotal_orientation` is the entry point. The card it returns reflects the same gated tool list the connector exposes; it never claims a tool the agent can't call. In auth mode the manager-op tools (`cotal_manager_status`, `cotal_spawn`, `cotal_persona`) are injected only for personas declaring `capabilities: [spawn]` ([identity & auth](identity-and-auth.md)).
 
 **Arguments are closed.** Every tool accepts exactly the arguments listed for it and REFUSES any other key, including tools that take no arguments at all. A key that is not in the table is an error, not something to be quietly dropped — so a call that names an identity (`owner`, `actor`, `caller`) is turned away rather than run as if it had never named one. The identity a tool acts under comes from the connector's own credential and can never be supplied as an argument. Every refusal names the offending keys, but its shape depends on who refuses: where the host validates the published schema (Claude Code, Codex, pi) you get that host's own schema error, and where it does not (OpenCode, Hermes) the connector refuses at its own dispatch and additionally lists the arguments the tool does accept, or says it takes none. In both cases the call did not run.
 
@@ -24,6 +24,7 @@ The tools are defined once, platform-neutrally, in `@cotal-ai/connector-core` an
 | [`cotal_channel_mode`](#cotalchannelmode) | silence or mute a channel | sets your own per-channel receive preference (quiet / muted / normal) |
 | [`cotal_join`](#cotaljoin) | join a channel | subscribes you to a channel |
 | [`cotal_leave`](#cotalleave) | leave a channel | unsubscribes you from a channel |
+| [`cotal_manager_status`](#cotalmanagerstatus) | probe manager control readiness | read-only |
 | [`cotal_spawn`](#cotalspawn) | spawn a new teammate | starts a new agent process via the manager |
 | [`cotal_feedback`](#cotalfeedback) | send beta feedback | sends data to an external HTTPS intake (network egress) |
 | [`cotal_despawn`](#cotaldespawn) | stop a teammate | stops a teammate (or yourself) |
@@ -226,6 +227,20 @@ Unsubscribe from a channel mid-session; you stop receiving its messages. You can
 | Argument | Type | Required | Meaning |
 |---|---|---|---|
 | `channel` | string | yes | The channel to leave. |
+
+## `cotal_manager_status`
+
+*probe manager control readiness*
+
+Run one bounded, read-only request through the manager's real typed control handler. This is stronger than Kubernetes readiness, roster presence, or a registered service row. It distinguishes a broker-confirmed zero-subscriber result from a request that reached its deadline without a reply; the latter may be a slow or stalled handler and has unknown effect outcome. Requires the spawn capability on authenticated meshes.
+
+- **Side-effect:** read-only.
+- **Available:** capability-gated: injected only for personas declaring `capabilities: [spawn]` (auth mode); open mode is permissive.
+- Probes the real typed manager handler under a caller-set bound; broker-confirmed zero subscribers and an elapsed reply deadline are reported separately.
+
+| Argument | Type | Required | Meaning |
+|---|---|---|---|
+| `timeout_ms` | number | no | Bound for the read-only manager status probe in milliseconds (default 2000; 100-10000). |
 
 ## `cotal_spawn`
 

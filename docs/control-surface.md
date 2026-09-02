@@ -49,6 +49,22 @@ the fetched input schema before publish. Every built-in manager command uses thi
 trust chain, so there is nothing the built-ins can reach that a described contract cannot.
 See [SPEC §13.7](../SPEC.md#137-contracts-and-discovery) and [cli.md](cli.md).
 
+## Control readiness
+
+Roster presence, a service-registry row, and a container health check do not prove that the
+manager's command handler is answering. A spawn-capable connected agent can call
+`cotal_manager_status` to run one bounded, read-only `manager.status` request through the same
+describe-and-invoke path used by `cotal_spawn`.
+The spawn credential carries exactly that one readiness read; this does not grant the other
+`manager.read` commands such as `ps` or `models`.
+
+The failure distinguishes what the caller actually observed. A broker `no responders` answer
+means the request had zero subscribers and was not executed. A reply deadline means only that no
+attributable reply arrived in time: a subscribed handler may be slow or stalled, or the publish may
+have been denied. Its effect outcome is unknown, so an effecting command must not be retried until
+its outcome is reconciled. From the caller, a connected-but-hung handler and a slow correct handler
+remain indistinguishable; the probe reports that uncertainty rather than guessing.
+
 ## Spawn is a goal
 
 Long-running commands are **actions** ([SPEC §13.6](../SPEC.md#136-composites)): the caller

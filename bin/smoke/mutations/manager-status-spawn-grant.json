@@ -1,0 +1,36 @@
+{
+  "suite": "implementations/manager/smoke/manager-service-invoke.smoke.ts",
+  "guard": "a connector tool advertised under the spawn capability has the exact manager.status request grant and reaches the real typed handler",
+  "command": "corepack pnpm --filter @cotal-ai/core build && corepack pnpm smoke:ep-grants",
+  "completionMarker": "ENDPOINT GRANTS SMOKE",
+  "proveWith": "node scripts/mutation-proof.mjs --config bin/smoke/mutations/manager-status-spawn-grant.json",
+  "why": [
+    "Describe is baseline authority, so a spawn credential can discover manager.status even when",
+    "the broker will deny the invocation itself. A stubbed MeshAgent cannot expose that mismatch.",
+    "The first mutation runs a real JWT broker, Manager, and MeshAgent with only capabilities:[spawn]",
+    "and requires the typed status reply. The second independently pins the exact grant set, including",
+    "that status does not widen into the rest of manager.read."
+  ],
+  "mutations": [
+    {
+      "name": "spawn credential loses the exact manager.status readiness row",
+      "file": "packages/core/src/endpoint-grants.ts",
+      "find": "export const SPAWN_SERVICE_COMMANDS = Object.freeze([\"status\", \"define-persona\", \"inspect\"] as const);",
+      "replace": "export const SPAWN_SERVICE_COMMANDS = Object.freeze([\"define-persona\", \"inspect\"] as const);",
+      "command": "corepack pnpm --filter @cotal-ai/core build && PATH=/workspace/state/tools/nats-server-v2.12.12-b:$PATH corepack pnpm smoke:manager-service-invoke",
+      "expectRed": "spawn-capability connector reaches the real typed manager.status handler without an override",
+      "completionMarker": "invoking a command not in the resolved surface is not-found",
+      "cell": "spawn-capability connector reaches the real typed manager.status handler without an override",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
+    },
+    {
+      "name": "exact spawn grant set omits manager.status",
+      "file": "packages/core/src/endpoint-grants.ts",
+      "find": "export const SPAWN_SERVICE_COMMANDS = Object.freeze([\"status\", \"define-persona\", \"inspect\"] as const);",
+      "replace": "export const SPAWN_SERVICE_COMMANDS = Object.freeze([\"define-persona\", \"inspect\"] as const);",
+      "expectRed": "the spawn set: status/spawn are UNTARGETED",
+      "cell": "the spawn set: status/spawn are UNTARGETED",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
+    }
+  ]
+}

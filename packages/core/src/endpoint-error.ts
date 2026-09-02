@@ -73,17 +73,34 @@ export function respondedButUnbound(e: unknown): boolean {
  */
 export const EP_UNANSWERED = "ai.cotal.ep.unanswered";
 
-/** The {@link EP_UNANSWERED} payload: the call that drew no reply. */
+/** What the caller actually observed when no attributable reply arrived. `no-responders` is the
+ * broker's reserved 503 sentinel and proves the request reached zero subscribers; `reply-deadline`
+ * proves only that the caller's bounded wait ended. Kept separate because the former is
+ * `not-executed`, while the latter's effect outcome is unknown (SPEC 13.3). */
+export type EpUnansweredObservation = "no-responders" | "reply-deadline";
+
+/** The {@link EP_UNANSWERED} payload: the call that drew no reply. `observation` is optional for
+ * source compatibility with errors constructed by older clients; current producers always set it. */
 export interface EpUnansweredDetail extends EpErrorDetail {
   kind: typeof EP_UNANSWERED;
   endpoint: string;
   command: string;
+  observation?: EpUnansweredObservation;
 }
 
 /** True iff `e` carries the {@link EP_UNANSWERED} marker: no valid reply reached the caller (no
  *  responder, or the deadline elapsed with nothing attributed to the request). */
 export function unansweredRequest(e: unknown): boolean {
   return e instanceof EpEnvelopeError && (e.details ?? []).some((d) => d.kind === EP_UNANSWERED);
+}
+
+/** The transport observation attached to an unanswered call, when emitted by a current producer. */
+export function unansweredObservation(e: unknown): EpUnansweredObservation | undefined {
+  if (!(e instanceof EpEnvelopeError)) return undefined;
+  const detail = (e.details ?? []).find((d) => d.kind === EP_UNANSWERED) as EpUnansweredDetail | undefined;
+  return detail?.observation === "no-responders" || detail?.observation === "reply-deadline"
+    ? detail.observation
+    : undefined;
 }
 
 /**

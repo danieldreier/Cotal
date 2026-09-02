@@ -54,17 +54,19 @@ const presence = (id: string, name: string, role?: string, status = "idle") => (
   status,
 });
 
-// 1 — gated tool list: orientation is first; spawn/persona hidden without the capability, shown with it.
+// 1 — gated tool list: orientation is first; manager-control tools are hidden without the
+// capability and shown with it.
 {
   const open = cotalToolSpecs(cfg({ creds: undefined }));
   assert.equal(open[0].name, "cotal_orientation", "orientation should be the first tool");
 
   const noSpawn = cotalToolSpecs(cfg({ creds: "CREDS", capabilities: [] })).map((s) => s.name);
+  assert.ok(!noSpawn.includes("cotal_manager_status"), "no spawn cap ⇒ cotal_manager_status hidden");
   assert.ok(!noSpawn.includes("cotal_spawn"), "no spawn cap ⇒ cotal_spawn hidden");
   assert.ok(!noSpawn.includes("cotal_persona"), "no spawn cap ⇒ cotal_persona hidden");
 
   const withSpawn = cotalToolSpecs(cfg({ creds: "CREDS", capabilities: ["spawn"] })).map((s) => s.name);
-  assert.ok(withSpawn.includes("cotal_spawn") && withSpawn.includes("cotal_persona"), "spawn cap ⇒ both shown");
+  assert.ok(withSpawn.includes("cotal_manager_status") && withSpawn.includes("cotal_spawn") && withSpawn.includes("cotal_persona"), "spawn cap ⇒ all manager-control tools shown");
 }
 
 // 2 — identity + access mapping, and auth vs open.
@@ -162,6 +164,7 @@ const presence = (id: string, name: string, role?: string, status = "idle") => (
   assert.ok(noCap.userAuth, "740:user-auth config actually parsed a userAuth plane");
   assert.ok(!names(noCap).includes("cotal_spawn"), "740:user-auth without the spawn capability must not be advertised cotal_spawn");
   assert.ok(!names(noCap).includes("cotal_persona"), "740:user-auth without the spawn capability must not be advertised cotal_persona");
+  assert.ok(!names(noCap).includes("cotal_manager_status"), "740:user-auth without the spawn capability must not be advertised cotal_manager_status");
   assert.ok(!cardTools(noCap).includes("cotal_spawn"), "740:the orientation card must not claim cotal_spawn for a user-auth agent without the capability");
   assert.ok(!cardTools(noCap).includes("cotal_persona"), "740:the orientation card must not claim cotal_persona for a user-auth agent without the capability");
   // The card's own access line is the same expression: a user-auth mesh IS broker-enforced.
@@ -175,6 +178,7 @@ const presence = (id: string, name: string, role?: string, status = "idle") => (
   const withCap = userAuthCfg("spawn");
   assert.ok(names(withCap).includes("cotal_spawn"), "740:user-auth with the spawn capability must still be advertised cotal_spawn");
   assert.ok(names(withCap).includes("cotal_persona"), "740:user-auth with the spawn capability must still be advertised cotal_persona");
+  assert.ok(names(withCap).includes("cotal_manager_status"), "740:user-auth with the spawn capability must still be advertised cotal_manager_status");
 
   // 6c — REGRESSION GUARD. Open mode mints no creds and has no user-auth plane; the wire grants
   // nobody anything there, so everything stays visible. This cell passes BEFORE and AFTER the gate
@@ -187,6 +191,7 @@ const presence = (id: string, name: string, role?: string, status = "idle") => (
   assert.equal(open.userAuth, undefined);
   assert.ok(names(open).includes("cotal_spawn"), "740:open mode must still be advertised cotal_spawn with no capability");
   assert.ok(names(open).includes("cotal_persona"), "740:open mode must still be advertised cotal_persona with no capability");
+  assert.ok(names(open).includes("cotal_manager_status"), "740:open mode must still be advertised cotal_manager_status with no capability");
   assert.equal(buildOrientation(agentStub(), open, [], 1).access.authMode, false, "740:open mode is still open mode on the card");
 
   const tokenMode = configFromEnv({ COTAL_NAME: "alice", COTAL_SPACE: "demo", COTAL_TOKEN: "shared" });
