@@ -69,9 +69,14 @@ const check = (name: string, condition: boolean, actual?: unknown): void => {
 };
 
 try {
+  // Every RUNTIME dependency of `cotal-ai` must be in the closure: npm resolves what the packed
+  // manifests declare, and one missing member sends it to the registry for a version that was never
+  // published. `@cotal-ai/cpn-runtime` is one — a `dependencies` entry of `bin/package.json` that
+  // arrived with the CPN connector line, on which this gateway-line suite had never run.
   const dirs = [
     "bin", "packages/core", "packages/workspace", "implementations/cli", "implementations/manager",
     "implementations/delivery", "implementations/auth", "extensions/connector-core", "extensions/mcp",
+    "extensions/cpn-runtime",
   ];
   for (const dir of dirs) execFileSync("pnpm", ["-C", join(REPO, dir), "pack", "--pack-destination", tarballsDir], { stdio: ["ignore", "ignore", "inherit"] });
   const tarballs = readdirSync(tarballsDir).filter((name) => name.endsWith(".tgz")).map((name) => join(tarballsDir, name));
