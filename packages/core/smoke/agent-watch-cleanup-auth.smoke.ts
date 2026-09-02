@@ -154,6 +154,36 @@ try {
   }
   check("stop leaves no presence watcher for the lifecycle", !presenceAfter.includes(ownPresence), presenceAfter);
   check("stop leaves no channel watcher for the lifecycle", !channelsAfter.includes(ownChannels), channelsAfter);
+
+  // Missing lifecycle authority must fail before any stock ordered watch can be created. Cover both
+  // selectors: the ordinary agent presentation and the explicit non-agent composition seam used by
+  // user-mode CLI observers. A selector that checks UID too early silently falls back to kv.watch(),
+  // generating oc_* and turning a configuration error into a broker authorization side effect.
+  for (const mode of ["automatic agent", "explicit endpoint"] as const) {
+    const missingErrors: string[] = [];
+    const missing = new CotalEndpoint({
+      space,
+      servers,
+      creds,
+      channels: [],
+      consume: false,
+      registerPresence: false,
+      watchPresence: true,
+      watchChannels: false,
+      ...(mode === "explicit endpoint" ? { lifecyclePinnedKvWatches: true } : {}),
+      card: { id: identity.id, name: `missing-${mode}`, kind: mode === "automatic agent" ? "agent" : "endpoint" },
+    });
+    missing.on("error", (err: Error) => missingErrors.push(err.message));
+    let missingError = "";
+    try { await missing.start(); } catch (err) { missingError = (err as Error).message; }
+    await missing.stop().catch(() => {});
+    check(`${mode} without lifecycleUid fails loud at the pinned watcher boundary`,
+      /authenticated presence KV watch requires this endpoint's lifecycleUid/.test(missingError),
+      { missingError, missingErrors });
+    const afterMissing = await consumers(presenceStream);
+    check(`${mode} without lifecycleUid creates no generated oc_* fallback`,
+      !afterMissing.some((name) => name.startsWith("oc_")), afterMissing);
+  }
 } finally {
   if (broker.exitCode === null) await killAndAwaitExit(broker, "SIGTERM");
   releaseBroker();

@@ -4364,9 +4364,10 @@ export class CotalEndpoint extends EventEmitter {
     // callers are also minted through the agent profile but legitimately present as `endpoint`
     // (for example the CLI's invisible transient roster observer), so their composition root opts
     // in explicitly. Never infer from lifecycleUid alone: managers and other service endpoints
-    // have lifecycle UIDs but do not carry this agent-only DELETE authority.
+    // have lifecycle UIDs but do not carry this agent-only DELETE authority. Deliberately do NOT
+    // test ownLifecycleUid here: selecting this path first lets startLifecyclePinnedAgentWatch's
+    // requireLifecycleUid fail loud instead of silently falling back to generated oc_* consumers.
     return this.authed
-      && this.ownLifecycleUid !== undefined
       && (this.card.kind === "agent" || this.lifecyclePinnedKvWatches);
   }
 
