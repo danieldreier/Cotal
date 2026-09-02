@@ -34,6 +34,72 @@ async function waitFor(name: string, read: () => boolean, timeout = 15_000): Pro
   const deadline = Date.now() + timeout;
   while (!read()) { if (Date.now() > deadline) throw new Error(`timed out waiting for ${name}`); await sleep(50); }
 }
+/** Every long-lived process this suite starts, so teardown can wait for them instead of racing
+ *  their exit. */
+const spawned: ChildProcess[] = [];
+function track(child: ChildProcess): ChildProcess { spawned.push(child); return child; }
+async function settleChildren(): Promise<void> {
+  for (const child of spawned) {
+    if (child.exitCode !== null || child.signalCode !== null) continue;
+    child.kill("SIGKILL");
+    await Promise.race([once(child, "exit"), sleep(2_000)]);
+  }
+}
+/** Remove the disposable tree. A process we do not own (npm's own worker, the broker's store) can
+ *  still be releasing a directory in the moment after its parent exits, which surfaces as
+ *  ENOTEMPTY/EBUSY and used to abort the run AFTER every assertion had already passed - so the
+ *  suite ended on a stack trace instead of a verdict. Wait the children out, retry briefly, and
+ *  report rather than abort: the tree is under the OS temp directory and the assertions are the
+ *  verdict, not the cleanup. */
+async function removeTree(dir: string): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try { rmSync(dir, { recursive: true, force: true }); return; } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ENOTEMPTY" && code !== "EBUSY" && code !== "EPERM") throw e;
+      await sleep(250);
+    }
+  }
+  console.error(`  ! could not remove the disposable tree at ${dir}; the OS temp directory owns it now`);
+}
+/** One newline-delimited line of the MCP stdio channel that is a JSON-RPC frame. */
+function isJsonRpcFrame(line: string): boolean {
+  if (!line.trim()) return false;
+  try { return (JSON.parse(line) as { jsonrpc?: string })?.jsonrpc === "2.0"; } catch { return false; }
+}
+/** Speak the MCP stdio handshake to the installed binary over a pipe WE own, and keep every byte
+ *  the child wrote. The SDK client cannot take this measurement: its transport consumes stdout and
+ *  hands back parsed frames, so bytes printed ahead of the first frame are invisible to it and only
+ *  ever surface as a client that fails to initialize. On a COLD config root the boot reconcile seeds
+ *  the connectors and re-emits its seed child's surface, and stdout here IS the protocol channel -
+ *  that is the case this measures. */
+async function coldRootHandshake(args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string; seconds: number }> {
+  const child = track(spawn(process.execPath, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] }));
+  let stdout = ""; let stderr = "";
+  child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+  child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+  const started = Date.now();
+  const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "cold-root-stdout-probe", version: "0.0.0" } } };
+  child.stdin?.write(`${JSON.stringify(initialize)}\n`);
+  let exited: string | undefined;
+  child.on("exit", (code, signal) => { exited = `exit code ${code}, signal ${signal}`; });
+  let failure: Error | undefined;
+  try {
+    // A cold seed installs every packed connector with npm and is minutes, not seconds, on a cold
+    // npm cache; the deadline covers that rather than the handshake, which is immediate once the
+    // gateway is up. An early child exit is a separate outcome from a slow one and is reported as
+    // itself, so a crash can never be read as "still seeding".
+    await waitFor("the cold-root gateway's first stdio line", () => stdout.includes("\n") || exited !== undefined, 600_000);
+    if (exited && !stdout.includes("\n")) throw new Error(`the cold-root gateway exited before its first stdio line (${exited})`);
+  } catch (e) {
+    failure = e as Error;
+  }
+  const seconds = (Date.now() - started) / 1000;
+  child.stdin?.end();
+  child.kill("SIGTERM");
+  await Promise.race([once(child, "exit"), sleep(10_000)]);
+  if (failure) throw new Error(`${failure.message} after ${seconds.toFixed(1)}s; stdout so far: ${JSON.stringify(stdout.slice(0, 400))}; stderr tail: ${JSON.stringify(stderr.slice(-1200))}`);
+  return { stdout, stderr, seconds };
+}
 function persona(root: string): void {
   mkdirSync(join(root, ".cotal", "agents"), { recursive: true });
   const contents = "---\nname: gateway\nrole: operator\nsubscribe: [general]\nallowSubscribe: [general]\nallowPublish: [general]\n---\ninstalled gateway smoke persona\n";
@@ -117,9 +183,9 @@ try {
         auth = await createSpaceAuth(space); saveSpaceAuth(authDir(root), auth);
         const brokerConfig = join(root, "nats.conf");
         writeFileSync(brokerConfig, serverConfig(auth, [auth], { host: "127.0.0.1", port, storeDir: join(root, "js"), transport: { kind: "plaintext" } }));
-        broker = spawn("nats-server", ["-c", brokerConfig], { stdio: "ignore" });
+        broker = track(spawn("nats-server", ["-c", brokerConfig], { stdio: "ignore" }));
       } else {
-        broker = spawn("nats-server", ["-js", "-a", "127.0.0.1", "-p", String(port), "-sd", join(root, "js")], { stdio: "ignore" });
+        broker = track(spawn("nats-server", ["-js", "-a", "127.0.0.1", "-p", String(port), "-sd", join(root, "js")], { stdio: "ignore" }));
       }
       await reachable(server);
       const provisioner = auth ? await mintCreds(auth, newIdentity(), "provisioner") : undefined;
@@ -146,6 +212,26 @@ try {
       // It must resolve the operator's current mesh plus ordinary `default`
       // persona, rather than silently depending on a host working directory or
       // requiring client-side broker/identity flags.
+      // The config root is still cold here: nothing has run the installed binary against it, so the
+      // first `cotal mcp` pays the boot reconcile that seeds the connectors. Measure that run's raw
+      // stdout before handing the channel to the SDK client.
+      check(`${mode}: the config root is cold before the first gateway start`, !existsSync(installedExtension), installedExtension);
+      const coldHostCwd = join(base, `cold-mcp-host-${mode}`); mkdirSync(coldHostCwd, { recursive: true });
+      const cold = await coldRootHandshake([installedCotal, "mcp"], coldHostCwd, env);
+      // Non-vacuity FIRST, and deliberately stream-agnostic: it establishes that the seed ran, that
+      // it printed its `✓ added …` lines, and that the gateway came up - facts that hold whichever
+      // stream those bytes went to. Keeping this check indifferent to the stream is what makes the
+      // next one the assertion that fails when the routing regresses; a subject check that reds
+      // under the same mutation would hide which property actually broke.
+      const coldOutput = cold.stdout + cold.stderr;
+      check(`${mode}: the cold root's boot reconcile seeded the connectors and printed as it went`, existsSync(installedExtension) && /✓ added @cotal-ai\//.test(coldOutput) && coldOutput.includes("stdio gateway ready"), coldOutput.slice(-600));
+      const coldLines = cold.stdout.split("\n");
+      const frameAt = coldLines.findIndex(isJsonRpcFrame);
+      // The verdict: every byte the seed produced above went somewhere OTHER than stdout, so the
+      // first thing on the protocol channel is the gateway's own frame.
+      check(`${mode}: nothing precedes the gateway's first JSON-RPC frame on the MCP stdio channel`, frameAt === 0, { preamble: coldLines.slice(0, frameAt < 0 ? coldLines.length : frameAt), frameAt, seedLinesOnStderr: /✓ added @cotal-ai\//.test(cold.stderr) });
+      console.log(`  · ${mode}: cold seed to first stdio frame in ${cold.seconds.toFixed(1)}s`);
+
       const pluginHostCwd = join(base, `plugin-mcp-host-${mode}`); mkdirSync(pluginHostCwd, { recursive: true });
       transport = new StdioClientTransport({ command: process.execPath, args: [installedCotal, "mcp"], cwd: pluginHostCwd, env, stderr: "pipe" });
       client = new Client({ name: "installed-cotal-plugin-command-smoke", version: "0.0.0" });
@@ -161,12 +247,17 @@ try {
       // installed stdio command must work from an unrelated working directory.
       const hostCwd = join(base, `mcp-host-${mode}`); mkdirSync(hostCwd, { recursive: true });
       transport = new StdioClientTransport({ command: process.execPath, args: [installedCotal, "mcp", "--space", space, "--config", "gateway"], cwd: hostCwd, env, stderr: "pipe" });
-      const stderr: string[] = [];
-      transport.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk.toString()));
+      // Drained, not asserted: an undrained pipe eventually blocks the child. The claim this used to
+      // carry - "diagnostics stay off stdout" - is now measured on the STDOUT bytes themselves, in the
+      // cold-root probe above, which is the only place the claim can actually be checked.
+      transport.stderr?.on("data", () => {});
       client = new Client({ name: "installed-mcp-smoke", version: "0.0.0" });
       await client.connect(transport);
       const tools = await client.listTools();
       check(`${mode}: installed command resolves from an unrelated MCP host directory and discovers the real trusted-identity surface`, ["cotal_identity_open", "cotal_orientation", "cotal_inbox", "cotal_send"].every((name) => tools.tools.some((tool) => tool.name === name)));
+      // The CPN connector line contributes `cotal_channel_create`; nothing asserted that it survives
+      // the trip through the gateway's tool surface, which is the seam this merge creates.
+      check(`${mode}: installed gateway exposes the CPN channel-create tool in tools/list`, tools.tools.some((tool) => tool.name === "cotal_channel_create"), tools.tools.map((tool) => tool.name));
       const opened = receipt(await client.callTool({ name: "cotal_identity_open", arguments: { key: "operator" } }));
       const identity = String(opened.identity);
       check(`${mode}: installed gateway creates a fresh identity from the persona envelope`, /^[0-9a-f-]{36}$/.test(identity) && opened.outcome === "opened", opened);
@@ -184,7 +275,6 @@ try {
       await peer.unicast(principal!, `installed-${mode}-inbox`); await sleep(150);
       const firstPeek = await client.readResource({ uri: "cotal://inbox" }); const secondPeek = await client.readResource({ uri: "cotal://inbox" });
       check(`${mode}: installed inbox resource remains a repeated non-acking peek`, (firstPeek.contents[0]?.text ?? "").includes(`installed-${mode}-inbox`) && (secondPeek.contents[0]?.text ?? "").includes(`installed-${mode}-inbox`));
-      check(`${mode}: installed command keeps diagnostics off stdout`, stderr.some((line) => line.includes("stdio gateway ready")));
       await client.close(); client = undefined;
       await waitFor(`${mode} installed gateway EOF cleanup`, () => offline.has(principal!));
       check(`${mode}: installed gateway EOF retires the actual child identity`, offline.has(principal!));
@@ -194,9 +284,9 @@ try {
       // real Streamable HTTP SDK and the same real witness.
       if (mode === "open") {
         const httpPort = await freePort(); let httpStderr = "";
-        httpChild = spawn(process.execPath, [installedCotal, "mcp", "--transport", "http", "--port", String(httpPort), "--space", space, "--config", "gateway"], {
+        httpChild = track(spawn(process.execPath, [installedCotal, "mcp", "--transport", "http", "--port", String(httpPort), "--space", space, "--config", "gateway"], {
           cwd: root, env, stdio: ["ignore", "ignore", "pipe"],
-        });
+        }));
         httpChild.stderr?.on("data", (chunk: Buffer) => { httpStderr += chunk.toString(); });
         const httpUrl = `http://127.0.0.1:${httpPort}/mcp`;
         await waitFor("installed HTTP gateway readiness", () => httpStderr.includes(httpUrl));
@@ -271,7 +361,7 @@ try {
     let broker: ChildProcess | undefined; let peer: CotalEndpoint | undefined;
     try {
       persona(root); process.env.COTAL_HOME = cotalHome; process.chdir(root);
-      broker = spawn("nats-server", ["-js", "-a", "127.0.0.1", "-p", String(port), "-sd", join(root, "js")], { stdio: "ignore" });
+      broker = track(spawn("nats-server", ["-js", "-a", "127.0.0.1", "-p", String(port), "-sd", join(root, "js")], { stdio: "ignore" }));
       await reachable(server);
       await setupSpaceStreams({ servers: server, space });
       recordMesh({ space, server, root, mode: "open", tlsRequired: false, ts: new Date().toISOString() });
@@ -340,8 +430,9 @@ try {
   await cell("open");
   await cell("static");
   if (runRealCodex) await codexCell();
-  check("every installed open/static MCP cell completed", passed === (runRealCodex ? 37 : 31), passed);
+  check("every installed open/static MCP cell completed", passed === (runRealCodex ? 43 : 37), passed);
   console.log("MCP GATEWAY INSTALLED-ARTIFACT SMOKE OK ✅");
 } finally {
-  rmSync(base, { recursive: true, force: true });
+  await settleChildren();
+  await removeTree(base);
 }
