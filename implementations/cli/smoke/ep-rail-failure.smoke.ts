@@ -146,16 +146,22 @@ try {
       r.ok === false && r.unanswered === false && r.error?.startsWith("unavailable: the contract-store read for") === true && !VERDICT.test(r.error), r);
   }
   {
-    // Positive control: nobody serves `manager` at all. The describe deadline (10s in askManagerEp)
-    // is the unanswered producer on this path; the verdict is stated, unpinned and pinned.
+    // Positive control: nobody serves `manager` at all. The broker's authenticated 503
+    // no-responders control frame is the unanswered producer on this path; a reply deadline is a
+    // distinct outcome and must never be substituted for it. The verdict is stated, unpinned and
+    // pinned.
     const [r, p] = await Promise.all([
       askManager(SPACE, SERVER, "ps", undefined, {}, "any", 2000),
       askManager(SPACE, SERVER, "ps", undefined, {}, "any", 2000, { instanceId: IID }),
     ]);
     c("live: no responder at all, unpinned: unanswered=true and 'no manager reachable' (the positive control)",
-      r.ok === false && r.unanswered === true && r.error?.startsWith("no manager reachable on the ep rails (deadline-exceeded: no describe reply from manager") === true, r);
+      r.ok === false && r.unanswered === true
+        && r.error?.startsWith("no manager reachable on the ep rails (unavailable: no responder for manager.describe (SPEC 13.5))") === true
+        && !r.error.includes("no describe reply from manager"), r);
     c("live: no responder at all, pinned: unanswered=true and 'instance … did not answer'",
-      p.ok === false && p.unanswered === true && p.error?.startsWith(`manager instance ${IID} did not answer (deadline-exceeded: no describe reply from manager`) === true, p);
+      p.ok === false && p.unanswered === true
+        && p.error === `manager instance ${IID} did not answer (unavailable: no responder for manager.describe (SPEC 13.5))`
+        && !p.error.includes("no describe reply from manager"), p);
   }
   await nc.drain();
 } finally {
