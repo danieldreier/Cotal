@@ -17,6 +17,8 @@
  * This module imports nothing from config.ts. config.ts imports resolveCpnRenewal from here, and a
  * cycle would be a load-order hazard for a module that runs during launch.
  */
+import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { credsClaims, idFromCreds } from "@cotal-ai/core";
 
@@ -27,6 +29,10 @@ export const DEADLINE_MAX_SECONDS = 86400;
 /** Matches the launcher's `maxLaptopCredsBytes` (server.go:32); a larger body is refused there
  *  anyway, and refusing it here keeps the oversized value out of the request and out of any log. */
 export const MAX_CREDS_BYTES = 16384;
+export const HTTP_TIMEOUT_MS = 15_000;
+/** Bound each bearer-source process: neither a Keychain prompt nor a dead kubectl context may
+ * hold a renewal cycle indefinitely. */
+export const TOKEN_EXEC_TIMEOUT_MS = 10_000;
 
 /** The laptop principal kinds a MODEL session may renew as. The launcher also accepts `human`
  *  (server.go:64-69); it is deliberately absent here, because human enrollment is a separate helper
@@ -239,4 +245,146 @@ export class CpnAdoptError extends Error {
     super(message);
     this.name = "CpnAdoptError";
   }
+}
+
+const run = (cmd: string, args: string[]): Promise<string> =>
+  new Promise((resolve, reject) =>
+    execFile(cmd, args, { timeout: TOKEN_EXEC_TIMEOUT_MS, maxBuffer: 64 * 1024 }, (err, stdout, stderr) =>
+      err ? reject(new Error(stderr.trim() || err.message)) : resolve(stdout)));
+
+/** A launcher bearer is one opaque line. Retrieval output with whitespace or shell quoting is not
+ * a usable token and must not be mistaken for one. */
+function assertTokenShape(raw: string, source: string): string {
+  const token = raw.trim();
+  if (!token || /[\s"'\\]/.test(token))
+    throw new Error(`the launcher bearer from ${source} has an unexpected format`);
+  return token;
+}
+
+/** Resolve the bearer in the same order as the laptop launcher: an explicit file, macOS Keychain,
+ * then the cluster Secret. Configured sources that fail are retained in the final error by name;
+ * bearer material itself is never included. */
+export async function resolveLauncherToken(cfg: CpnRenewalConfig): Promise<string> {
+  const tried: string[] = [];
+  if (cfg.tokenFile) {
+    try {
+      return assertTokenShape(await readFile(cfg.tokenFile, "utf8"), `COTAL_CPN_LAUNCHER_TOKEN_FILE (${cfg.tokenFile})`);
+    } catch (e) {
+      tried.push(`token file ${cfg.tokenFile}: ${(e as Error).message}`);
+    }
+  }
+  try {
+    return assertTokenShape(
+      await run("security", ["find-generic-password", "-w", "-a", cfg.keychainAccount, "-s", cfg.keychainService]),
+      `the macOS Keychain item ${cfg.keychainService}`,
+    );
+  } catch (e) {
+    tried.push(`keychain ${cfg.keychainService}: ${(e as Error).message}`);
+  }
+  try {
+    const b64 = await run("kubectl", ["-n", cfg.kubeNamespace, "get", "secret", cfg.kubeSecret, "-o", "jsonpath={.data.token}"]);
+    return assertTokenShape(Buffer.from(b64.trim(), "base64").toString("utf8"), `secret ${cfg.kubeNamespace}/${cfg.kubeSecret}`);
+  } catch (e) {
+    tried.push(`kubectl secret ${cfg.kubeNamespace}/${cfg.kubeSecret}: ${(e as Error).message}`);
+  }
+  throw new Error(`could not retrieve the CPN launcher bearer token - ${tried.join("; ")}`);
+}
+
+export type RenewErrorCode =
+  | "network" | "unauthorized" | "invalid_request" | "credential_expired"
+  | "credential_rejected" | "grant_mismatch" | "launcher_error" | "issuer_error"
+  | "broker_unreachable" | "unexpected";
+
+export class RenewError extends Error {
+  constructor(readonly code: RenewErrorCode, readonly status: number | undefined, message: string) {
+    super(message);
+    this.name = "RenewError";
+  }
+}
+
+export interface RenewResult {
+  creds: string;
+  expiresAt: string;
+  lifecycleUid: string;
+  principalId: string;
+  requestId: string;
+  servers: string;
+}
+
+/** Preserve the held lease unless an explicit acceptance-run override requests another one. */
+export function renewDeadlineSeconds(
+  cfg: CpnRenewalConfig, heldLeaseSeconds: number | undefined, log: (line: string) => void,
+): number | undefined {
+  if (cfg.deadlineSeconds !== undefined) return cfg.deadlineSeconds;
+  if (heldLeaseSeconds === undefined) return undefined;
+  const clamped = Math.min(DEADLINE_MAX_SECONDS, Math.max(DEADLINE_MIN_SECONDS, heldLeaseSeconds));
+  if (clamped !== heldLeaseSeconds)
+    log(`CPN renewal: the held credential's lease is ${heldLeaseSeconds}s, outside the launcher's ` +
+      `[${DEADLINE_MIN_SECONDS}, ${DEADLINE_MAX_SECONDS}] bounds; asking for ${clamped}s instead`);
+  return clamped;
+}
+
+/** POST the exact launcher contract. `currentCreds` is serialized directly: callers must supply
+ * the held creds-file bytes unchanged, including LF line endings and its final newline. */
+export async function renewCredential(
+  cfg: CpnRenewalConfig, token: string, currentCreds: string, deadlineSeconds: number | undefined,
+): Promise<RenewResult> {
+  if (Buffer.byteLength(currentCreds, "utf8") > MAX_CREDS_BYTES)
+    throw new RenewError("invalid_request", undefined, `the held credential exceeds ${MAX_CREDS_BYTES} bytes; the launcher would refuse it`);
+
+  const body = JSON.stringify({
+    principal_id: cfg.principalId,
+    agent_kind: cfg.agentKind,
+    lifecycle_uid: cfg.lifecycleUid,
+    current_creds: currentCreds,
+    ...(deadlineSeconds !== undefined ? { deadline_seconds: deadlineSeconds } : {}),
+  });
+  let res: Response;
+  try {
+    res = await fetch(`${cfg.launcherUrl}/v1/laptop-principals/renew`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body,
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    });
+  } catch (e) {
+    throw new RenewError("network", undefined,
+      `the launcher at ${cfg.launcherUrl} is unreachable (${(e as Error).message}) - if this is a laptop, the port-forward is the usual cause`);
+  }
+  const text = await res.text();
+  if (res.status !== 201) {
+    let code: string | undefined;
+    try { code = (JSON.parse(text) as { error?: string }).error; } catch { /* non-JSON is meaningful */ }
+    throw new RenewError(mapRenewStatus(res.status, code), res.status,
+      `the launcher refused the renewal: HTTP ${res.status}${code ? ` ${code}` : ""}`);
+  }
+  let parsed: Partial<Record<string, string>>;
+  try { parsed = JSON.parse(text) as Partial<Record<string, string>>; } catch {
+    throw new RenewError("unexpected", 201, "the launcher's renewal response is not JSON");
+  }
+  for (const field of ["creds", "expires_at", "lifecycle_uid", "principal_id", "request_id", "servers"])
+    if (typeof parsed[field] !== "string" || !parsed[field])
+      throw new RenewError("unexpected", 201, `the launcher's renewal response is missing ${field}`);
+  if (parsed.lifecycle_uid !== cfg.lifecycleUid)
+    throw new RenewError("grant_mismatch", 201,
+      "the launcher returned a credential for a different lifecycle than this session holds");
+  return {
+    creds: parsed.creds!, expiresAt: parsed.expires_at!, lifecycleUid: parsed.lifecycle_uid!,
+    principalId: parsed.principal_id!, requestId: parsed.request_id!, servers: parsed.servers!,
+  };
+}
+
+/** Interpret the launcher verdict as the status-and-code pair it actually emits. */
+export function mapRenewStatus(status: number, code?: string): RenewErrorCode {
+  if (status === 401) return "unauthorized";
+  if (status === 400) return "invalid_request";
+  if (status === 409 && code === "credential_expired") return "credential_expired";
+  if (status === 422 && code === "credential_rejected") return "credential_rejected";
+  if (status === 422 && code === "grant_mismatch") return "grant_mismatch";
+  if (status === 500 && code === "request_id_failed") return "launcher_error";
+  if (status === 502 && code === "audit_write_failed") return "launcher_error";
+  if (status === 502 && code === "issuer_error") return "issuer_error";
+  if (status === 503 && code === "broker_unreachable") return "broker_unreachable";
+  if (status === 503 && code === "external_issuer_failed") return "issuer_error";
+  return "unexpected";
 }
