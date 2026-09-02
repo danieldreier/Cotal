@@ -12,7 +12,7 @@
  * outgoing request's nonce + id off the subject/body and synchronously delivers crafted replies.
  * No broker. Run: pnpm smoke:ep-invoke
  */
-import { describeEndpoint, epReplySubject, parseEpSubject, unansweredRequest, type EpCaller } from "../src/index.js";
+import { describeEndpoint, epReplySubject, parseEpSubject, unansweredRequest, unansweredObservation, type EpCaller } from "../src/index.js";
 
 const enc = new TextEncoder(), dec = new TextDecoder();
 let pass = 0, fail = 0;
@@ -125,6 +125,7 @@ console.log("describe REQUEST-BINDING (freelance HIGH #1):");
   let e: unknown;
   try { await describeEndpoint(nc, SPACE, ENDPOINT, CALLER, { deadlineMs: 300 }); } catch (err) { e = err; }
   c("the describe deadline is marked EP_UNANSWERED (nothing answered on our nonce)", unansweredRequest(e), e);
+  c("...and classified as a reply deadline, never broker-attested absence", unansweredObservation(e) === "reply-deadline", e);
 }
 
 // 4b) A responder ANSWERS the describe with ok:false: it is rethrown under the responder's own code

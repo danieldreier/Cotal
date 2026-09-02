@@ -20,10 +20,10 @@ import { join } from "node:path";
 import { connect, headers } from "@nats-io/transport-node";
 import type { NatsConnection, Subscription } from "@nats-io/transport-node";
 import {
-  isReachable, EpEnvelopeError, respondedButUnbound, EP_UNBOUND_RESPONDER, unansweredRequest, registryReadFailed, EP_UNANSWERED,
+  isReachable, EpEnvelopeError, respondedButUnbound, EP_UNBOUND_RESPONDER, unansweredRequest, unansweredObservation, registryReadFailed, EP_UNANSWERED,
   compileContract,
   parseEpSubject, epReplySubject, epeSubject, spacePrefix,
-  epCall, epCast, epWatchEvents, epScatter,
+  epCall, epCast, epWatchEvents, epScatter, describeEndpoint,
   type EpCaller, type EpVerbOp, type ParsedEpRequest, type FrozenInstance, type EpAttributedEvent,
   type EpRegistrationState,
 } from "../src/index.js";
@@ -306,6 +306,17 @@ try {
     const e = await caught(() => epCall(nc, SPACE, { mode: "inst", instanceId: "9".repeat(26), epoch: 1 }, opFor(), { deadlineMs: 400 }));
     const d = e instanceof EpEnvelopeError ? (e.details ?? []).find((x) => x.kind === EP_UNANSWERED) : undefined;
     c("no-responder `unavailable` is marked EP_UNANSWERED with the call it names", unansweredRequest(e) && d?.endpoint === ENDPOINT && d?.command === "ping", e);
+    c("...and records the broker's no-responders observation (not-executed)", unansweredObservation(e) === "no-responders", e);
+  }
+  {
+    // Describe is the bootstrap for every generic invoke, including the read-only manager-control
+    // readiness probe. It must carry the same reserved reply-to as epCall or an ABSENT endpoint
+    // burns the whole deadline and becomes indistinguishable from a subscribed-but-stalled handler.
+    const e = await caught(() => describeEndpoint(nc, SPACE, "absent", opFor().caller, { deadlineMs: 400 }));
+    c("describe with no subscriber gets the broker's immediate `unavailable`, not a reply deadline",
+      e instanceof EpEnvelopeError && e.code === "unavailable", e);
+    c("...and records no-responders so a readiness probe can say not-executed",
+      unansweredObservation(e) === "no-responders", e);
   }
   {
     // A selected responder knows the nonce and can forge a 503 status header on its OWN normal reply
@@ -353,6 +364,7 @@ try {
     // The reply deadline elapsing is the other producer that observed silence: marked EP_UNANSWERED.
     const e = await caught(() => epCall(nc, SPACE, { mode: "inst", instanceId: IID, epoch: 3 }, opFor(), { deadlineMs: 250 }));
     c("reply-deadline `deadline-exceeded` is marked EP_UNANSWERED", unansweredRequest(e), e);
+    c("...and records reply-deadline rather than claiming zero subscribers", unansweredObservation(e) === "reply-deadline", e);
     await sub.drain();
   }
   await rejects("epCall whose args fail its own input contract refuses bad-request BEFORE publish",

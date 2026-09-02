@@ -29,6 +29,7 @@
  */
 import { EpEnvelopeError, EP_UNANSWERED, EP_UNBOUND_RESPONDER } from "@cotal-ai/core";
 import { MeshAgent } from "../src/agent.js";
+import { cotalToolSpecs } from "../src/tool-specs.js";
 import type { AgentConfig } from "../src/config.js";
 
 let pass = 0, fail = 0;
@@ -67,14 +68,20 @@ console.log("the verdict comes from the marker, not the code:");
 
 // 1. The live change. Broker no-responders is `unavailable` and carries the marker; the old
 //    code-keyed branch printed the bare code and dropped the one explanation that was certain.
-const noResponders = await render(new EpEnvelopeError("unavailable", "no responder for manager.purge (SPEC 13.5)", [unanswered]));
+const noResponders = await render(new EpEnvelopeError("unavailable", "no responder for manager.purge (SPEC 13.5)", [
+  { ...unanswered, observation: "no-responders" },
+]));
 check("no-responders 503 (`unavailable`, MARKED) says nobody answered", SILENCE.test(noResponders), noResponders);
-check("...and names the capability as a cause, which is what the code-keyed branch withheld",
-  /capability and the broker denied/.test(noResponders), noResponders);
+check("...and says the broker observed zero subscribers", /zero subscribers/.test(noResponders), noResponders);
+check("...and classifies the command as not executed", /not executed/.test(noResponders), noResponders);
 
 // 2. Unchanged: a describe that drew no reply at all.
-const deadline = await render(new EpEnvelopeError("deadline-exceeded", "no describe reply from manager within 10000ms", [unanswered]));
+const deadline = await render(new EpEnvelopeError("deadline-exceeded", "no describe reply from manager within 10000ms", [
+  { ...unanswered, observation: "reply-deadline" },
+]));
 check("an UNANSWERED deadline still says nobody answered", SILENCE.test(deadline), deadline);
+check("...but names the outcome as unknown, not absent", /outcome is unknown/.test(deadline) && !/zero subscribers/.test(deadline), deadline);
+check("...and names a stalled or slow handler as a possible boundary", /handler may be stalled or slow/.test(deadline), deadline);
 
 // 3. THE TWIN of cell 1 — same code, no marker, opposite verdict. A manager answered.
 const answered = await render(new EpEnvelopeError("unavailable", "describe(manager) failed: trusted auth view failed"));
@@ -94,7 +101,32 @@ check("...and core's account survives intact", split.includes("SAYS NOTHING ABOU
 const plain = await render(new Error("connection closed"));
 check("a non-envelope failure states no verdict at all", !SILENCE.test(plain) && plain === "connection closed", plain);
 
-const EXPECTED_CELLS = 8;
+// 6. The new read-only tool reaches the real public MeshAgent seam, forwards its explicit bound,
+// and renders readiness separately from failure. Core's real-broker smoke proves what produces the
+// two failure observations; this cell proves the MCP-visible tool does not discard that result.
+{
+  const spec = cotalToolSpecs(cfg).find((s) => s.name === "cotal_manager_status");
+  let seenBudget: number | undefined;
+  const stub = {
+    connected: true,
+    managerControlStatus: async (deadlineMs: number) => {
+      seenBudget = deadlineMs;
+      return { ok: true, data: { instanceId: "m1", runtime: "pty" } };
+    },
+  } as unknown as MeshAgent;
+  const ready = await spec!.run(stub, cfg, { timeout_ms: 750 });
+  check("cotal_manager_status reaches the read-only manager probe with the caller's bound", seenBudget === 750, seenBudget);
+  check("...and reports an attributed successful status as READY", /Manager control is READY/.test(ready.text) && /m1/.test(ready.text), ready.text);
+
+  const failedStub = {
+    connected: true,
+    managerControlStatus: async () => ({ ok: false, error: deadline }),
+  } as unknown as MeshAgent;
+  const notReady = await spec!.run(failedStub, cfg, {});
+  check("...while a no-reply diagnostic stays NOT READY and intact", notReady.isError === true && /NOT READY/.test(notReady.text) && /outcome is unknown/.test(notReady.text), notReady.text);
+}
+
+const EXPECTED_CELLS = 14;
 const ran = pass + fail;
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"} — ${pass} passed, ${fail} failed`);
 if (ran !== EXPECTED_CELLS) {

@@ -47,8 +47,9 @@
  * lifecycle commands were covered "transitively" by the `ps` cells; they were not, and that
  * over-read is the same one that let the original defect ship.
  *
- * What is still NOT graded here: cells 4 and 5 prove the pin ROUTES (an absent instance deadlines
- * rather than falling through), not that a pinned `spawn`/`stop`/`attach` completes against a real
+ * What is still NOT graded here: cells 4 and 5 prove the pin ROUTES (an absent instance gets the
+ * broker-confirmed no-responder result rather than falling through), not that a pinned
+ * `spawn`/`stop`/`attach` completes against a real
  * instance; those mutate, and a live-mutation cell is a different fixture. And this suite does not
  * grade the class-queue split itself (SPEC 13.2 behaviour, not this seam).
  *
@@ -234,11 +235,13 @@ try {
   // parsed, validated, and then IGNORED would also give cell 3 two zeroes; the class queue answers
   // happily, and with both managers seatless the output is identical either way. So address a
   // syntactically VALID instance that does not exist: if the pin is honoured there is no responder
-  // on that instance rail and the describe must deadline; if `--on` silently degraded to the class
+  // on that instance rail and the describe must return the broker-confirmed no-responder result;
+  // if `--on` silently degraded to the class
   // queue, a live manager would answer and this exits 0.
   //
-  // This is also the no-fallbacks contract stated directly: an unknown instance deadlines, never
-  // quietly resolves against a peer.
+  // This is also the no-fallbacks contract stated directly: an unknown instance is reported as
+  // having no responder, never quietly resolved against a peer and never confused with a reply
+  // deadline whose execution outcome is unknown.
   // `--on` where it cannot apply is REFUSED, never ignored (the `--dry-run` rule, mirrored): a
   // foreground spawn has no manager to pin and a manifest deploy launches through the class queue.
   // Both used to accept the flag and drop it, so an operator who read the split message's advice and
@@ -263,8 +266,9 @@ try {
   const ghostOut = strip(ghost.out);
   check("it FAILS rather than being answered by whichever manager won the class queue",
     ghost.status !== 0, { status: ghost.status, tail: ghostOut.slice(-300) });
-  check("...and fails as an unanswered pinned describe (the no-fallbacks shape, not some other error)",
-    /no describe reply from manager within/i.test(ghostOut), ghostOut.slice(-300));
+  const brokerNoResponder = /no responder for manager\.describe \(SPEC 13\.5\)/i;
+  check("...and fails as a broker-confirmed unanswered pinned describe (not a reply deadline or some other error)",
+    brokerNoResponder.test(ghostOut) && !/no describe reply from manager within/i.test(ghostOut), ghostOut.slice(-300));
   // WHAT THE HEADLINE SAYS. Two live managers answered `ps` seconds earlier; the operator typed an
   // instance that is not there. The CLI wrapper used to prefix EVERY ep-rail failure with "no
   // manager reachable", so a typo in `--on` read as an empty mesh and sent the operator to the
@@ -285,17 +289,17 @@ try {
   //
   // The probe is cell 4's discriminator applied per command, and it is chosen because it is
   // NON-MUTATING BY CONSTRUCTION: aimed at a valid-but-absent instance, an honoured pin has no
-  // responder on that rail and must deadline on the pinned describe; the command never reaches an
+  // responder on that rail and must return broker-confirmed no-responder on the pinned describe;
+  // the command never reaches an
   // execute. If the argument is dropped anywhere before the resolve, a live manager answers the
   // class queue instead and the run fails (or succeeds) with some OTHER message, so the assertion
-  // is on the describe-deadline TEXT, not on exit status. Nothing is spawned, stopped, or attached
+  // is on the broker-confirmed no-responder TEXT, not on exit status. Nothing is spawned, stopped, or attached
   // in either direction.
   //
   // What this establishes, precisely: the argument reaches `resolveControlTarget` at each of the
   // four sites. That it then reaches the MINT is cell 3, once, on the shared tail. Together those
   // cover the whole chain; neither covers it alone.
   console.log("\n5. every OTHER `--on` site forwards it too (spawn/stop/attach have their own)");
-  const pinnedDescribeDeadline = /no describe reply from manager within/i;
   const sites: ReadonlyArray<{ what: string; argv: string[] }> = [
     // --on is a `--detach` flag on spawn (foreground runs in this process, not on a manager). The
     // persona ref is deliberately nonexistent so that a dropped pin cannot start anything: the
@@ -308,8 +312,8 @@ try {
     const r = await cotal(site.argv, root1);
     mustHaveRun(r, `\`${site.what} --on <valid-but-absent>\``);
     const out = strip(r.out);
-    check(`${site.what} HONOURS --on: it deadlines on the pinned rail instead of asking the class queue`,
-      pinnedDescribeDeadline.test(out),
+    check(`${site.what} HONOURS --on: the pinned rail has broker-confirmed no responder instead of asking the class queue`,
+      brokerNoResponder.test(out) && !/no describe reply from manager within/i.test(out),
       { status: r.status, tail: out.slice(-400) });
     check(`...and ${site.what}'s headline names the instance, not an unreachable mesh`,
       !/no manager reachable/i.test(out), out.slice(-300));

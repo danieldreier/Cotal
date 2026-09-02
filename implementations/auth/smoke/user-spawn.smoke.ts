@@ -637,7 +637,7 @@ try {
       } catch (e) {
         refused = e instanceof EpEnvelopeError ? e.code : String(e);
       }
-      check("a spawn-scope bearer's `ps` is broker-dropped (manager.read is not in the spawn set - the ep tier boundary holds on a user mesh)",
+      check("a spawn-scope bearer's `ps` is broker-dropped (the exact status readiness row does not widen to the rest of manager.read)",
         refused === "deadline-exceeded" || refused === "unavailable", refused);
     } finally {
       await epNc.drain().catch(() => epNc.close());

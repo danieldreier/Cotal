@@ -13,6 +13,7 @@ import {
   EpEnvelopeError,
   isPublishPermissionDenied,
   unansweredRequest,
+  unansweredObservation,
   type EpAttributedReply,
   type EpVerbTarget,
   type ControlReply,
@@ -889,6 +890,14 @@ export class MeshAgent extends EventEmitter {
 
   // ---- supervision ---------------------------------------------------------
 
+  /** Bounded, read-only probe of the manager's actual typed control handler. This is deliberately
+   *  stronger than roster presence or a registered service row: it resolves `manager`, invokes its
+   *  read-only `status` command, and requires an attributed reply within the caller's budget. */
+  async managerControlStatus(deadlineMs = 2_000): Promise<ControlReply> {
+    this.assertConnected();
+    return this.managerInvoke("status", undefined, { deadlineMs });
+  }
+
   /** Ask the manager to spawn a new teammate into this space (its `start` op).
    *  #159 B1: the manager replies to `start` only on a REAL outcome — presence join, process exit,
    *  or its ~30s readiness backstop — so the request must outlive that window ({@link SPAWN_TIMEOUT_MS}),
@@ -948,13 +957,19 @@ export class MeshAgent extends EventEmitter {
       // half: this surface is read by agents, and "no responder answered" invites the retry that
       // duplicates a spawn. Only the marker distinguishes them, and core sets it exactly where it
       // observed silence.
-      if (e instanceof EpEnvelopeError)
+      if (e instanceof EpEnvelopeError) {
+        const observation = unansweredObservation(e);
         return {
           ok: false,
           error: unansweredRequest(e)
-            ? `${e.message} (no responder answered - a manager may be down, or this credential holds no "${command}" capability and the broker denied the request)`
+            ? observation === "no-responders"
+              ? `${e.message} (no responder answered: the broker reported zero subscribers, so "${command}" was not executed. The manager endpoint may be down.)`
+              : observation === "reply-deadline"
+                ? `${e.message} (no responder answered before the deadline; the outcome is unknown. The manager handler may be stalled or slow, or this credential's "${command}" publish may have been denied. Do not retry an effecting command until its outcome is reconciled.)`
+                : `${e.message} (no attributable reply reached the caller; the outcome is unknown. Do not retry an effecting command until its outcome is reconciled.)`
             : `${e.code}: ${e.message}`,
         };
+      }
       return { ok: false, error: (e as Error).message };
     }
     if (r.reply.ok !== true) return { ok: false, error: r.reply.error?.message ?? r.reply.error?.code ?? "error" };

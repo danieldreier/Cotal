@@ -1,0 +1,38 @@
+{
+  "suite": "extensions/connector-core/smoke/manager-invoke-verdict.smoke.ts",
+  "guard": "connector diagnostics preserve whether core observed broker-confirmed zero subscribers or only an elapsed reply deadline",
+  "command": "corepack pnpm --filter @cotal-ai/core build && corepack pnpm smoke:manager-invoke-verdict",
+  "completionMarker": "...and reports an attributed successful status as READY",
+  "proveWith": "node scripts/mutation-proof.mjs --config bin/smoke/mutations/control-unanswered-diagnostics.json",
+  "why": [
+    "The two observations authorize opposite conclusions. A broker no-responders sentinel proves",
+    "the request reached zero subscribers and was not executed. A reply deadline proves only that",
+    "nothing attributable came back; the handler may be slow or stalled and an effect may exist.",
+    "Collapsing them invites an unsafe spawn retry, which is the live incident's product boundary.",
+    "",
+    "The smoke imports core through dist, so every mutation command builds core first and the",
+    "restore hook rebuilds it after mutation-proof restores the source. Connector source is loaded",
+    "directly by tsx. Both mutations kill the same user-visible assertions on purpose: one drops",
+    "the typed observation in core, the other ignores it at the connector rendering boundary."
+  ],
+  "mutations": [
+    {
+      "name": "core drops the observation while preserving the generic unanswered marker",
+      "file": "packages/core/src/endpoint-error.ts",
+      "find": "  return detail?.observation === \"no-responders\" || detail?.observation === \"reply-deadline\"\n    ? detail.observation\n    : undefined;",
+      "replace": "  return undefined;",
+      "expectRed": "says the broker observed zero subscribers",
+      "cell": "...and says the broker observed zero subscribers",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
+    },
+    {
+      "name": "connector ignores core's observation and falls back to generic unanswered guidance",
+      "file": "extensions/connector-core/src/agent.ts",
+      "find": "        const observation = unansweredObservation(e);",
+      "replace": "        const observation: ReturnType<typeof unansweredObservation> = undefined;",
+      "expectRed": "says the broker observed zero subscribers",
+      "cell": "...and says the broker observed zero subscribers",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
+    }
+  ]
+}

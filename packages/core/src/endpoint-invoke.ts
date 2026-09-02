@@ -26,9 +26,10 @@ import {
   type ContractStoreContext, type ArtifactMemo,
 } from "./endpoint-contract-store.js";
 import { parseClusterDocument, type ClusterDocument } from "./endpoint-cluster.js";
-import { epCall, epScatterService } from "./endpoint-verbs.js";
+import { epCall, epScatterService, isBrokerNoResponders } from "./endpoint-verbs.js";
 import { epGoalProgressGrantRow } from "./endpoint-grants.js";
-import { epRequestSubject, epCallerReplyFilter, parseEpSubject, type EpCaller, type EpRoute } from "./endpoint-subjects.js";
+import { epRequestSubject, epCallerReplyFilter, parseEpSubject, callerTokens, type EpCaller, type EpRoute } from "./endpoint-subjects.js";
+import { spacePrefix } from "./subjects.js";
 import { parseEndpointReply } from "./endpoint-envelope.js";
 import type { EpVerbTarget, EpAttributedReply, EpScatterResult, EpInstanceLiveness } from "./endpoint-verbs.js";
 
@@ -94,6 +95,7 @@ export async function describeEndpoint(
     v: 1, id: requestId, op: { endpoint, command: "describe" }, class: "ephemeral",
     replyExpected: true, deadlineMs, from: { id: `${caller.owner}.${caller.actor}`, name: caller.actor },
   };
+  const noRespReplyTo = `${spacePrefix(space)}.ep.reply._nr._nr._nr.${callerTokens(caller).join(".")}.${n}`;
   let sub: Subscription | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   /** The status stream itself, kept because `stop()`, not `return()`, is what releases it. */
@@ -118,6 +120,16 @@ export async function describeEndpoint(
       sub = nc.subscribe(epCallerReplyFilter(space, caller), {
         callback: (err, msg) => {
           if (err) { reject(new EpEnvelopeError("unavailable", `describe reply subscription failed: ${err.message}`)); return; }
+          if (msg.subject === noRespReplyTo) {
+            if (isBrokerNoResponders(msg)) {
+              reject(new EpEnvelopeError("unavailable", `no responder for ${endpoint}.describe (SPEC 13.5)`, [
+                { kind: EP_UNANSWERED, endpoint, command: "describe", observation: "no-responders" },
+              ]));
+              return;
+            }
+            reject(new EpEnvelopeError("internal", `a non-503 message reached the reserved no-responders sentinel for ${endpoint}.describe; nothing but the broker control frame is addressable there`));
+            return;
+          }
           // REQUEST-BIND off the reply SUBJECT first (§13.2): the responder triple + nonce are
           // broker-pinned by the serve publish grant. A reply for a DIFFERENT endpoint, or on a
           // nonce that is not the one we published (the rail is shared across our concurrent
@@ -134,9 +146,9 @@ export async function describeEndpoint(
           resolve({ body: reply as unknown as Record<string, unknown>, responder: { instanceId: parsed.instanceId, epoch: parsed.epoch } });
         },
       });
-      nc.publish(subject, enc.encode(JSON.stringify(env)));
+      nc.publish(subject, enc.encode(JSON.stringify(env)), { reply: noRespReplyTo });
     });
-    const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new EpEnvelopeError("deadline-exceeded", `no describe reply from ${endpoint} within ${deadlineMs}ms`, [{ kind: EP_UNANSWERED, endpoint, command: "describe" }])), deadlineMs); });
+    const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new EpEnvelopeError("deadline-exceeded", `no describe reply from ${endpoint} within ${deadlineMs}ms`, [{ kind: EP_UNANSWERED, endpoint, command: "describe", observation: "reply-deadline" }])), deadlineMs); });
     // A REFUSED PUBLISH MUST NOT MASQUERADE AS AN ABSENT RESPONDER. `nc.publish` is fire-and-forget:
     // when the credential lacks the subject the broker answers the CONNECTION asynchronously and the
     // publish returns normally, so the only observable is a deadline that reads as "that endpoint
