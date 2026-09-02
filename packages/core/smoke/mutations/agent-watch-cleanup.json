@@ -2,7 +2,7 @@
   "suite": "packages/core/smoke/agent-watch-cleanup-auth.smoke.ts",
   "guard": "a real authenticated agent endpoint creates and deletes only its lifecycle-pinned public-KV watchers, while a same-principal peer lifecycle remains broker-denied",
   "command": "corepack pnpm --filter @cotal-ai/core build && PATH=/workspace/state/tools/nats-server-v2.12.12-b:$PATH corepack pnpm smoke:manager-split && PATH=/workspace/state/tools/nats-server-v2.12.12-b:$PATH corepack pnpm smoke:agent-watch-cleanup:auth",
-  "completionMarker": "AGENT-WATCH-CLEANUP SMOKE",
+  "completionMarker": "MANAGER-SPLIT SMOKE",
   "proveWith": "node scripts/mutation-proof.mjs --config packages/core/smoke/mutations/agent-watch-cleanup.json",
   "why": [
     "The stock ordered KV watch generates oc_* names that cannot be authorized per principal. The",
@@ -34,8 +34,8 @@
       "file": "packages/core/src/endpoint.ts",
       "find": "    if (this.usesLifecyclePinnedAgentWatch()) {\n      await this.startLifecyclePinnedAgentWatch(this.kv, \"presence\",",
       "replace": "    if (false && this.usesLifecyclePinnedAgentWatch()) {\n      await this.startLifecyclePinnedAgentWatch(this.kv, \"presence\",",
-      "expectRed": "real endpoint creates exactly its lifecycle-pinned presence watcher",
-      "cell": "real endpoint creates exactly its lifecycle-pinned presence watcher",
+      "expectRed": "real endpoint starts both lifecycle-pinned public-KV watchers",
+      "cell": "real endpoint starts both lifecycle-pinned public-KV watchers",
       "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
     }
   ]

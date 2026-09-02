@@ -98,7 +98,11 @@ try {
     card: { id: identity.id, name: "watcher", kind: "agent" },
   });
   endpoint.on("error", (err: Error) => endpointErrors.push(err.message));
-  await endpoint.start();
+  let startError: unknown;
+  try { await endpoint.start(); } catch (err) { startError = err; }
+  check("real endpoint starts both lifecycle-pinned public-KV watchers", startError === undefined,
+    startError instanceof Error ? startError.message : startError);
+  if (startError) throw startError;
 
   const presenceStream = `KV_${presenceBucket(space)}`;
   const channelStream = `KV_${channelBucket(space)}`;
