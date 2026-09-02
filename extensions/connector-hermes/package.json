@@ -28,7 +28,7 @@
     "prepublishOnly": "pnpm run build"
   },
   "peerDependencies": {
-    "@cotal-ai/core": "*"
+    "@cotal-ai/core": "^0.34.0-cpn.1"
   },
   "devDependencies": {
     "@cotal-ai/core": "workspace:*",

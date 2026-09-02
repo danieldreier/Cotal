@@ -31,7 +31,7 @@
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "@cotal-ai/core": "*"
+    "@cotal-ai/core": "^0.34.0-cpn.1"
   },
   "devDependencies": {
     "@cotal-ai/smoke-kit": "workspace:*",
