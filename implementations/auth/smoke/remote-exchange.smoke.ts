@@ -246,8 +246,8 @@ try {
   const wk = await get(`${PUBLIC}/.well-known/cotal-mesh`);
   const publicJwks = await get(`${PUBLIC}/jwks`);
   const verifyPublicBearer = createLocalJWKSet(publicJwks.body as { keys: import("jose").JWK[] });
-  const idpPin = wk.body.idp as { url?: string; issuer?: string; audience?: string } | undefined;
-  const eps = wk.body.endpoints as { url?: string } | undefined;
+  const idpPin = wk.body.userAuth.idp as { url?: string; issuer?: string; audience?: string } | undefined;
+  const eps = wk.body.userAuth.endpoints as { url?: string; managerAuthorityUrl?: string } | undefined;
   check("bundle serves 200 on the public face", wk.status === 200, wk.body);
   check("bundle carries the space + server it actually serves", wk.body.space === SPACE && wk.body.server === SERVER, wk.body);
   check("bundle states tlsRequired", wk.body.tlsRequired === true, wk.body);
@@ -255,6 +255,7 @@ try {
     idpPin?.url === base && idpPin.issuer === origin && idpPin.audience === origin,
     { advertised: idpPin, enforced: { url: base, issuer: origin, audience: origin } });
   check("bundle's endpoints.url is the post-bind advertised public URL", eps?.url === PUBLIC_URL, eps);
+  check("bundle advertises the typed manager-authority endpoint", eps?.managerAuthorityUrl === `${PUBLIC_URL}/manager-service-authority`, eps);
   check("bundle ships the ACTUAL deny-all sentinel credential prepared for this space",
     wk.body.sentinelCreds === expectedCallout.sentinelCreds,
     { advertisedLength: typeof wk.body.sentinelCreds === "string" ? wk.body.sentinelCreds.length : -1, expectedLength: expectedCallout.sentinelCreds.length });
@@ -272,7 +273,7 @@ try {
     check("device login established", typeof sub === "string" && sub.length > 0);
     return cotalAuthProvider.ownerForLogin({ store, dir, space: SPACE });
   })();
-  grantActor(dir, { owner: OWNER, actor: "cli", scope: ["spawn", "role:worker"], allowSubscribe: [">"], allowPublish: [">"], label: "smoke operator" });
+  grantActor(dir, { owner: OWNER, actor: "cli", scope: ["spawn", "supervise", "role:worker"], allowSubscribe: [">"], allowPublish: [">"], label: "smoke operator" });
   const secret = newActorToken();
   const agentLifecycleUid = mintLifecycleUid();
   grantManagedActor(dir, {
@@ -347,6 +348,15 @@ try {
     viewLoopback.status !== 403, viewLoopback);
 
   // ---------- F. inherited hardening holds verbatim ----------
+  const ids = Object.fromEntries(["supervisor", "executor", "serve", "goalWriter", "sessionLedger"].map((name) => [name, { id: newIdentity().id }]));
+  const mgrPrepare = await post(`${PUBLIC}/manager-service-authority`, { idpToken: idpJwt, request: {
+    v: 1, kind: "manager-service-authority", operation: "prepare", space: SPACE, actor: "cli",
+    instanceId: mintLifecycleUid(), managerLifecycleUid: mintLifecycleUid(), requestId: `req${mintLifecycleUid()}`, identities: ids,
+  } });
+  check("the public typed manager-authority route accepts supervise scope", mgrPrepare.status === 200 && (mgrPrepare.body.credentials as Record<string, unknown>)?.supervisor !== undefined, mgrPrepare.body);
+  const rawProfile = await post(`${PUBLIC}/exchange`, { idpToken: idpJwt, actor: "cli", view: "manager-service" });
+  check("the public exchange still refuses raw manager-service view/profile strings", rawProfile.status === 403, rawProfile.body);
+
   console.log("F) Origin / content-type / body bound on the public face");
   const browser = await post(`${PUBLIC}/exchange`, agentBody2, { origin: "https://evil.example" });
   check("browser-origin requests are refused on the public face (403)", browser.status === 403, browser.body);
@@ -372,10 +382,10 @@ try {
   check("GET /jwks is served on the public face", publicJwks.status === 200);
   check("…with the exact cache contract max-age=300", publicJwks.headers.get("cache-control") === "max-age=300");
   let notFound = 0;
-  for (const p of ["/", "/exchange/", "/admin", "/views", "/actor", "/ledger", "/health/", "/.well-known/", "/..%2f", "/toString", "/constructor"]) {
+  for (const p of ["/", "/exchange/", "/manager-service-authority/", "/admin", "/views", "/actor", "/ledger", "/health/", "/.well-known/", "/..%2f", "/toString", "/constructor"]) {
     if ((await get(`${PUBLIC}${p}`)).status === 404) notFound++;
   }
-  check("every non-route path 404s on the public face (11/11, incl. prototype-chain probes)", notFound === 11, { notFound });
+  check("every non-route path 404s on the public face (12/12, incl. prototype-chain probes)", notFound === 12, { notFound });
   check("GET at /exchange is refused (POST only)", (await get(`${PUBLIC}/exchange`)).status === 405);
   check("POST at /jwks is refused (GET only)", (await post(`${PUBLIC}/jwks`, {})).status === 405);
 
@@ -408,6 +418,43 @@ try {
   }
   check("successful exchanges are never throttled (40/40 on one peer)", successes === 40, { successes });
 
+  // A VALID credential still mints while its own bucket is full.
+  //
+  // This is the cell the whole throttle depends on and it did not exist. The gate used to run
+  // before the body was read, so a full bucket refused every request from that peer key - valid
+  // ones included. On the public face the DEFAULT peer key is the socket address, so in the
+  // reverse-proxy topology `run-a-mesh.md` recommends (without --exchange-trusted-proxy) every
+  // client shares one bucket, and thirty unauthenticated garbage POSTs denied the public mint
+  // path for a rolling minute (#802). The cells above cannot see it: they only ever ask whether a
+  // throttled peer is refused, never whether a LEGITIMATE caller behind that same key still works.
+  //
+  // Throttling exists to slow probing, and a valid credential is not probing.
+  const victim = asPeer("203.0.113.44");
+  let victimThrottled = false;
+  for (let i = 0; i < 40; i++) {
+    const r = await post(`${PUBLIC}/exchange`, { ...agentBody2, actorToken: newActorToken().actorToken }, victim);
+    if (r.status === 429) { victimThrottled = true; break; }
+  }
+  check("a peer key is throttled after a refusal flood", victimThrottled);
+  const validWhileFull = await post(`${PUBLIC}/exchange`, agentBody2, victim);
+  check(
+    "A VALID TOKEN STILL MINTS (200) FROM A THROTTLED PEER KEY - a full bucket must not deny a request that would succeed",
+    validWhileFull.status === 200,
+    { status: validWhileFull.status, body: validWhileFull.body },
+  );
+  // ...and the budget still does its job: a FAILED exchange from that same throttled key is
+  // answered 429 rather than its specific reason, because the reason is what makes probing cheap.
+  const failedWhileFull = await post(
+    `${PUBLIC}/exchange`,
+    { ...agentBody2, actorToken: newActorToken().actorToken },
+    victim,
+  );
+  check(
+    "a FAILED exchange from a throttled key is answered 429, not the refusal reason",
+    failedWhileFull.status === 429,
+    { status: failedWhileFull.status, body: failedWhileFull.body },
+  );
+
   // ---------- H. refresh across expiry ----------
   console.log("H) agent-bearer-style refresh yields a fresh, later-expiring bearer");
   const first = await post(`${PUBLIC}/exchange`, { ...agentBody2, ttlSec: 1 });
@@ -429,7 +476,7 @@ try {
 }
 
 // Counts, not just "no failures": a cell that stops running stops protecting anything.
-const EXPECTED = 47;
+const EXPECTED = 53;
 console.log(`\nremote-exchange smoke: ${pass} passed, ${fail} failed`);
 if (pass + fail !== EXPECTED) {
   console.log(`  ✗ FAIL: expected ${EXPECTED} cells, ran ${pass + fail} - a cell was added or silently skipped`);

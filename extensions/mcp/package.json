@@ -1,0 +1,31 @@
+{
+  "name": "@cotal-ai/mcp",
+  "description": "Trusted local multi-identity MCP gateway for Cotal.",
+  "version": "0.34.0-cpn.1",
+  "license": "Apache-2.0",
+  "repository": { "type": "git", "url": "https://github.com/Cotal-AI/Cotal.git", "directory": "extensions/mcp" },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": { "cotal-mcp": "./dist/mcp-main.js" },
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "scripts": { "typecheck": "tsc -p tsconfig.json --noEmit", "build": "tsc -p tsconfig.json", "prepublishOnly": "pnpm run build" },
+  "peerDependencies": {
+    "@cotal-ai/core": "*",
+    "@cotal-ai/workspace": "*",
+    "@cotal-ai/connector-core": "*"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cotal-ai/core": "workspace:*",
+    "@cotal-ai/workspace": "workspace:*",
+    "@cotal-ai/connector-core": "workspace:*",
+    "@cotal-ai/smoke-kit": "workspace:*",
+    "@nats-io/transport-node": "^3.4.0"
+  },
+  "files": ["dist"],
+  "publishConfig": { "access": "public" }
+}

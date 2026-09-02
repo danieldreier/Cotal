@@ -1,0 +1,38 @@
+{
+  "suite": "extensions/connector-core/smoke/spawn-args.smoke.ts",
+  "guard": "cotal_spawn exposes an optional non-empty task bounded at 12,000 characters, dispatches it through MeshAgent, and translates it only to the manager's existing prompt field",
+  "command": "pnpm smoke:spawn-args",
+  "progressPattern": "^[✓✗]",
+  "minTicks": 20,
+  "completionMarker": "SPAWN-ARGS SMOKE",
+  "mutations": [
+    {
+      "name": "A1 accept an empty task by weakening the lower bound",
+      "file": "extensions/connector-core/src/tool-specs.ts",
+      "find": "        task: z\n          .string()\n          .min(1)\n          .max(12_000)",
+      "replace": "        task: z\n          .string()\n          .min(0)\n          .max(12_000)",
+      "expectRed": "task refuses an empty string"
+    },
+    {
+      "name": "A2 accept a task beyond the documented upper bound",
+      "file": "extensions/connector-core/src/tool-specs.ts",
+      "find": "        task: z\n          .string()\n          .min(1)\n          .max(12_000)",
+      "replace": "        task: z\n          .string()\n          .min(1)\n          .max(12_001)",
+      "expectRed": "task refuses more than 12,000 characters"
+    },
+    {
+      "name": "A3 drop the MeshAgent task-to-prompt translation",
+      "file": "extensions/connector-core/src/agent.ts",
+      "find": "      launchOptions: opts?.launchOptions, cwd: opts?.cwd, prompt: opts?.task,",
+      "replace": "      launchOptions: opts?.launchOptions, cwd: opts?.cwd,",
+      "expectRed": "task translates to the manager's generic prompt field"
+    },
+    {
+      "name": "A4 advertise task but drop it at tool dispatch",
+      "file": "extensions/connector-core/src/tool-specs.ts",
+      "find": "          const reply = await agent.spawn(name, role, { agent: agentType, model, variant, launchOptions, cwd, task });",
+      "replace": "          const reply = await agent.spawn(name, role, { agent: agentType, model, variant, launchOptions, cwd });",
+      "expectRed": "cotal_spawn dispatches task through the existing prompt contract"
+    }
+  ]
+}

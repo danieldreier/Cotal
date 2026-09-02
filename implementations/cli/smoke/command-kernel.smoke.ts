@@ -38,6 +38,10 @@ function updateRuntime(opts: {
     nodePath: "/node",
     version: () => opts.version ?? "0.13.1",
     reconcile: async () => void events.push("reconcile"),
+    reconcileSkills: () => {
+      events.push("reconcile-skills");
+      return { installed: ["cotal-mesh"], backedUp: [], removed: [] };
+    },
     extensions: () => opts.extensions ?? [],
     claimUpdatePass: () => {
       events.push("claim-mutation");
@@ -266,6 +270,7 @@ async function completionOut(positionals: string[]): Promise<string> {
   );
   assert.ok(events.some((event) => event.includes("third-party-ext@1.2.3 - not auto-updated")));
   assert.ok(events.indexOf("reconcile") < events.findIndex((event) => event.startsWith("npm:view")), "default reconciles before npm check");
+  assert.ok(events.indexOf("reconcile-skills") > events.indexOf("reconcile"), "skills reconcile follows built-in surfaces");
 }
 
 // --- malformed npm fails after local reconcile; extension failures continue and aggregate --------
@@ -300,6 +305,11 @@ async function completionOut(positionals: string[]): Promise<string> {
   stopped.rt.reconcile = async () => { throw new Error("seed interrupted"); };
   assert.equal(await executeUpdate(false, stopped.rt), 1);
   assert.ok(!stopped.events.some((event) => event.startsWith("spawn:")), "seed failure blocks later prefix mutation");
+
+  const skillFailure = updateRuntime({ extensions: [installed("@cotal-ai/orca")] });
+  skillFailure.rt.reconcileSkills = () => { throw new Error("skills interrupted"); };
+  assert.equal(await executeUpdate(false, skillFailure.rt), 1);
+  assert.ok(!skillFailure.events.some((event) => event.startsWith("spawn:")), "skill failure blocks extension mutation");
 }
 
 // --- one mutation claim linearizes the whole operator pass through the default npm check ----------
@@ -394,11 +404,12 @@ async function completionOut(positionals: string[]): Promise<string> {
   const current = updateRuntime({});
   assert.equal(await executeUpdate(true, current.rt), 0);
   assert.ok(current.events.includes("reconcile"));
+  assert.ok(current.events.includes("reconcile-skills"));
   assert.ok(!current.events.some((event) => event.startsWith("global:install")));
 
   const child = updateRuntime({ env: { COTAL_UPDATE_TARGET_VERSION: "0.13.1", COTAL_UPDATE_PARENT: "99" } });
   assert.equal(await executeUpdate(false, child.rt), 0);
-  assert.deepEqual(child.events.filter((event) => event === "reconcile" || event.startsWith("npm:")), ["reconcile"]);
+  assert.deepEqual(child.events.filter((event) => event === "reconcile" || event === "reconcile-skills" || event.startsWith("npm:")), ["reconcile", "reconcile-skills"]);
 
   const wrongChild = updateRuntime({ env: { COTAL_UPDATE_TARGET_VERSION: "0.13.2", COTAL_UPDATE_PARENT: "99" } });
   assert.equal(await executeUpdate(false, wrongChild.rt), 1);

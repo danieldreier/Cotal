@@ -90,6 +90,7 @@ smoke:ep-serve-gate
 smoke:bind-fence
 smoke:unfenced-responder
 smoke:manager-service
+smoke:manager-service-authority
 smoke:manager-service-ops
 smoke:manager-service-invoke
 smoke:manager-spawn-action
@@ -125,6 +126,8 @@ smoke:sub-acl:auth
 smoke:self-serve-join:auth
 smoke:control-auth
 smoke:manager-split
+smoke:supervise-registered-user
+smoke:supervise-registered-user-authority
 smoke:cred-lifetime
 smoke:standing-renewal
 smoke:delivery-renewal
@@ -151,6 +154,7 @@ smoke:codex-args
 smoke:codex-host
 smoke:codex-dist
 smoke:codex-installed
+smoke:plugin-bundle
 smoke:jcode-args
 smoke:jcode-host
 smoke:jcode-private-state
@@ -213,6 +217,7 @@ smoke:adoption-proof
 smoke:adoption-swap-strand
 smoke:adoption-passive-preflight
 smoke:renewal-record-honesty
+smoke:component-health
 smoke:reload-deadline-queue
 smoke:adoption-doctor-e2e
 smoke:membership-rw-renewal
@@ -461,6 +466,11 @@ smoke:jcode-session-resume
 # carried provider and routes in the response the model check reads; they were discarded.
 smoke:jcode-route-identity
 
+# A provider stream stall can close the Jcode Harness API during an inbox-driven turn. The connector
+# must preserve the mesh seat and unacknowledged batch, make exactly one private replacement, attach
+# the same session, and accept subsequent mesh work; a failed recovery exits rather than looping.
+smoke:jcode-provider-disconnect
+
 smoke:orientation
 
 # Every connector renders one shared create-and-join tool. It must register before joining and
@@ -476,8 +486,73 @@ smoke:channel-register:auth
 # key verifiable across an overlap, and never drop the newest.
 smoke:anchor-renewal
 
+# A connector must never return — success or failure — while the private Jcode tree it launched is
+# still executing. The SDK's managed stop keys the daemon off a servers.json entry matching the
+# alias socket path verbatim, so a canonicalized entry or wiped registry is a silent no-op, and the
+# setsid daemon (plus its MCP child) outlives the seat: an unmanaged orphan holding the seat's
+# private home. The connector now proves the teardown from the seat's own records — bounded SIGTERM,
+# exact-PID/group SIGKILL escalation, throw rather than report clean when a PID survives.
+smoke:jcode-lifecycle
+# The un-ack reprieve has to end (#807). #793 stopped the overflow valve acking a directed message
+# it evicts so the broker can redeliver it once there is room - but an un-acked id can be handed
+# straight back into a still-full inbox and evicted again, forever, spending throughput while every
+# seat reports healthy. Same shape as #790 one layer down. Count evictions per id, give up after
+# five, and say so on stderr (never emit("error") - with no listener that kills the seat).
+smoke:overflow-churn-bound
+
+# The auth-service serves the mesh discovery document `cotal meshes add --from` registers from, and
+# nothing had ever fed the server's ACTUAL bytes to that consumer: the producer's smoke asserted the
+# fields it had just written, and the consumer's smoke fed itself a hand-written fixture. The shape
+# defect that hid there (a flat document with no `userAuth` and no `provider`, refused with "a
+# provider name is required") is fixed, but the untested seam is the reason it shipped. This suite
+# is the crossing: live daemon, fetch over the wire, raw bytes into the shipped consumer — and it
+# grades the served provider name against the REGISTERED provider's own name, so the two cannot
+# drift back apart behind a re-hardcoded literal.
+smoke:discovery-bundle-consumable:live
+# A failed jcode turn must not become a hot loop (#790). The batch is acked only on success, so a
+# failure leaves pendingWake() positive and the finally re-drives the SAME batch instantly - one
+# stalled turn re-paid the full injection 62 times. The codex host has had scheduleErrorRetry the
+# whole time; this grades the same rule for jcode: growing delay, ceiling, one timer, give up.
+smoke:jcode-retry-policy
+# When a seat leaves, the manager must say WHY. A live supervisor lost several seats while it kept
+# running and its log carried no per-seat exit line at all, so "the supervisor reaped them" and
+# "they died on their own" were indistinguishable after the fact. Two different facts are required:
+# which path gave up the slot, and what the runtime saw when the child ended — and a runtime that
+# cannot see the exit must say so rather than print a fabricated code 0.
+smoke:seat-exit-cause
+smoke:empty-id-ingest
+smoke:hermes-empty-id
+# A manager that may no longer SERVE must not destroy the agents it was serving. The lease-loss exit
+# path did both in one act: it hard-stopped every managed child and deprovisioned its credential and
+# durables. Stopping serving is the right conclusion there; killing the seats is a separate act that
+# a connectivity fact does not license. Four occurrences on the live space "main" reached the
+# neighbouring branch and survived only because the lease re-read answered.
+smoke:detach-not-teardown
+# Appended at the end per this file's own rule: the cell has no ordering dependency, and appending
+# is what keeps two branches adding suites from conflicting. It is the end-to-end half of a guard
+# whose ingest half runs earlier as `smoke:cross-path-dedup`: that one drives hand-built deliveries
+# into the dedup branch, this one proves the CONNECTOR's boot window recovers over a real broker.
+smoke:claude-boot-wake
+# Control commands resolve ws:// / wss:// meshes too. Exercise the real CLI against one broker's
+# websocket and TCP listeners so raw node-transport regressions name their `wsconnect` refusal.
+smoke:control-transport-dial
 # A manager restart killed mid-barrier left the issuance gate frozen, and the successor refused
 # SPEC 13.8 until an operator ran reconcile-gate (#783 item 3 / #871). Boot now completes that
 # same dead registration when the freeze-holder is gone under a complete CONNZ sweep. Appended
 # at the end: no ordering dependency, and appending keeps two branches from conflicting.
 smoke:boot-self-heal-gate
+# A Claude seat must receive CLAUDE_CODE_OAUTH_TOKEN (the credential docs/deploy.md promises) and
+# must not receive CLAUDE_CODE_CHILD_SESSION. The allowlist that closed #866 dropped the token
+# because this connector declared no providerKeys; a container has no Keychain to fall back to.
+smoke:claude-launch-env
+smoke:web-console-auth
+smoke:no-implicit-general
+smoke:session-channels
+smoke:jcode-private-lifecycle
+smoke:hook-load-emitter-race
+smoke:spawn-name-actor
+smoke:mcp-server
+smoke:standalone-agent
+smoke:mcp-gateway
+smoke:mcp-http
+smoke:mcp-gateway-installed:live

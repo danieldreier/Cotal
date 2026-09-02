@@ -27,7 +27,9 @@ The install mechanics and the invariants behind them are in
 [setup internals](setup-internals.md).
 
 `cotal setup` also installs Cotal's authored Agent Skills (`SKILL.md`, the agentskills.io format) for
-coordinating agent teams (today `team-topology`), from one canonical source, on two channels:
+mesh coordination, agent-team design, and generic Cotal engineering (`cotal-mesh`, `team-topology`, and
+`cotal-engineering`), from one canonical source,
+on two channels:
 
 - **Claude Code** gets a second, skills-only plugin, `cotal-skills`, from the same `cotal-mesh`
   marketplace, at **user scope** (machine-wide), and **independent of the mesh connector**: it carries no
@@ -36,12 +38,18 @@ coordinating agent teams (today `team-topology`), from one canonical source, on 
   is stamped from the running CLI release, so an upgrade + `cotal setup` runs `claude plugin update` and
   the deployed install actually gets the new skill. `cotal setup` installs it on first run and on repeat
   runs, so upgraders are not left behind.
-- **Every other harness** (Codex, Cursor, OpenCode, Gemini CLI, Windsurf/Devin) reads the cross-vendor
-  `~/.agents/skills/` directory convention, which has no remote index, so `cotal setup` **reconciles** it:
+- **Codex** reads its native `~/.codex/skills/` directory (or `$CODEX_HOME/skills`); **Cursor, OpenCode,
+  Gemini CLI, and Windsurf/Devin** read the cross-vendor `~/.agents/skills/` convention. These roots
+  have no remote index, so `cotal setup` **reconciles** both:
   it installs/updates each Cotal skill, backs up a copy you have edited to `SKILL.md.bak` before
   replacing it, and removes a Cotal skill that is no longer shipped. Only skills Cotal owns are touched;
   your own or third-party skills there are left alone. `cotal status` reports whether the drop is current,
   stale, missing, or has a retired skill to reconcile. This is the working cross-vendor path.
+
+`cotal update` also reconciles both local drops after refreshing the bundled first-party surfaces.
+This keeps an installed Codex session from seeing an older skill until a later setup run.
+The Claude skills plugin is refreshed by first-run or repeat `cotal setup`, which runs its
+release-derived plugin update path.
 
 Cotal also generates an [Agent Skills discovery index](https://cotal.ai/.well-known/agent-skills/index.json)
 on cotal.ai, but that RFC is still a draft with no harness consuming it yet, so it is a forward bet,
@@ -86,9 +94,15 @@ The manager launches the *real* `claude` (no wrapper):
 ```
 claude --strict-mcp-config --mcp-config '{"mcpServers":{"cotal":{…}}}' \
        --dangerously-load-development-channels server:cotal
-# env: COTAL_SPACE, COTAL_NAME, COTAL_ROLE, COTAL_SERVERS, COTAL_CHANNEL=1
+# env: COTAL_SPACE, COTAL_NAME, COTAL_ROLE, COTAL_CHANNEL=1, plus claude's documented auth vars
 ```
 
+- **Model auth.** Locally, `claude` still reads macOS Keychain / `~/.claude`. In a container or
+  CI there is no Keychain, so the connector forwards the documented credential set —
+  `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), `ANTHROPIC_API_KEY` /
+  `ANTHROPIC_AUTH_TOKEN`, and the cloud-provider flags plus their credential vars. Host-session
+  markers (`CLAUDE_CODE_CHILD_SESSION`, `CLAUDECODE`) stay out so a nested seat still saves a
+  transcript. See [Deploy](deploy.md).
 - **MCP isolation.** A spawned agent runs with **only** the cotal MCP server:
   `--strict-mcp-config` ignores every other MCP source, crucially the operator's personal
   `~/.claude.json` servers (several spawns each booting a heavy helper would starve
@@ -283,8 +297,8 @@ whole chat plane, which is the opposite of what a scoped watcher is for. The age
 reader needs, since an authed consuming endpoint refuses to start without one.
 
 Two things a reader has to do that are not obvious, both on `CotalEndpoint`. It must pass the event
-channel in `channels`, or the endpoint joins `general` by default and a scoped credential is refused
-there. And it reads history with `readHistory(channel)`, the delivery daemon's mediated read, not
+channel in `channels`: an endpoint reads exactly the channels it lists, so one constructed without
+the event channel joins nothing and the frames never arrive. And it reads history with `readHistory(channel)`, the delivery daemon's mediated read, not
 `channelHistory(channel)`: a scoped credential is denied the ad-hoc consumer the direct read
 creates, by design. `cotal console` and the web console already do both.
 
