@@ -26,6 +26,7 @@ import {
   type CotalMessage,
 } from "@cotal-ai/core";
 import type { AgentConfig } from "./config.js";
+import { CredsCell, CpnAdoptError, type CpnCredsWindow } from "./cpn-renew.js";
 
 // Attention modes + per-channel overrides are defined in core (they're published in presence now);
 // re-exported so connector consumers keep importing them from `@cotal-ai/connector-core`.
@@ -148,6 +149,10 @@ function sleep(ms: number): Promise<void> {
  */
 export class MeshAgent extends EventEmitter {
   readonly ep: CotalEndpoint;
+  /** Set when this session renews its own CPN credential (cpn-renew.ts). The cell IS the endpoint's
+   *  creds source; `undefined` means the endpoint was constructed on a static string exactly as it
+   *  always was. */
+  private readonly credsCell?: CredsCell;
   readonly config: AgentConfig;
 
   private inbox: Pending[] = [];
@@ -206,13 +211,25 @@ export class MeshAgent extends EventEmitter {
     // back — the persona file is a shared template). muted/quiet are validated disjoint at file load.
     for (const c of config.quiet ?? []) this.channelModes.set(c, "quiet");
     for (const c of config.muted ?? []) this.channelModes.set(c, "muted");
+    // CPN standing renewal. Read from the CONFIG, never from process.env: an env read here arms
+    // every MeshAgent in the process off one agent's launch, with no per-agent opt-out. The
+    // cell is built BEFORE the endpoint, because it decides whether `creds` is a string or a source
+    // - and a source takes a different construction branch (endpoint.ts:565-573): it requires an
+    // explicit card.id, it arms the 75% timer, and credsRenewalDelayMs then fails loud on an
+    // unbounded credential. None of that may happen to a launch with no renewal behind it.
+    if (config.cpnRenewal) {
+      if (!config.creds)
+        throw new Error("CPN renewal is configured but this launch carries no credential content");
+      this.credsCell = new CredsCell(config.creds);
+    }
     this.ep = new CotalEndpoint({
       space: config.space,
       servers: config.servers,
       token: config.token,
       user: config.user,
       pass: config.pass,
-      creds: config.creds,
+      // A SOURCE only when renewal will actually feed it; otherwise the static string, unchanged.
+      creds: this.credsCell ? () => Promise.resolve(this.credsCell!.current()) : config.creds,
       lifecycleUid: config.lifecycleUid,
       // USER MODE: the endpoint execs the spawner-provided argv per bearer refresh — the exchange
       // protocol lives entirely behind that command, this runtime just runs it and reads a line.
@@ -223,7 +240,10 @@ export class MeshAgent extends EventEmitter {
       channels: config.subscribe, // the endpoint's live filter = the active read set
       channelModes: Object.fromEntries(this.channelModes), // seed presence so file defaults are visible at boot
       card: {
-        id: config.id,
+        // A creds SOURCE has no credential to derive an identity from at construction, so the
+        // endpoint requires the id be declared (endpoint.ts:569-570). The cell already derived it
+        // from the launch credential, which is the same nkey by construction.
+        id: this.credsCell ? this.credsCell.id : config.id,
         name: config.name,
         role: config.role,
         kind: config.kind,
@@ -307,6 +327,68 @@ export class MeshAgent extends EventEmitter {
     } catch (e) {
       return { ok: false, message: `Reconnect failed: ${(e as Error).message}. Still retrying automatically — or run /reconnect to retry now.` };
     }
+  }
+
+  // ---- CPN credential renewal ----------------------------------------------
+
+  /** The cell's view of the credential this session currently holds, or undefined when it does not
+   *  renew its own. Read-only and side-effect-free — deliberately unlike reloadCreds, which runs a
+   *  real preflight and commits. */
+  cpnCredsWindow(): CpnCredsWindow | undefined {
+    return this.credsCell?.window();
+  }
+
+  /**
+   * Adopt a freshly-issued CPN credential: pin it to this session's nkey, publish it to the
+   * endpoint's source, run the endpoint's auditable prove-then-adopt transaction (preflight on a
+   * disposable connection, nkey pin, single-flight commit - endpoint.ts:770-802), then swap the
+   * live wire.
+   *
+   * THE ROLLBACK IS THE HARD PART. By the time reloadCreds RETURNS, endpoint.ts:799-800 has
+   * already set currentCreds to the candidate and re-armed the 75% timer on its exp - and the wire
+   * presents currentCreds, not the source (endpoint.ts:907). So reverting only the cell would leave
+   * the endpoint on `next` while the source returns `previous`, and the next timer tick would read
+   * a credential whose renewal delay is already negative, floor at 1s (endpoint.ts:866) and spin.
+   * The revert therefore re-drives the SAME transaction on `previous`. If THAT fails, the cell goes
+   * back to `next`: the broker accepted `next` in the preflight, and a cell disagreeing with
+   * currentCreds is the one state no backstop recovers from.
+   */
+  async adoptCpnCreds(next: string): Promise<CpnCredsWindow> {
+    const cell = this.credsCell;
+    if (!cell) throw new Error("this session was not built with CPN renewal; there is no credential cell to adopt into");
+    const previous = cell.current();
+    cell.adopt(next);   // nkey pin - throws before anything else moves
+    let committed: CpnCredsWindow;
+    try {
+      committed = await this.ep.reloadCreds();
+    } catch (e) {
+      // Every throw site in adoptFreshCreds precedes the commit at endpoint.ts:799, so nothing was
+      // adopted and reverting the cell alone is sufficient HERE and only here.
+      cell.adopt(previous);
+      throw new CpnAdoptError("reload", "previous", undefined,
+        `the endpoint refused the renewed credential: ${(e as Error).message}`);
+    }
+    try {
+      // Swap the LIVE wire onto the proven credential; reloadCreds deliberately does not
+      // (endpoint.ts:828-830). ep.reconnect() and NOT MeshAgent.reconnect(), which converts a
+      // failure into { ok: false } (agent.ts:307-309) and would hide it from the rollback below.
+      await this.ep.reconnect();
+    } catch (e) {
+      cell.adopt(previous);
+      let restored: CpnCredsWindow | undefined;
+      let restoreFailed: Error | undefined;
+      try { restored = await this.ep.reloadCreds(); } catch (e2) { restoreFailed = e2 as Error; }
+      if (restoreFailed) {
+        cell.adopt(next);
+        throw new CpnAdoptError("rollback", "new", committed,
+          `the wire did not swap (${(e as Error).message}) and the previous credential could not be ` +
+            `re-proved (${restoreFailed.message}); the session is left on the broker-accepted new credential`);
+      }
+      throw new CpnAdoptError("reconnect", "previous", restored,
+        `the renewed credential was proved but the wire did not swap (${(e as Error).message}); ` +
+          "the session is left on the previous credential");
+    }
+    return committed;
   }
 
   // ---- inbox ---------------------------------------------------------------

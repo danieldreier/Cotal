@@ -481,3 +481,9 @@ smoke:anchor-renewal
 # same dead registration when the freeze-holder is gone under a complete CONNZ sweep. Appended
 # at the end: no ordering dependency, and appending keeps two branches from conflicting.
 smoke:boot-self-heal-gate
+
+# CPN laptop credential renewal arms on exactly the environment that can drive it. The endpoint's
+# standing-renewal machinery was dead on the laptop path because every connector passed a static
+# creds string; a half-configured launch must now fail loud at start rather than claim to renew.
+# Appended at the end: no ordering dependency, and appending keeps two branches from conflicting.
+smoke:cpn-renew-config

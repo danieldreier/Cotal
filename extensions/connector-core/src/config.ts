@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { DEFAULT_SERVER, LAUNCH_MATERIAL_ENV, discardLaunchMaterial, assertValidChannel, channelInAllow, isConcreteChannel, loadAgentFile, parseJoinLink, readLaunchMaterial, type AgentDef, type ChannelMode, type EndpointKind, type LaunchMaterial } from "@cotal-ai/core";
+import { resolveCpnRenewal, type CpnRenewalConfig } from "./cpn-renew.js";
 
 /** Keyed beta intake — used when a `COTAL_FEEDBACK_KEY` is configured. */
 export const FEEDBACK_URL = "https://broker.cotal.ai/v1/feedback";
@@ -20,6 +21,16 @@ export interface AgentConfig {
   id?: string;
   /** Minted creds file content (auth mode); the endpoint authenticates with it. */
   creds?: string;
+  /** Where {@link creds} was read from, when this launch used a credential FILE — the launch
+   *  material's `creds` pointer or `COTAL_CREDS`. ABSOLUTE (see cpn-renew.ts). The endpoint never
+   *  reads it (a renewing session is fed from memory); it is kept so a renewal can locate the
+   *  credential root that holds this launch's generation directory, and so the orientation card
+   *  can name it. */
+  credsPath?: string;
+  /** Present ⇒ this session renews its own CPN laptop credential in the background. Built by
+   *  {@link configFromEnv} from the environment and by nothing else: MeshAgent must not read
+   *  `process.env`, or every agent in a process inherits one agent's arming. */
+  cpnRenewal?: CpnRenewalConfig;
   /** The incarnation's lifecycle UID (SPEC §13.1) from the launcher (`COTAL_LIFECYCLE_UID`): the
    *  endpoint binds its lifecycle-keyed dm/dlv/chathist durables by it — the same exact names its
    *  credential pins, so a mismatch fails at the broker, never silently. */
@@ -337,6 +348,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): AgentConfig
     id: env.COTAL_ID?.trim() || undefined,
     lifecycleUid,
     creds: credsPath ? readFileSync(credsPath, "utf8") : undefined,
+    credsPath,
+    cpnRenewal: resolveCpnRenewal({ name, credsPath, lifecycleUid }, env),
     userAuth,
     name,
     role: env.COTAL_ROLE?.trim() || def?.role || undefined,

@@ -1,4 +1,5 @@
 export * from "./config.js";
+export * from "./cpn-renew.js";
 export * from "./agent.js";
 export * from "./runtime.js";
 export * from "./launch.js";
