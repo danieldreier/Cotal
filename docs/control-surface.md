@@ -143,7 +143,17 @@ registration's own exit, and there are exactly two routes to it, both explicit
 A manager that stops cleanly deletes its own two records keys as part of stopping, so an instance
 that was shut down leaves no row behind. This is a **graceful stop** only. A manager that loses
 its lease tears down fail-closed and deliberately does not deregister: it is not the authority on
-its own record at that point, and the incarnation that took the lease from it is.
+its own record at that point, and the incarnation that took the lease from it is. A restart that
+died *mid-registration* is a different residue: the issuance gate stays frozen under that op. The
+successor completes the dead registration on boot when the freeze-holder is affirmatively gone
+under a complete CONNZ sweep (the same composition as [`cotal reconcile-gate`](cli.md#reconcile-gate)),
+then runs its normal takeover. The automatic path rechecks its own per-instance liveness lease
+after that potentially long sweep and around every family-revoke, holder-eviction, and gate-reopen
+phase. Losing or being unable to read that tenure refuses without beginning the next phase, and a
+raced final reopen remains a boot failure because revoke/evict may already have run. It does not
+invent a TTL and it does not start a new freeze over a still-held one. This requires the workspace's
+persisted manager instance identity to survive the restart; a fresh workspace is a different
+logical instance and cannot discover the old coordinate automatically.
 
 For the instance that cannot cooperate, an operator names it:
 `cotal deregister-instance --instance <id>` ([cli.md](cli.md#deregister-instance)). It removes the

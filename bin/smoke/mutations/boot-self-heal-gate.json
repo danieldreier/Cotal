@@ -1,0 +1,71 @@
+{
+  "suite": "implementations/manager/smoke/boot-self-heal-gate.smoke.ts",
+  "guard": "a successor manager completes a crashed predecessor's frozen registration gate on boot only when the freeze-holder is affirmatively gone under a complete CONNZ sweep; live and unestablishable stay loud refusals",
+  "command": "pnpm smoke:boot-self-heal-gate",
+  "completionMarker": "BOOT SELF-HEAL GATE",
+  "proveWith": "node scripts/mutation-proof.mjs --config bin/smoke/mutations/boot-self-heal-gate.json",
+  "why": [
+    "NO BUILD IN `command`. The suite imports Manager relatively (`../src/manager.js`), so tsx",
+    "loads manager.ts itself and a mutation on it is live with no `dist` in the path. `@cotal-ai/core`",
+    "is already built for the broker/auth helpers; the boot heal lives in manager.ts, which is the",
+    "file these mutations edit. If that were wrong, mutation 1 would come back SURVIVED.",
+    "",
+    "MUTATION 1 IS THE DEFECT VERBATIM: skip the boot heal, so a frozen registration gate still",
+    "blocks the successor with SPEC 13.8. It must kill the dead-holder success cell.",
+    "",
+    "MUTATION 2 IS ASSUME-DEAD AT THE BOOT SEAM: the liveness probe always returns gone, so a live",
+    "holder is no longer refused as `holder-alive`. Eviction may still fail closed later; the named",
+    "cell is the admit condition, not the later barrier.",
+    "",
+    "NOT GRADED HERE: the CLI `cotal reconcile-gate` path. Its dedicated smoke has strong real-broker",
+    "coverage but no mutation config. This file grades the successor BOOT and the shared reply mapper",
+    "through the exact boundaries the automatic repair depends on."
+  ],
+  "mutations": [
+    {
+      "name": "the defect restored: boot does not complete a frozen registration gate",
+      "file": "implementations/manager/src/manager.ts",
+      "find": "      if (auth) await this.healFrozenRegistrationGate(authKv, iid, auth);\n",
+      "replace": "      if (false && auth) await this.healFrozenRegistrationGate(authKv, iid, auth);\n",
+      "expectRed": "DEAD HOLDER: successor start SUCCEEDS without `cotal reconcile-gate` (boot self-heal)",
+      "cell": "DEAD HOLDER: successor start SUCCEEDS without `cotal reconcile-gate` (boot self-heal)",
+      "note": "The shipped skip. A successor seeing a frozen registration gate still hits SPEC 13.8 and cannot register until an operator runs reconcile-gate."
+    },
+    {
+      "name": "assume-dead: boot treats every freeze-holder as gone, so a live holder is no longer refused by name",
+      "file": "implementations/manager/src/manager.ts",
+      "find": "      probeHolder: makeManagerHolderLivenessProbe({ space: this.space, servers, auth, log }),\n",
+      "replace": "      probeHolder: async () => ({ state: \"gone\", detail: \"assumed gone; sweepComplete not consulted\" }),\n",
+      "expectRed": "LIVE HOLDER: the refusal is named `holder-alive`",
+      "cell": "LIVE HOLDER: the refusal is named `holder-alive`",
+      "note": "The admit condition is gone AND sweepComplete=true. Forging a gone verdict at the boot seam is exactly the TTL-shaped failure two reviewers independently refused."
+    },
+    {
+      "name": "stale tenure: boot mutates after its own per-instance manager lease is lost",
+      "file": "implementations/manager/src/manager.ts",
+      "find": "        assertMutationAuthorized: (checkpoint) => this.assertBootHealLeaseHeld(checkpoint),\n",
+      "replace": "        assertMutationAuthorized: async () => {},\n",
+      "expectRed": "LEASE LOST: the refusal is named `lease-not-held`",
+      "cell": "LEASE LOST: the refusal is named `lease-not-held`",
+      "note": "The liveness and eviction RPCs can exceed the manager-lease TTL. Automatic repair must re-prove its own fencing tenure after the oracle reply and around every mutating phase."
+    },
+    {
+      "name": "swallow raced: boot continues after revoke and eviction even though its final reopen CAS lost",
+      "file": "implementations/manager/src/manager.ts",
+      "find": "      if (e instanceof GateReconcileRefused && e.condition === \"not-frozen\") {\n",
+      "replace": "      if (e instanceof GateReconcileRefused && (e.condition === \"not-frozen\" || e.condition === \"raced\")) {\n",
+      "expectRed": "RACED REOPEN: the refusal is named `raced`",
+      "cell": "RACED REOPEN: the refusal is named `raced`",
+      "note": "A raced reopen happens after family revoke and verified eviction. Seeing the gate open does not make those side effects benign, so automatic boot must refuse rather than register onward."
+    },
+    {
+      "name": "contradictory oracle: incomplete sweep is allowed to authorize gone",
+      "file": "implementations/manager/src/holder-liveness.ts",
+      "find": "  if (parsed.state === \"gone\" && parsed.sweepComplete !== true)\n",
+      "replace": "  if (false && parsed.state === \"gone\" && parsed.sweepComplete !== true)\n",
+      "expectRed": "INCOMPLETE SWEEP: contradictory `gone` is named `liveness-unestablishable`",
+      "cell": "INCOMPLETE SWEEP: contradictory `gone` is named `liveness-unestablishable`",
+      "note": "The boot contract names gone AND sweepComplete=true as the admit condition. Deleting the contradiction guard must make the new boot-seam cell red."
+    }
+  ]
+}

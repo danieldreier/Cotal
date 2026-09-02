@@ -66,7 +66,10 @@ for (const f of launchFlags) {
   assert.ok(START_OP_KEYS.has(key), `launch flag --${f.name} has no start-op key (${key})`);
 }
 
-// 3 — the MCP tool's params are a subset of the op vocabulary, names aligned. The spec
+// 3 — the MCP tool's params are a subset of the op vocabulary. `task` is the peer-facing
+// one-shot-assignment name; MeshAgent deliberately carries it on the established manager `prompt`
+// rail, so pin that sole translation here rather than pretending it is a manager op key.
+// The spec
 // enumeration needs A config, not the AMBIENT session's: pass an empty env (open-mode defaults)
 // so a connector-launched shell's COTAL_* vars (e.g. creds without a lifecycle uid) can't leak
 // in and trip the authed-launch parse gate — this smoke is about vocabulary, not identity.
@@ -77,8 +80,10 @@ const spawnTool = cotalToolSpecs(configFromEnv({ COTAL_NAME: "parity-smoke" }), 
   | undefined;
 assert.ok(spawnTool, "cotal_spawn tool spec exists");
 const toolParams = Object.keys(spawnTool.schema.shape);
+const toolToOpKey: Record<string, string> = { task: "prompt" };
 for (const p of toolParams) {
-  assert.ok(START_OP_KEYS.has(p), `cotal_spawn param "${p}" is not a start-op key — vocabulary drift`);
+  const key = toolToOpKey[p] ?? p;
+  assert.ok(START_OP_KEYS.has(key), `cotal_spawn param "${p}" has no start-op key (${key}) — vocabulary drift`);
 }
 // `resume` stays deliberately OFF the peer-facing tool (host-transcript disclosure — see the
 // tool-specs note); this asserts today's intent so re-adding it is a conscious edit here too.
