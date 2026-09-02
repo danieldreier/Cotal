@@ -220,6 +220,12 @@ export interface EndpointOptions {
   watchChannels?: boolean;
   /** Create inbound stream consumers (DM / chat / anycast). Default true; a pure observer sets false. */
   consume?: boolean;
+  /** Use lifecycle-pinned public-KV watcher names even when this endpoint's presentation kind is
+   *  not `agent`. Set only for a lifecycle-bound agent-profile credential (for example the
+   *  user-mode CLI's invisible transient observer); service credentials such as manager/delivery
+   *  do not carry these exact CREATE/INFO/DELETE rows. `card.kind: "agent"` enables this
+   *  automatically. */
+  lifecyclePinnedKvWatches?: boolean;
   /** Initial per-channel attention overrides to publish in presence from the first heartbeat (the
    *  connector's file-default seed). Mirror only — never read back into delivery. */
   channelModes?: Record<string, ChannelMode>;
@@ -490,6 +496,8 @@ export class CotalEndpoint extends EventEmitter {
   readonly actorIsEphemeral: boolean;
   /** This incarnation's lifecycle UID (opts.lifecycleUid) — see {@link EndpointOptions.lifecycleUid}. */
   private readonly ownLifecycleUid?: string;
+  /** Explicit agent-profile watcher selection for non-agent presentation endpoints. */
+  private readonly lifecyclePinnedKvWatches: boolean;
   /** Per-endpoint-name {@link resolveService} cache for {@link invokeService} — dropped on a
    *  `failed-precondition` currency refusal (the described incarnation was superseded). */
   private readonly resolvedServices = new Map<string, ResolvedService>();
@@ -613,6 +621,7 @@ export class CotalEndpoint extends EventEmitter {
         : this.authed
           ? undefined
           : mintLifecycleUid();
+    this.lifecyclePinnedKvWatches = opts.lifecyclePinnedKvWatches === true;
     // `card.id` is the principal DOT-FORM `<owner>.<actor>` — the wire identity every `from.id` carries;
     // principalKey validates both tokens.
     const principal = principalKey(this.owner, this.actor);
@@ -4351,7 +4360,14 @@ export class CotalEndpoint extends EventEmitter {
   }
 
   private usesLifecyclePinnedAgentWatch(): boolean {
-    return this.authed && this.card.kind === "agent";
+    // Most callers declare the credential class through `kind: agent`. User-mode interactive
+    // callers are also minted through the agent profile but legitimately present as `endpoint`
+    // (for example the CLI's invisible transient roster observer), so their composition root opts
+    // in explicitly. Never infer from lifecycleUid alone: managers and other service endpoints
+    // have lifecycle UIDs but do not carry this agent-only DELETE authority.
+    return this.authed
+      && this.ownLifecycleUid !== undefined
+      && (this.card.kind === "agent" || this.lifecyclePinnedKvWatches);
   }
 
   /** Delete only one lifecycle-owned public-KV watcher. A first bind normally gets 404 because no

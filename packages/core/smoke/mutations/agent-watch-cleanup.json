@@ -30,10 +30,10 @@
       "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
     },
     {
-      "name": "route the authenticated agent through the stock generated presence watcher",
+      "name": "ignore explicit lifecycle-pinned watcher selection for a non-agent presentation endpoint",
       "file": "packages/core/src/endpoint.ts",
-      "find": "    if (this.usesLifecyclePinnedAgentWatch()) {\n      await this.startLifecyclePinnedAgentWatch(this.kv, \"presence\",",
-      "replace": "    if (this.card.kind === \"endpoint\" && this.usesLifecyclePinnedAgentWatch()) {\n      await this.startLifecyclePinnedAgentWatch(this.kv, \"presence\",",
+      "find": "      && (this.card.kind === \"agent\" || this.lifecyclePinnedKvWatches);",
+      "replace": "      && this.card.kind === \"agent\";",
       "expectRed": "real endpoint starts both lifecycle-pinned public-KV watchers",
       "cell": "real endpoint starts both lifecycle-pinned public-KV watchers",
       "afterRestore": "corepack pnpm --filter @cotal-ai/core build"

@@ -451,8 +451,11 @@ try {
   const alphaToken = readFileSync(incFiles("alpha").actorToken, "utf8").trim(); // capture for D + F
   // Witness the presence join on the OPERATOR's OWN user bearer (login → exchange → connect), watching the roster.
   const opCreds = await cotalAuthProvider.userCredentials({ store, dir, space: SPACE, actor: "cli" });
+  const opClaims = JSON.parse(Buffer.from(opCreds.bearer.split(".")[1], "base64url").toString("utf8")) as { act: { lifecycleUid: string } };
   observer = new CotalEndpoint({
     space: SPACE, servers: SERVER, bearer: opCreds.bearer, sentinelCreds: opCreds.sentinelCreds,
+    lifecycleUid: opClaims.act.lifecycleUid,
+    lifecyclePinnedKvWatches: true,
     channels: [], consume: false, registerPresence: false, watchPresence: true,
     card: { name: "observer", kind: "endpoint" },
   });

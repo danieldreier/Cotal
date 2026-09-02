@@ -95,7 +95,11 @@ try {
     registerPresence: false,
     watchPresence: true,
     watchChannels: true,
-    card: { id: identity.id, name: "watcher", kind: "agent" },
+    // Presentation kind is deliberately `endpoint`: user-mode CLI observers use the agent
+    // credential profile while staying invisible/non-agent in the roster. Their composition root
+    // explicitly selects the exact watcher surface rather than pretending they are roster agents.
+    lifecyclePinnedKvWatches: true,
+    card: { id: identity.id, name: "watcher", kind: "endpoint" },
   });
   endpoint.on("error", (err: Error) => endpointErrors.push(err.message));
   let startError: unknown;
