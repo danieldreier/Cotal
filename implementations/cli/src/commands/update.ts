@@ -15,6 +15,7 @@ import { claimExtensionUpdatePass } from "../lib/ext-mutation.js";
 import { selfArgv } from "../lib/self-exec.js";
 import { cliVersion } from "../lib/version.js";
 import { runSeed, compareSemver } from "../seed/reconcile.js";
+import { installAgentSkills, type AgentSkillsResult } from "../lib/agent-skills.js";
 import { c } from "../ui.js";
 
 const UPDATE_TARGET_ENV = "COTAL_UPDATE_TARGET_VERSION";
@@ -38,6 +39,7 @@ export interface UpdateRuntime {
   readonly nodePath: string;
   version(): string;
   reconcile(): Promise<void>;
+  reconcileSkills(): AgentSkillsResult;
   extensions(): readonly InstalledExtension[];
   claimUpdatePass(): () => void;
   claimGlobalUpdate(root: string): () => void;
@@ -67,6 +69,7 @@ const runtime: UpdateRuntime = {
   nodePath: process.execPath,
   version: cliVersion,
   reconcile: () => runSeed({ force: true }),
+  reconcileSkills: installAgentSkills,
   extensions: () => loadExtensionsManifest().extensions,
   claimUpdatePass: () => claimExtensionUpdatePass(),
   claimGlobalUpdate: (root) => claimGlobalNpmUpdateLock(root),
@@ -150,11 +153,19 @@ async function reconcileCurrent(
 
   try {
     let ok = true;
+    rt.out(c.bold("Agent skills"));
+    try {
+      const skills = rt.reconcileSkills();
+      rt.out(c.green(`✓ cross-vendor skills (${skills.installed.join(", ")})`));
+    } catch (e) {
+      rt.err(c.red(`✗ cross-vendor skills: ${message(e)}`));
+      return finish(false);
+    }
     rt.out(c.bold("Operator extensions"));
     let entries: readonly InstalledExtension[];
     try {
-      // Exclude every seeded built-in (the connectors AND the bundled web dashboard) — runSeed already
-      // reconciled them from the bundled store; letting web fall through here reinstalls it from npm on
+      // Exclude every seeded built-in (the connectors, bundled web dashboard, and local MCP gateway) — runSeed already
+      // reconciled them from the bundled store; letting a bundled package fall through here reinstalls it from npm on
       // top of the seed, drops its seeded marker, and makes `cotal update` fail offline on a bundled pkg.
       const builtIns = new Set(Object.values(SEEDED_EXTENSIONS).map((e) => e.pkg));
       entries = rt.extensions().filter((entry) => !builtIns.has(entry.pkg));

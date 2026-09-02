@@ -1,5 +1,109 @@
 # @cotal-ai/pi
 
+## 0.33.1
+
+## 0.33.0
+
+### Minor Changes
+
+- ba74c84: An agent now reads only the channels it lists. An omitted or empty read set means **no channels**,
+  where it previously meant `general`: the agent-file loader, the provisioner, the credential mint and
+  the endpoint each defaulted an absent read set to `["general"]`, so any persona that simply did not
+  mention channels was subscribed to `general` by code and had the matching channel read row baked
+  into its credential.
+
+  An agent on no channel is still a full mesh peer: it appears on the roster and sends and receives
+  DMs and anycasts, and the same default-deny that already governed `allowPublish` now governs reads.
+  An empty list and an omitted one mean the same thing, for both read keys. That has one consequence
+  worth stating plainly: when **both** are omitted, `allowSubscribe` falls back to the read set and so
+  resolves empty too, which leaves the agent unable to `cotal_join` a channel at runtime. Give it an
+  explicit `allowSubscribe` if it should be able to join one later.
+
+  With no concrete channel there is no default broadcast target, so a send with no explicit channel is
+  refused with a message saying so, rather than resolving to `general`. Leaving your last channel is
+  allowed and always was; the `cotal_leave` description said otherwise and now says what actually
+  happens, including that the default send channel is gone until you join one.
+
+  Migration: **list `general` explicitly if you want it.** A hand-written persona that relied on the
+  old default needs `subscribe: [general]` added.
+
+  This changes the default `cotal setup` install as well. The seeded `default_agent` carries
+  `subscribe: []`, which used to resolve to `general` and now resolves to no channel; it keeps
+  `allowSubscribe: [">"]`, so it can still `cotal_join` anything, it just no longer arrives on a
+  channel it never asked for — which is what its own seed comment already described.
+
+  Already-running agents are not narrowed retroactively: a live seat keeps the read ACL its credential
+  was minted with, across renewal, until it is respawned.
+
+## 0.32.0
+
+## 0.31.0
+
+### Minor Changes
+
+- 4ef59c3: A spawned seat now receives a constructed environment (PATH/HOME/locale, the machine-wide COTAL\_\* knobs, connector-declared provider keys) instead of the manager's ambient environment. Host-session markers such as CLAUDE_CODE_CHILD_SESSION no longer leak into seats and silently disable transcript saving. The Claude connector declares CLAUDE_CODE_OAUTH_TOKEN (and the rest of claude's documented credential set) so a container seat still authenticates; spawn.env remains the explicit opt-in for extra names, including a host marker a persona has chosen to receive.
+
+## 0.30.2
+
+## 0.30.1
+
+## 0.30.0
+
+### Minor Changes
+
+- 569f4d3: An empty message id is never a dedup key, and an id-less delivery is individually addressable at the drain seam.
+
+  Two distinct messages that each carry an empty id collapsed to one: the receiver-side id
+  dedup read empty-equals-empty as a duplicate, silently dropped the second, and once the
+  first was handled it dropped every later empty-id message on arrival. Measured live, two
+  such messages arrived on the wire and only the first was ever delivered.
+
+  An empty id is now treated as no id: the ingest coalescing (pending, handled, protected)
+  is skipped for it in both directions, so distinct messages that carry an empty id are all
+  delivered. At the drain seam a per-delivery receive key (the wire id when there is one, a
+  per-session secret-namespaced minted key when the id is empty, never on any wire) is what
+  hosts, adapters, and the exact-key drain select by: cotal_inbox, the Claude Code hooks,
+  the OpenCode plugin, the Codex host, the Hermes bridge and its Python sidecar, and the pi
+  driver. The drain API is renamed for what it takes (drainInboxDeliveries, missingKeys).
+  Eviction classification, in-flight holds, scope routing, the focus-recall tie-break, and
+  the scoped drain's selection no longer key on the empty id either. The Hermes bridge no
+  longer wedges on an empty-id message. Delivery pumps in core now treat an absent or
+  non-string id as a malformed envelope per SPEC section 5 (durable terminate, live drop,
+  history and recall skip).
+
+  What this restores: before the receive key, an id-less delivery was unaddressable: the
+  raw id swept every pending empty-id item in one drain call, and once filtering closed
+  that, the item could never be drained or acked, was re-shown on every windowed inbox
+  read, and on a durable channel accumulated as an unretirable entry until the 200-entry
+  overflow valve evicted it, roughly a model turn of churn per entry, while one hostile
+  empty-id ambient publish self-drove back-to-back host turns on the pi adapter. This was
+  a violation of the SPEC section 8 ack-only-after-surfaced obligation at the receiver,
+  not only an adapter defect.
+
+  The cost is stated rather than hidden: with no id there is no coalescing either, so a
+  redelivered copy of an empty-id message can surface twice on a path that is already
+  at-least-once (live remains at-most-once). Dedup for real ids is unchanged: their
+  receive key is their wire id and their coalescing is untouched. SPEC section 4, section
+  7 item 5, section 8, and section 12 item 12 now state the receiver-scoped rule, and the
+  client-builder guidance mirrors it.
+
+  One named follow-up stays open: Plane-3 durable fan-out derives its publish msgID from
+  the message id, so distinct empty-id messages can still be collapsed inside the broker's
+  duplicate window on a durable channel before this receiver sees them. That path is its
+  own issue; this change's guarantee is the receiver.
+
+## 0.29.2
+
+## 0.29.1
+
+## 0.29.0
+
+## 0.28.2
+
+## 0.28.1
+
+## 0.28.0
+
 ## 0.27.0
 
 ## 0.26.0

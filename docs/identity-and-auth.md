@@ -59,7 +59,7 @@ normative shapes are [SPEC Appendix B](../SPEC.md#appendix-b-profile-acls); in b
 
 | Profile | Is |
 |---|---|
-| **agent** | The ordinary peer: publishes as itself to its declared channels, reads within its read ACL + its own DM/task inboxes. |
+| **agent** | The ordinary peer: publishes as itself to its declared channels, reads within its read ACL + its own DM/task inboxes. Its read-only presence and channel-registry watches may create, inspect, and delete only their own client-managed ordered consumers; those cleanup grants cannot delete KV records or streams. |
 | **observer** | Read-only chat + presence; DMs invisible. What `cotal console` runs. |
 | **admin** | Elevated *read-only* god-view: sees DMs and anycast live, still writes nothing. A deliberate opt-in (`cotal web`). |
 | operator-side | Narrow single-purpose creds for the machinery (supervising, provisioning, teardown, delivery); the reference implementation splits these so no one connection can read every DM *and* delete every stream ([security model](security.md)). |
@@ -119,10 +119,13 @@ the pinned JWKS, issuer, and audience. An agent presents its spawn-time actor to
 match a fresh managed-ledger row. Elevated `view` exchanges stay loopback-only.
 
 The well-known response contains the IdP pins and the actual deny-all sentinel credential remote
-agents need before the bearer-driven auth callout. Treat it as bootstrap material: the sentinel
-cannot publish or subscribe, but consumers must still take the bundle only from the intended HTTPS
-origin and must verify TLS. `--exchange-trusted-proxy` opts into peer attribution by the **last**
-`X-Forwarded-For` hop; use it only when the listener is reachable solely through a proxy you control.
+agents need before the bearer-driven auth callout. The pins ride a `userAuth` arm that names the
+auth provider, and that name is the same one the local arm registers under — a document naming a
+different provider than the one serving it would register an entry nothing can resolve, so both read
+one constant. Treat it as bootstrap material: the sentinel cannot publish or subscribe, but
+consumers must still take the bundle only from the intended HTTPS origin and must verify TLS.
+`--exchange-trusted-proxy` opts into peer attribution by the **last** `X-Forwarded-For` hop; use it
+only when the listener is reachable solely through a proxy you control.
 Without it, forwarded headers are ignored and the socket address is the peer key. Public failure
 buckets are per-source and separate from loopback exchange budgets. The in-process LRU retains at
 most 1024 peer buckets: that bounds memory and isolates ordinary sources, but an attacker cycling
@@ -198,6 +201,40 @@ is spawn-grade (the manager still refuses a manifest claiming another owner). Vi
 only on a signed-in human exchange (an agent's managed exchange never mints one), are
 authorized against the fresh ledger row at every connect, and expire with the bearer, so
 narrowing or revoking a grant bites within minutes here too.
+
+### Remote manager authority
+
+A registered user remains an ordinary `agent` bearer by default. Running a detached manager
+on a remote user-auth mesh needs the closed server-authored **`manager-service`** view, which
+is distinct from every general-purpose profile. The operator grants it only by adding
+`supervise` to that user's actor-ledger scope. `supervise` is deliberately distinct from
+`spawn` and `admin`: spawn controls your agents, admin permits the separate cross-owner
+operations, and neither grants persistent manager registration authority.
+
+Only a signed-in human may request this view from the loopback/operator exchange. The public
+exchange and every managed-agent secret exchange refuse it. At exchange and each connection,
+the auth service re-reads the actor row; revoking or removing `supervise` therefore denies the
+next view exchange and connection. A grant must carry the whole requested row just like every
+other actor update, so re-grant its channel envelope, role, and all wanted scope tokens, not
+only `supervise`.
+
+The service is one opaque manager instance for the user's derived owner and a fixed
+server-selected manager actor. Its authority is limited to that instance's manager
+registration, contracts, status, endpoint rails, gate and credential family; it cannot read or
+write another owner or instance. It never exposes a signer, static provisioner credential, owner
+secret, raw stream/KV/consumer authority, or a generic credential-mint API. The host creates the
+public-nkey JWT material through the typed lifecycle-bound protocol: **prepare → activate →
+renew**. Each request is replay-safe and idempotent at its lifecycle/instance operation
+coordinate; the host writes its credential ledger row and finalizes the gate before it releases
+usable material.
+
+A remote manager can provision only descendants of the same derived owner, and the host
+validates that relation and the current manager grant for every provision. It cannot broaden the
+user's envelope or provision a sibling owner's agent. Renewals are bounded. If login, the
+`supervise` grant, or the host manager authority service is unavailable, the manager reports a
+degraded state and refuses new agents, restarts, or replacement credentials rather than
+substituting local/static authority. Existing live agents remain running only while their own
+valid authority permits it; recovery requires the host service and a fresh successful renewal.
 
 **A hard branch, not a fallback.** On a user-auth space, commands never fall back to
 static minting or credless connects: a missing login or a down auth service is one

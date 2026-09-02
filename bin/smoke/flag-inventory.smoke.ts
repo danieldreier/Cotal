@@ -33,6 +33,13 @@ const GOLDEN: Record<string, { flags: string[]; positionals: boolean; rawArgs?: 
       "channels:string", "detach:boolean", "dry-run:boolean", "file:string:f", "host:string",
       "idp:string", "open:boolean", "runtime:string", "server:string", "space:string",
       // The optional PUBLIC remote-exchange face, threaded to the auth-service daemon.
+      // `--advertised-server` (2026-08): with --exchange-public-port, the broker address the public
+      // discovery bundle advertises - what participants dial, which is not the address the callout
+      // dials (--server is loopback/LAN and meaningless off the machine).
+      "advertised-server:string",
+      // `--agent-provisioning-url` (2026-08): the U6 remote agent-provisioning endpoint the public
+      // bundle advertises, threaded to the auth-service daemon like --advertised-server.
+      "agent-provisioning-url:string",
       "exchange-public-port:string", "exchange-public-url:string", "exchange-trusted-proxy:boolean",
       "restore:string", "restore-only:string", "accept-missing-source:boolean",
       // `--rotate-sys` (2026-08): the class-3 renewal, which rotates the system account and re-mints the
@@ -54,7 +61,8 @@ const GOLDEN: Record<string, { flags: string[]; positionals: boolean; rawArgs?: 
   // Remote registration (2026-08): `--tls` records enforced TLS intent (a tls:// --server implies
   // it), and `--mode user` registers from supplied pinned trust via `--user-auth-file` or `--from`.
   meshes: { flags: ["allow-unencrypted-overlay:boolean", "force:boolean", "from:string", "mode:string", "root:string", "server:string", "tls:boolean", "user-auth-file:string"], positionals: true },
-  status: { flags: ["server:string", "space:string"], positionals: false },
+  // `--components` (2026-08): explicit fail-loud health across manager, delivery, web, and broker; bare status remains the recovery-oriented inventory.
+  status: { flags: ["components:boolean", "server:string", "space:string"], positionals: false },
   doctor: { flags: ["fix:boolean", "space:string"], positionals: true },
   use: { flags: [], positionals: true },
   join: {
@@ -92,6 +100,9 @@ const GOLDEN: Record<string, { flags: string[]; positionals: boolean; rawArgs?: 
     flags: [
       ...TARGET, "force:boolean", "from:string", "model:string", "prompt:string", "role:string",
       "running:boolean", "verbose:boolean:v",
+      // `--subscribe` (2026-08, 53f66c25): `personas new` requires the persona to name the channels
+      // it reads ("" = none), so the flag it is passed through must be declared here too.
+      "subscribe:string",
     ],
     positionals: true,
   },
@@ -191,6 +202,12 @@ const GOLDEN: Record<string, { flags: string[]; positionals: boolean; rawArgs?: 
   },
   "auth-service": {
     flags: [
+      // `--advertised-server` (2026-08): rides the public bundle, so it is threaded from `up` to
+      // this daemon and must appear in both inventories.
+      "advertised-server:string",
+      // `--agent-provisioning-url` (2026-08): threaded from `up` like --advertised-server; both
+      // inventories carry it.
+      "agent-provisioning-url:string",
       "exchange-public-port:string", "exchange-public-url:string", "exchange-trusted-proxy:boolean",
       "port:string", "server:string", "space:string",
     ],

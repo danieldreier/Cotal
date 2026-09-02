@@ -237,10 +237,11 @@ for (const rel of assetRefs) {
 const skillsDir = join(pubDir, '.well-known', 'agent-skills');
 
 // Cotal's authored skills have ONE source of truth: implementations/cli/cotal-skills/skills (the same
-// files ship in the CLI package for the Claude Code plugin and drop into ~/.agents/skills). Generate
+// files ship in the CLI package for the Claude Code plugin and drop into ~/.agents/skills plus
+// Codex's ~/.codex/skills). Generate
 // the served copies from it so there is no committed twin to drift. This discovery index is a forward
 // bet (the Cloudflare .well-known/agent-skills RFC is still Draft and no shipping harness consumes it
-// yet), which is why the working cross-vendor path is the .agents/skills drop, not this.
+// yet), which is why the working installs are local skill roots, not this index.
 const canonicalSkillsDir = join(repoRoot, 'implementations', 'cli', 'cotal-skills', 'skills');
 const canonicalSkillNames = new Set(
   readdirSync(canonicalSkillsDir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name),

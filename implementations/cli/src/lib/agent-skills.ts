@@ -12,18 +12,19 @@ import { homeCotalDir } from "@cotal-ai/workspace";
  * channels from that single source:
  *   1. Claude Code, bundled in the `cotal-skills` plugin, installed from the mesh marketplace at user
  *      scope (real remote update via a release-derived plugin version; see setup.ts).
- *   2. Every other harness (Codex, Cursor, OpenCode, Gemini CLI, Windsurf/Devin) reads the cross-vendor
- *      `~/.agents/skills/` directory convention. No remote index reaches them today, so `cotal setup`
- *      reconciles the files here and `cotal status` reports skew. This module owns that reconcile.
+ *   2. Cursor, OpenCode, Gemini CLI, and Windsurf/Devin read the cross-vendor `~/.agents/skills/`
+ *      directory convention. Codex reads its native `$CODEX_HOME/skills` root (normally
+ *      `~/.codex/skills`). No remote index reaches either location, so `cotal setup` reconciles both
+ *      and `cotal status` reports skew. This module owns those reconciles.
  *   3. The website Agent Skills discovery index, generated from the same canonical files at build.
  *
- * File-level ownership (the safety model): Cotal owns exactly ONE file per skill it ships,
- * `~/.agents/skills/<name>/SKILL.md`, tracked by digest in a validated manifest under `~/.cotal`. It
- * only ever writes/removes that file: it never recursively deletes a skill directory (a retired skill's
- * dir is removed only if it is left empty), never touches any other file a user or third party put
- * there, refuses to follow a symlink anywhere in the managed path, and writes via a stage-and-rename so
- * it replaces the directory entry instead of writing through a hard-linked inode. That keeps a
- * destructive reconcile from becoming a data-loss or arbitrary-write primitive.
+ * File-level ownership (the safety model): Cotal owns `SKILL.md` in each managed root and, only when
+ * shipped, the Codex-native `agents/openai.yaml` interface file. Every owned file is tracked by digest
+ * in a validated manifest under `~/.cotal`. Cotal never recursively deletes a skill directory (a
+ * retired skill's dir is removed only if it is left empty), never touches any other file a user or third
+ * party put there, refuses to follow a symlink anywhere in a managed path, and writes via a
+ * stage-and-rename so it replaces the directory entry instead of writing through a hard-linked inode.
+ * That keeps a destructive reconcile from becoming a data-loss or arbitrary-write primitive.
  */
 
 /** The canonical `SKILL.md` source dir, shipped in this CLI package. Resolved the same way in a dev
@@ -36,6 +37,12 @@ export function canonicalSkillsDir(): string {
  *  home dir (not `~/.cotal`), because that is the real path those tools scan. */
 export function agentSkillsHome(): string {
   return join(homedir(), ".agents", "skills");
+}
+
+/** Codex's native skill root. Follow an explicit `CODEX_HOME`, matching the Codex CLI; otherwise use
+ *  its normal `~/.codex` default. */
+export function codexSkillsHome(): string {
+  return join(process.env.CODEX_HOME?.trim() || join(homedir(), ".codex"), "skills");
 }
 
 // The Agent Skills name grammar: lowercase alphanumerics in hyphen-separated segments, no leading,
@@ -85,12 +92,16 @@ function backupDivergent(destFile: string, cur: Buffer): string {
 }
 
 /** Where the ownership manifest lives (`~/.cotal/agent-skills.json`): the record of which skill names
- *  Cotal owns in `~/.agents/skills` and the digest it last wrote for each. */
+ *  Cotal owns in each managed root and the digest it last wrote for each. */
 function manifestPath(): string {
   return join(homeCotalDir(), "agent-skills.json");
 }
 
-type Manifest = { skills: Record<string, string> }; // skill name -> digest Cotal last wrote
+type Manifest = {
+  skills: Record<string, string>; // cross-vendor root: skill name -> digest Cotal last wrote
+  codexSkills: Record<string, string>; // Codex native root: skill name -> digest Cotal last wrote
+  codexSkillInterfaces: Record<string, string>; // Codex `agents/openai.yaml`: digest Cotal last wrote
+};
 
 /** Read the ownership manifest. Absent bootstraps to empty; a present-but-malformed manifest (bad JSON,
  *  wrong shape, an illegal skill name, or a non-digest value) FAILS LOUD rather than silently resetting.
@@ -98,7 +109,7 @@ type Manifest = { skills: Record<string, string> }; // skill name -> digest Cota
  *  must never be trusted to name what we may remove, nor silently forget what we still own. */
 function readManifest(): Manifest {
   const path = manifestPath();
-  if (!existsSync(path)) return { skills: {} };
+  if (!existsSync(path)) return { skills: {}, codexSkills: {}, codexSkillInterfaces: {} };
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, "utf8"));
@@ -107,17 +118,27 @@ function readManifest(): Manifest {
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
     throw new Error(`Corrupt Cotal skills manifest at ${path} (unexpected shape). Fix or delete it, then re-run cotal setup.`);
-  const skills = (parsed as { skills?: unknown }).skills;
-  // Must be a plain object, never an array: array indices ("0", "1") pass a slug check, so an array
-  // would let a numeric "name" be treated as owned (and deleted), and a string property assigned to an
-  // array is dropped by JSON.stringify, so ownership would silently fail to persist. Reject it outright.
-  if (typeof skills !== "object" || skills === null || Array.isArray(skills))
-    throw new Error(`Corrupt Cotal skills manifest at ${path} (skills is not an object). Fix or delete it, then re-run cotal setup.`);
-  for (const [name, dig] of Object.entries(skills as Record<string, unknown>)) {
-    if (!validSkillName(name)) throw new Error(`Corrupt Cotal skills manifest at ${path}: illegal skill name ${JSON.stringify(name)}.`);
-    if (typeof dig !== "string" || !DIGEST.test(dig)) throw new Error(`Corrupt Cotal skills manifest at ${path}: bad digest for ${JSON.stringify(name)}.`);
-  }
-  return { skills: skills as Record<string, string> };
+  const readOwned = (field: "skills" | "codexSkills" | "codexSkillInterfaces", required: boolean): Record<string, string> => {
+    const skills = (parsed as Record<string, unknown>)[field];
+    // Native-root ledgers were added after the initial manifest format. An absent entry means Cotal has
+    // not yet managed that file set; preserve the cross-vendor ledger and bootstrap it safely.
+    if (skills === undefined && !required) return {};
+    // Must be a plain object, never an array: array indices ("0", "1") pass a slug check, so an array
+    // would let a numeric "name" be treated as owned (and deleted), and a string property assigned to
+    // an array is dropped by JSON.stringify, so ownership would silently fail to persist. Reject it.
+    if (typeof skills !== "object" || skills === null || Array.isArray(skills))
+      throw new Error(`Corrupt Cotal skills manifest at ${path} (${field} is not an object). Fix or delete it, then re-run cotal setup.`);
+    for (const [name, dig] of Object.entries(skills as Record<string, unknown>)) {
+      if (!validSkillName(name)) throw new Error(`Corrupt Cotal skills manifest at ${path}: illegal skill name ${JSON.stringify(name)}.`);
+      if (typeof dig !== "string" || !DIGEST.test(dig)) throw new Error(`Corrupt Cotal skills manifest at ${path}: bad digest for ${JSON.stringify(name)}.`);
+    }
+    return skills as Record<string, string>;
+  };
+  return {
+    skills: readOwned("skills", true),
+    codexSkills: readOwned("codexSkills", false),
+    codexSkillInterfaces: readOwned("codexSkillInterfaces", false),
+  };
 }
 
 /** Write the manifest atomically (temp + rename) so a crash can't leave a half-written ledger. */
@@ -145,24 +166,132 @@ export function canonicalSkillNames(): string[] {
   return names.sort();
 }
 
-/** Refuse to touch a skill whose `~/.agents`, `~/.agents/skills`, `<name>` dir, or `<name>/SKILL.md` is
- *  a symlink: Cotal only writes/removes real files under `~/.agents/skills`, so a redirected component
- *  can never make a read, write, or delete land on a file outside it. */
-function assertNoSymlink(name: string): void {
-  for (const p of [join(homedir(), ".agents"), agentSkillsHome(), join(agentSkillsHome(), name), join(agentSkillsHome(), name, "SKILL.md")]) {
+/** Refuse to touch a skill whose managed-root ancestor, `<name>` dir, or `<name>/SKILL.md` is a
+ *  symlink. The same file-level ownership guarantee applies independently to both skill roots. */
+function assertNoSymlink(home: string, name: string): void {
+  for (const p of [dirname(home), home, join(home, name), join(home, name, "SKILL.md")]) {
     let st;
     try {
       st = lstatSync(p);
     } catch {
       continue; // does not exist yet: nothing to follow
     }
-    if (st.isSymbolicLink()) throw new Error(`Refusing to manage skills: ${p} is a symlink. Cotal only writes real files under ~/.agents/skills.`);
+    if (st.isSymbolicLink()) throw new Error(`Refusing to manage skills: ${p} is a symlink. Cotal only writes real files under ${home}.`);
   }
 }
 
-export type AgentSkillsResult = { installed: string[]; backedUp: { name: string; path: string }[]; removed: string[] };
+/** The optional Codex interface manifest is another Cotal-owned file, so inspect its two path
+ *  components explicitly as well as the common root and skill-dir checks above. */
+function assertNoSymlinkInterface(home: string, name: string): void {
+  assertNoSymlink(home, name);
+  for (const p of [join(home, name, "agents"), join(home, name, "agents", "openai.yaml")]) {
+    let st;
+    try {
+      st = lstatSync(p);
+    } catch {
+      continue;
+    }
+    if (st.isSymbolicLink()) throw new Error(`Refusing to manage skills: ${p} is a symlink. Cotal only writes real files under ${home}.`);
+  }
+}
 
-/** Reconcile Cotal's authored skills into `~/.agents/skills`, at the file level:
+type RootResult = { installed: string[]; backedUp: { name: string; path: string }[]; removed: string[] };
+export type AgentSkillsResult = RootResult & {
+  /** Results for Codex's native `~/.codex/skills` root. The legacy top-level fields remain the
+   *  cross-vendor `.agents` result for compatibility with existing CLI callers. */
+  codexInstalled: string[];
+  codexBackedUp: { name: string; path: string }[];
+  codexRemoved: string[];
+  codexInterfacesInstalled: string[];
+  codexInterfacesBackedUp: { name: string; path: string }[];
+  codexInterfacesRemoved: string[];
+};
+
+function reconcileSkillsRoot(home: string, owned: Record<string, string>, names: string[]): RootResult {
+  const src = canonicalSkillsDir();
+  const backedUp: { name: string; path: string }[] = [];
+  const removed: string[] = [];
+
+  for (const name of names) {
+    assertNoSymlink(home, name);
+    const dir = join(home, name);
+    const destFile = join(dir, "SKILL.md");
+    const canonical = readFileSync(join(src, name, "SKILL.md"));
+    if (existsSync(destFile)) {
+      const cur = readFileSync(destFile);
+      const ours = owned[name] === digest(cur);
+      if (!ours && digest(cur) !== digest(canonical)) {
+        const path = backupDivergent(destFile, cur);
+        backedUp.push({ name, path });
+      }
+    }
+    mkdirSync(dir, { recursive: true });
+    writeOwnedFile(destFile, canonical);
+    owned[name] = digest(canonical);
+  }
+
+  for (const name of Object.keys(owned)) {
+    if (names.includes(name)) continue;
+    assertNoSymlink(home, name);
+    const dir = join(home, name);
+    const destFile = join(dir, "SKILL.md");
+    if (existsSync(destFile) && digest(readFileSync(destFile)) === owned[name]) {
+      rmSync(destFile);
+      try {
+        if (existsSync(dir) && readdirSync(dir).length === 0) rmdirSync(dir);
+      } catch {
+        /* not empty or already gone: leave it */
+      }
+      removed.push(name);
+    }
+    delete owned[name];
+  }
+  return { installed: names, backedUp, removed };
+}
+
+/** Reconcile optional Codex UI metadata that ships beside a canonical skill. It is intentionally a
+ *  separate manifest ledger from SKILL.md: Cotal owns this one file only when it ships it, so adding
+ *  interface metadata can neither claim nor remove a user's unrelated `agents/` files. */
+function reconcileCodexInterfaces(home: string, owned: Record<string, string>, names: string[]): RootResult {
+  const src = canonicalSkillsDir();
+  const backedUp: { name: string; path: string }[] = [];
+  const removed: string[] = [];
+  const shipped = names.filter((name) => existsSync(join(src, name, "agents", "openai.yaml")));
+
+  for (const name of shipped) {
+    assertNoSymlinkInterface(home, name);
+    const destFile = join(home, name, "agents", "openai.yaml");
+    const canonical = readFileSync(join(src, name, "agents", "openai.yaml"));
+    if (existsSync(destFile)) {
+      const cur = readFileSync(destFile);
+      const ours = owned[name] === digest(cur);
+      if (!ours && digest(cur) !== digest(canonical)) backedUp.push({ name, path: backupDivergent(destFile, cur) });
+    }
+    mkdirSync(dirname(destFile), { recursive: true });
+    writeOwnedFile(destFile, canonical);
+    owned[name] = digest(canonical);
+  }
+
+  for (const name of Object.keys(owned)) {
+    if (shipped.includes(name)) continue;
+    assertNoSymlinkInterface(home, name);
+    const dir = join(home, name, "agents");
+    const destFile = join(dir, "openai.yaml");
+    if (existsSync(destFile) && digest(readFileSync(destFile)) === owned[name]) {
+      rmSync(destFile);
+      try {
+        if (existsSync(dir) && readdirSync(dir).length === 0) rmdirSync(dir);
+      } catch {
+        /* not empty or already gone: leave it */
+      }
+      removed.push(name);
+    }
+    delete owned[name];
+  }
+  return { installed: shipped, backedUp, removed };
+}
+
+/** Reconcile Cotal's authored skills into either managed root at the file level:
  *  - install/refresh each canonical skill's `SKILL.md` (and only that file, never other files in the
  *    dir); if the destination is a user's or third party's copy (not what we last wrote), copy the
  *    current content into a fresh `SKILL.md.bak` slot (created exclusively, never overwriting an
@@ -172,74 +301,54 @@ export type AgentSkillsResult = { installed: string[]; backedUp: { name: string;
  *    empty. A user's file in the dir, or a copy they have changed, is never removed.
  *  Idempotent; fails loud on a corrupt bundle or manifest. */
 export function installAgentSkills(): AgentSkillsResult {
-  const src = canonicalSkillsDir();
   const names = canonicalSkillNames();
-  const home = agentSkillsHome();
   const manifest = readManifest();
-  const backedUp: { name: string; path: string }[] = [];
-  const removed: string[] = [];
-
-  for (const name of names) {
-    assertNoSymlink(name);
-    const dir = join(home, name);
-    const destFile = join(dir, "SKILL.md");
-    const canonical = readFileSync(join(src, name, "SKILL.md"));
-    if (existsSync(destFile)) {
-      const cur = readFileSync(destFile);
-      const ours = manifest.skills[name] === digest(cur);
-      if (!ours && digest(cur) !== digest(canonical)) {
-        const path = backupDivergent(destFile, cur); // create a FRESH backup slot (never overwrite a pre-existing/foreign .bak); every divergent edit stays recoverable
-        backedUp.push({ name, path });
-      }
-    }
-    mkdirSync(dir, { recursive: true });
-    writeOwnedFile(destFile, canonical); // write ONLY our file, via rename (never truncates a hard-linked inode); never delete or replace anything else in the dir
-    manifest.skills[name] = digest(canonical);
-  }
-
-  for (const name of Object.keys(manifest.skills)) {
-    if (names.includes(name)) continue; // still shipped
-    assertNoSymlink(name);
-    const dir = join(home, name);
-    const destFile = join(dir, "SKILL.md");
-    if (existsSync(destFile) && digest(readFileSync(destFile)) === manifest.skills[name]) {
-      rmSync(destFile); // remove ONLY our file (not the dir, not a user's files)
-      try {
-        if (existsSync(dir) && readdirSync(dir).length === 0) rmdirSync(dir); // drop the dir only if now empty (rmdir refuses a non-empty dir)
-      } catch {
-        /* not empty or already gone: leave it */
-      }
-      removed.push(name);
-    }
-    // a retired skill the user has since edited, or whose dir holds their files, is left in place
-    delete manifest.skills[name];
-  }
-
+  const crossVendor = reconcileSkillsRoot(agentSkillsHome(), manifest.skills, names);
+  const codex = reconcileSkillsRoot(codexSkillsHome(), manifest.codexSkills, names);
+  const codexInterfaces = reconcileCodexInterfaces(codexSkillsHome(), manifest.codexSkillInterfaces, names);
   writeManifest(manifest);
-  return { installed: names, backedUp, removed };
+  return {
+    ...crossVendor,
+    codexInstalled: codex.installed,
+    codexBackedUp: codex.backedUp,
+    codexRemoved: codex.removed,
+    codexInterfacesInstalled: codexInterfaces.installed,
+    codexInterfacesBackedUp: codexInterfaces.backedUp,
+    codexInterfacesRemoved: codexInterfaces.removed,
+  };
 }
 
 export type SkillSkewState = "current" | "stale" | "missing" | "retired";
 export type SkillSkew = { name: string; state: SkillSkewState };
 
-/** Compare the managed `~/.agents/skills` tree against canonical so `cotal status` can surface drift:
+/** Compare one managed skill tree against canonical so `cotal status` can surface drift:
  *  `current` (identical), `stale` (present but differs), `missing` (not dropped), or `retired` (a skill
  *  Cotal still owns on disk but no longer ships, awaiting removal on the next `cotal setup`). Throws on
  *  a corrupt bundle or manifest; the caller renders that as an integrity error. */
-export function agentSkillsSkew(): SkillSkew[] {
+function skillsSkew(home: string, owned: Record<string, string>): SkillSkew[] {
   const src = canonicalSkillsDir();
   const names = canonicalSkillNames();
-  const home = agentSkillsHome();
   const out: SkillSkew[] = names.map((name) => {
     const installed = join(home, name, "SKILL.md");
     if (!existsSync(installed)) return { name, state: "missing" };
     const canonical = readFileSync(join(src, name, "SKILL.md"));
     return { name, state: readFileSync(installed).equals(canonical) ? "current" : "stale" };
   });
-  const manifest = readManifest();
-  for (const name of Object.keys(manifest.skills)) {
+  for (const name of Object.keys(owned)) {
     if (names.includes(name)) continue;
     if (existsSync(join(home, name, "SKILL.md"))) out.push({ name, state: "retired" });
   }
   return out;
+}
+
+/** Compare the cross-vendor `~/.agents/skills` drop. */
+export function agentSkillsSkew(): SkillSkew[] {
+  const manifest = readManifest();
+  return skillsSkew(agentSkillsHome(), manifest.skills);
+}
+
+/** Compare Codex's native `~/.codex/skills` drop. */
+export function codexSkillsSkew(): SkillSkew[] {
+  const manifest = readManifest();
+  return skillsSkew(codexSkillsHome(), manifest.codexSkills);
 }

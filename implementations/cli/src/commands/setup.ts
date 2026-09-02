@@ -5,7 +5,7 @@ import * as p from "@clack/prompts";
 import { type Connector, type FlagSpec, type FlagValues, type ParsedArgs } from "@cotal-ai/core";
 import { homeCotalDir, installedExtensionVersion, loadExtensionsManifest, manifestExtensionNames, provenance } from "@cotal-ai/workspace";
 import { materializeExtension } from "../ext-loader.js";
-import { agentSkillsHome, canonicalSkillNames, installAgentSkills, type AgentSkillsResult } from "../lib/agent-skills.js";
+import { agentSkillsHome, canonicalSkillNames, codexSkillsHome, installAgentSkills, type AgentSkillsResult } from "../lib/agent-skills.js";
 import { cliVersion } from "../lib/version.js";
 import { brand, brandBold, dim, ok, note, splash } from "../lib/theme.js";
 import { runSteps, type Step } from "../lib/steps.js";
@@ -117,10 +117,10 @@ async function runFirstRun(yes: boolean, demo: boolean): Promise<void> {
   // `cotal setup --demo` (or `--full`). Keeps the default first run to one agent, not a crowd.
   if (demo) seedDemoTeam(log);
 
-  // Cotal's own skills, for the non-Claude harnesses, via the cross-vendor `.agents/skills` convention.
+  // Cotal's own skills: the cross-vendor `.agents/skills` convention plus Codex's native root.
   const skills = seedAgentSkills(log);
   p.log.success(
-    `Installed ${skills.installed.length} cross-vendor skill${skills.installed.length !== 1 ? "s" : ""} (${skills.installed.join(", ")}) to ~/.agents/skills; read by Codex, Cursor, OpenCode, Gemini CLI, and Windsurf`,
+    `Installed ${skills.installed.length} cross-vendor skill${skills.installed.length !== 1 ? "s" : ""} (${skills.installed.join(", ")}) to ~/.agents/skills and ~/.codex/skills; Codex uses its native root, while Cursor, OpenCode, Gemini CLI, and Windsurf use the cross-vendor root`,
   );
   if (skills.backedUp.length)
     p.log.warn(`Backed up your edited copy before refreshing: ${skills.backedUp.map((b) => `${b.name} -> ${b.path}`).join(", ")} (Cotal manages only its own skills under ~/.agents/skills).`);
@@ -272,13 +272,14 @@ export function claudePluginStep(): Step {
 }
 
 /** The Claude Code skills-plugin install, as a step. Independent of the mesh connector: it runs whenever
- *  Claude is on PATH, so a Claude user gets Cotal's authored skills (team-topology today) even with no
- *  connector, and a repeat `cotal setup` updates them. Installed at user scope (machine-wide). */
+ *  Claude is on PATH, so a Claude user gets Cotal's authored skills (cotal-mesh, team-topology, and
+ *  cotal-engineering) even
+ *  with no connector, and a repeat `cotal setup` updates them. Installed at user scope (machine-wide). */
 export function skillsPluginStep(): Step {
   return {
     name: "claude-skills-plugin",
     title: "Add Cotal's skills to Claude Code",
-    explain: "Installs Cotal's authored skills (team-topology) as a Claude Code plugin, updatable and removable on their own.",
+    explain: "Installs Cotal's authored skills (cotal-mesh, team-topology, and cotal-engineering) as a Claude Code plugin, updatable and removable on their own.",
     context: [join(homeCotalDir(), "claude-plugin"), CC_DOCS_URL],
     async run() {
       installSkillsPlugin();
@@ -294,7 +295,7 @@ async function runEnsure(demo: boolean): Promise<void> {
   seedDefaultAgent(); // ensure `cotal spawn` (no name) always has a default to launch
   if (demo) seedDemoTeam(); // `cotal setup --demo` on a configured machine: add the team, then card
   ensureSkillsPlugin(); // fail-loud: close the upgrade gap so an onboarded machine re-running setup gets/refreshes (not silently stale) the Claude skills plugin
-  seedAgentSkills(); // reconcile the cross-vendor `.agents/skills` drop so an upgrade + re-run isn't stale
+  seedAgentSkills(); // reconcile cross-vendor and Codex-native drops so an upgrade + re-run isn't stale
   // A repeat `npx cotal-ai setup` on an onboarded machine that still lacks a durable `cotal` must
   // ALSO get the global-install offer — the first-run stamp is written once, so without this any
   // second setup (declined/failed install the first time, or a machine onboarded before the offer
@@ -528,9 +529,9 @@ function installConnectorPlugin(claudeConnector: Connector): void {
 /** Install/update the skills plugin (`cotal-skills`, `--scope user` so it is machine-wide, and independent
  *  of the mesh connector: it carries no code and no core dependency, so it can never be core-skewed). Its
  *  manifest version is stamped from the running CLI release, so an upgrade actually replaces the cached
- *  skill in Claude. The canonical `SKILL.md` files are shared with the `.agents/skills` drop and the
- *  website index (see lib/agent-skills.ts). Runs whenever Claude is on PATH, on first run AND on a repeat
- *  `cotal setup`. */
+ *  skill in Claude. The canonical `SKILL.md` files are shared with the cross-vendor and Codex-native
+ *  drops plus the website index (see lib/agent-skills.ts). Runs whenever Claude is on PATH, on first run
+ *  AND on a repeat `cotal setup`. */
 function installSkillsPlugin(): void {
   const root = join(import.meta.dirname, "..", "..", "cotal-skills");
   if (!existsSync(join(root, ".claude-plugin", "plugin.json")))
@@ -547,18 +548,22 @@ function claude(...args: string[]): { status: number | null; output: string } {
   return { status: r.status, output: `${r.stdout ?? ""}${r.stderr ?? ""}`.trim() };
 }
 
-/** Reconcile Cotal's authored skills into the cross-vendor `~/.agents/skills` directory that Codex,
- *  Cursor, OpenCode, Gemini CLI, and Windsurf/Devin all read. Unlike the Claude Code plugin, these
- *  harnesses have no remote install/update path, so `cotal setup` reconciles the files (install/refresh,
- *  back up a user's edited copy, remove a retired Cotal skill) and `cotal status` reports skew. Idempotent;
- *  a re-run after an upgrade brings a deployed install current. */
+/** Reconcile Cotal's authored skills into both the cross-vendor `~/.agents/skills` root (Cursor,
+ *  OpenCode, Gemini CLI, Windsurf/Devin) and Codex's native `~/.codex/skills` root. Unlike the Claude
+ *  Code plugin, these harnesses have no remote install/update path, so `cotal setup` reconciles the
+ *  files (install/refresh, back up a user's edited copy, remove a retired Cotal skill) and `cotal status`
+ *  reports skew. Idempotent; a re-run after an upgrade brings a deployed install current. */
 function seedAgentSkills(log?: ReturnType<typeof openSetupLog>): AgentSkillsResult {
   const r = installAgentSkills();
   provenance.wrote("cross-vendor skills", agentSkillsHome());
+  provenance.wrote("Codex native skills", codexSkillsHome());
   log?.line(
     `agent-skills: installed ${r.installed.join(", ")}` +
       (r.backedUp.length ? `; backed up ${r.backedUp.map((b) => b.path).join(", ")}` : "") +
-      (r.removed.length ? `; removed ${r.removed.join(", ")}` : ""),
+      (r.removed.length ? `; removed ${r.removed.join(", ")}` : "") +
+      `; Codex installed ${r.codexInstalled.join(", ")}` +
+      (r.codexBackedUp.length ? `; Codex backed up ${r.codexBackedUp.map((b) => b.path).join(", ")}` : "") +
+      (r.codexRemoved.length ? `; Codex removed ${r.codexRemoved.join(", ")}` : ""),
   );
   return r;
 }
@@ -588,7 +593,7 @@ function writeDemoAgent(path: string, body: string): void {
  *  then the user's to shape. Unlike the demo team it's never refreshed (seed-if-absent), so any
  *  edits stand; deleting it just means the next `cotal setup` writes a fresh copy.
  *
- *  Read scope is split intentionally: the ACTIVE set (`subscribe`) is just `general`, so a fresh
+ *  Read scope is split intentionally: the ACTIVE set (`subscribe`) is EMPTY, so a fresh
  *  agent isn't firehosed every channel on the mesh at boot, while the read ACL (`allowSubscribe:
  *  [">"]`) still PERMITS it to read anything — it just has to `cotal_join` a channel to start
  *  receiving it. (`subscribe: [">"]` would auto-subscribe to every channel, the old behavior.) */
@@ -597,9 +602,9 @@ name: default_agent
 role: default
 description: An agent on the mesh
 tags: []
-subscribe: [general]
+subscribe: []
 allowSubscribe: [">"]
-allowPublish: [">"]
+allowPublish: []
 capabilities: [spawn]
 ---
 
@@ -639,8 +644,8 @@ name: david
 role: cotal-tech
 description: "the engineer: how Cotal works (the wire, NATS, connectors, integration)."
 tags: [cotal, technical, help]
-subscribe: [general]
-allowPublish: [general]
+subscribe: [welcome]
+allowPublish: [welcome]
 ---
 
 You are david, Cotal's engineer, live on the web for agents with the operator who just set Cotal
@@ -661,8 +666,8 @@ name: sven
 role: cotal-guide
 description: "the guide: what to build with Cotal (examples, setups, getting the most out of it)."
 tags: [cotal, examples, help]
-subscribe: [general]
-allowPublish: [general]
+subscribe: [welcome]
+allowPublish: [welcome]
 ---
 
 You are sven, Cotal's guide, live on the web for agents with the operator who just set Cotal up.
@@ -681,8 +686,8 @@ name: me
 role: operator
 description: "your own session on the Cotal mesh."
 tags: [cotal]
-subscribe: [general]
-allowPublish: [general]
+subscribe: [welcome]
+allowPublish: [welcome]
 capabilities: [spawn]
 ---
 
