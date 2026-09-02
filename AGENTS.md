@@ -206,4 +206,4 @@ A2A/SLIM conventions), verify current behavior against real docs rather than mem
 You are strictly forbidden from changing the current worktree into another branch, if you need another branch you MUST use git worktree (not the main one).
 
 # Public development
-When developing outside of cotal.ai, the .internal repo is not available. If permission to the internal repo is denied, you are authorized to write local plans and use local skills to a new .internal-dev folder that you are authorized to create. 
+When developing outside of cotal.ai, the .internal repo is not available. If permission to the internal repo is denied, you are authorized to write local plans and use local skills to a new .internal-dev folder that you are authorized to create.
