@@ -36,6 +36,7 @@ import {
   type JetStreamManager,
   type ConsumerMessages,
   type ConsumerInfo,
+  type ConsumerConfig,
   type JsMsg,
 } from "@nats-io/jetstream";
 import { type PushConsumer } from "@nats-io/jetstream";
@@ -126,6 +127,7 @@ import {
   assertLifecycleToken,
   mintLifecycleUid,
   lifecycleNameKey,
+  agentKvWatchConsumerName,
   DEV_OWNER,
   spacePrefix,
   spaceWildcard,
@@ -309,6 +311,13 @@ type MembershipFeedWatch = {
   rejectStop?: (err: unknown) => void;
 };
 
+type AgentKvWatch = {
+  bucket: Bucket;
+  stream: string;
+  name: string;
+  iter?: ConsumerMessages;
+};
+
 export class CotalEndpoint extends EventEmitter {
   readonly card: AgentCard;
   readonly space: string;
@@ -347,6 +356,11 @@ export class CotalEndpoint extends EventEmitter {
   private jsm?: JetStreamManager;
   private kv?: KV;
   private channelKv?: KV;
+  /** Lifecycle-pinned public-KV watchers for an authenticated agent. Their stable names let the
+   *  broker grant CREATE/INFO/DELETE for this incarnation only; unlike generated ordered consumers,
+   *  reconnect cleanup never needs bucket-wide peer-delete authority. */
+  private presenceAgentWatch?: AgentKvWatch;
+  private channelAgentWatch?: AgentKvWatch;
   /** Plane-3 durable-membership registry KV — lazily opened by the privileged delivery daemon (or a
    *  short-lived provisioner). */
   private membersKv?: KV;
@@ -1012,6 +1026,10 @@ export class CotalEndpoint extends EventEmitter {
       clearInterval(this.sweepTimer);
       this.sweepTimer = undefined;
     }
+    for (const watch of [this.presenceAgentWatch, this.channelAgentWatch]) {
+      try { watch?.iter?.stop(); } catch { /* already closed with the connection */ }
+      if (watch) watch.iter = undefined;
+    }
     for (const msgs of this.streamMsgs) {
       try {
         msgs.stop();
@@ -1194,6 +1212,7 @@ export class CotalEndpoint extends EventEmitter {
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     if (this.bearerTimer) clearTimeout(this.bearerTimer);
     if (this.credsTimer) clearTimeout(this.credsTimer);
+    let agentWatchCleanupError: unknown;
     for (const watch of this.membershipFeedWatches) {
       watch.stopped = true;
       watch.arm = watch.arm.catch(() => {}).then(async () => {
@@ -1220,6 +1239,14 @@ export class CotalEndpoint extends EventEmitter {
       }
     }
     try {
+      await Promise.all([
+        this.deleteAgentKvWatch(this.presenceAgentWatch),
+        this.deleteAgentKvWatch(this.channelAgentWatch),
+      ]);
+    } catch (err) {
+      agentWatchCleanupError = err;
+    }
+    try {
       if (this.doRegister) {
         this.status = "offline";
         await this.publishPresence();
@@ -1232,6 +1259,7 @@ export class CotalEndpoint extends EventEmitter {
     } catch {
       /* ignore */
     }
+    if (agentWatchCleanupError) throw agentWatchCleanupError;
   }
 
   // ---- messaging -----------------------------------------------------------
@@ -4322,10 +4350,97 @@ export class CotalEndpoint extends EventEmitter {
     await this.kv.put(this.card.id, JSON.stringify(record));
   }
 
+  private usesLifecyclePinnedAgentWatch(): boolean {
+    return this.authed && this.card.kind === "agent";
+  }
+
+  /** Delete only one lifecycle-owned public-KV watcher. A first bind normally gets 404 because no
+   *  predecessor exists; a reconnect uses this same exact name to remove the old epoch before
+   *  creating its successor. No generated consumer name and no bucket-wide delete grant exist. */
+  private async deleteNamedAgentKvWatch(bucket: Bucket, name: string): Promise<void> {
+    try {
+      const deleted = await bucket.jsm.consumers.delete(bucket.stream, name);
+      if (!deleted) throw new Error(`JetStream refused to delete pinned KV watcher ${name}`);
+    } catch (err) {
+      if ((err as { code?: number }).code === 404 || /(consumer|stream) not found/i.test((err as Error).message)) return;
+      throw err;
+    }
+  }
+
+  private async deleteAgentKvWatch(watch: AgentKvWatch | undefined): Promise<void> {
+    if (!watch) return;
+    try { watch.iter?.stop(); } catch { /* already closed */ }
+    watch.iter = undefined;
+    if (!this.nc || this.nc.isClosed()) return;
+    await this.deleteNamedAgentKvWatch(watch.bucket, watch.name);
+  }
+
+  /** Bind one stable, lifecycle-owned push consumer for an authenticated agent's public KV watch.
+   *  The stock `kv.watch()` cannot be used here: it generates `oc_<nuid>_<serial>` names, which
+   *  forces a bucket-wide DELETE grant for reset/stop cleanup. This consumer uses the same KV replay
+   *  shape, but reconnects the whole endpoint after missed heartbeats and replays LastPerSubject;
+   *  presence/channel registries are current-state maps, so that replay closes any missed-update gap. */
+  private async startLifecyclePinnedAgentWatch(
+    bucket: KV,
+    kind: "presence" | "channels",
+    onEntry: (entry: KvWatchEntry) => void,
+    onHydrated?: () => void,
+  ): Promise<void> {
+    if (!(bucket instanceof Bucket)) throw new Error("agent KV watch needs the @nats-io/kv Bucket implementation");
+    const uid = this.requireLifecycleUid(`the authenticated ${kind} KV watch`);
+    const name = agentKvWatchConsumerName(kind, this.owner, this.actor, uid);
+
+    // The stable name makes a predecessor unambiguous. Delete it through THIS fresh connection
+    // before creating the replacement, so a terminal old epoch cannot strand a duplicate.
+    await this.deleteNamedAgentKvWatch(bucket, name);
+
+    const config = bucket._buildCC(">", KvWatchInclude.LastValue, { headers_only: false }) as ConsumerConfig;
+    config.name = name;
+    config.deliver_subject = `_INBOX_${this.connId}.kvw.${kind}.${randomUUID().replaceAll("-", "")}`;
+    config.inactive_threshold = nanos(5 * 60_000);
+    config.num_replicas = 1;
+    config.max_deliver = 1;
+    await bucket.jsm.consumers.add(bucket.stream, config);
+
+    const consumer = await bucket.js.consumers.getPushConsumer(bucket.stream, name);
+    const info = await consumer.info(true);
+    let pending = info.num_pending;
+    const state: AgentKvWatch = { bucket, stream: info.stream_name, name: info.name };
+    if (kind === "presence") this.presenceAgentWatch = state;
+    else this.channelAgentWatch = state;
+
+    try {
+      const iter = await consumer.consume({ callback: (msg) => {
+        const isUpdate = pending === 0 || --pending === 0;
+        onEntry(bucket.jmToWatchEntry(msg, isUpdate));
+      } });
+      state.iter = iter;
+      if (pending === 0) onHydrated?.();
+      void (async () => {
+        for await (const status of iter.status()) {
+          if (status.type !== "heartbeats_missed" || this.stopped || this.reconnecting) continue;
+          this.emit("error", new Error(`${kind} KV watcher missed JetStream heartbeats - reconnecting its endpoint to replay current state`));
+          void this.reconnect().catch((err) => this.emit("error", err as Error));
+          break;
+        }
+      })();
+    } catch (err) {
+      await this.deleteNamedAgentKvWatch(bucket, name).catch(() => {});
+      throw err;
+    }
+  }
+
   private async startPresenceWatch(): Promise<void> {
     if (!this.kv) return;
     let hydrated!: () => void;
     this.presenceSnapshot = new Promise<void>((resolve) => { hydrated = resolve; });
+    if (this.usesLifecyclePinnedAgentWatch()) {
+      await this.startLifecyclePinnedAgentWatch(this.kv, "presence", (entry) => {
+        this.handleKvEntry(entry);
+        if (entry.isUpdate) hydrated();
+      }, hydrated);
+      return;
+    }
     const iter = await this.kv.watch();
     void (async () => {
       let ready = false;
@@ -4346,6 +4461,10 @@ export class CotalEndpoint extends EventEmitter {
    *  policy then falls back to the default), never a fault. */
   private async startChannelWatch(): Promise<void> {
     if (!this.channelKv) return;
+    if (this.usesLifecyclePinnedAgentWatch()) {
+      await this.startLifecyclePinnedAgentWatch(this.channelKv, "channels", (entry) => this.handleChannelEntry(entry));
+      return;
+    }
     const iter = await this.channelKv.watch();
     void (async () => {
       for await (const e of iter) this.handleChannelEntry(e);

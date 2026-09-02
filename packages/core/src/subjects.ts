@@ -209,6 +209,20 @@ export function lifecycleNameKey(owner: string, actor: string, lifecycleUid: str
   return `${principalKey(owner, actor).name}-${assertLifecycleToken(lifecycleUid)}`;
 }
 
+/** Exact lifecycle-owned name for an agent's public KV watcher. Unlike nats.js's generated
+ * `oc_<nuid>_<serial>` ordered-consumer names, this stable name is known when the credential is
+ * minted, so CREATE/INFO/DELETE can be broker-pinned to one incarnation without granting an agent
+ * availability authority over a peer's watcher. The kind byte keeps the presence and channel
+ * registry consumers distinct while the lifecycle key keeps successors distinct. */
+export function agentKvWatchConsumerName(
+  kind: "presence" | "channels",
+  owner: string,
+  actor: string,
+  lifecycleUid: string,
+): string {
+  return `kvw-${kind === "presence" ? "p" : "c"}-${lifecycleNameKey(owner, actor, lifecycleUid)}`;
+}
+
 /** The lifecycle-scoped subject/KV dot-form `<owner>.<actor>.<lifecycleUid>` (ACL rows, member-row
  *  principals, dinbox/dlv subject tails). Injective: owner/actor are dot-free tokens and the UID is
  *  `[a-z0-9]`, so exactly three dot-separated tokens. */

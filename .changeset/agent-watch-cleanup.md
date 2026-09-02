@@ -2,6 +2,6 @@
 "@cotal-ai/core": patch
 ---
 
-Let agent credentials delete their generated ordered consumers on only the public presence and
-channel-registry KV streams they already watch. This makes nats.js reset and stop cleanup usable
-without granting another KV bucket, a stream delete, or record mutation.
+Replace authenticated agents' generated public-KV watch consumers with stable lifecycle-owned
+consumers. Their credentials can create, inspect, and delete only those exact presence and channel
+watchers, so reconnect and stop cleanup work without granting authority over a peer consumer.

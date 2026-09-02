@@ -55,6 +55,7 @@ import {
   dlvDurable,
   presenceBucket,
   channelBucket,
+  agentKvWatchConsumerName,
   membersBucket,
   aclBucket,
   aclKey,
@@ -1087,6 +1088,8 @@ export function permissionsFor(
   const uid = assertLifecycleToken(pr.lifecycleUid);
   const chatHistD = chatHistDurable(pr.owner, pr.actor, uid), dmD = dmDurable(pr.owner, pr.actor, uid);
   const DLV = dlvStream(space), dlvD = dlvDurable(pr.owner, pr.actor, uid); // Plane-3 per-member delivery (bind-only)
+  const presenceWatchD = agentKvWatchConsumerName("presence", pr.owner, pr.actor, uid);
+  const channelWatchD = agentKvWatchConsumerName("channels", pr.owner, pr.actor, uid);
   const svcD = opts.role ? taskDurable(opts.role) : undefined;
   const pubAllow = [
     // peer publish — owner+actor identity + channel scope, built from the real builders. Default-deny:
@@ -1133,25 +1136,22 @@ export function permissionsFor(
     `$JS.API.CONSUMER.INFO.${DLV}.${dlvD}`,
     `$JS.API.CONSUMER.MSG.NEXT.${DLV}.${dlvD}`,
     `$JS.ACK.${DLV}.${dlvD}.>`,
-    // Presence: watch (read, public roster) + flow control + PUT OWN KEY ONLY.
-    `$JS.API.CONSUMER.CREATE.${KV}.>`,
-    `$JS.API.CONSUMER.INFO.${KV}.>`,
-    // `kv.watch()` owns an ordered `oc_*` consumer. Reset and stop explicitly delete the current
-    // consumer before replacing/leaving it; CREATE+INFO without DELETE makes every cleanup
-    // broker-refused and leaves retention to the incidental inactivity reaper. The generated name
-    // cannot be pinned at mint time, so the public presence bucket is the narrowest expressible
-    // scope. Presence records and the stream itself use different subjects and remain denied.
-    `$JS.API.CONSUMER.DELETE.${KV}.>`,
+    // Presence: watch (read, public roster) + flow control + PUT OWN KEY ONLY. The agent watcher uses
+    // one stable lifecycle-owned consumer name instead of nats.js's generated `oc_*` series, so all
+    // three management verbs are pinned to this incarnation. The trailing filter subject on CREATE
+    // is part of JetStream's extended create API and prevents even this exact consumer name from
+    // being created over another stream subject.
+    `$JS.API.CONSUMER.CREATE.${KV}.${presenceWatchD}.$KV.${presenceBucket(space)}.>`,
+    `$JS.API.CONSUMER.INFO.${KV}.${presenceWatchD}`,
+    `$JS.API.CONSUMER.DELETE.${KV}.${presenceWatchD}`,
     "$JS.FC.>",
     `$KV.${presenceBucket(space)}.${pk.key}`, // own presence key (owner+actor) only — can't spoof peers
     // Channel registry: read-only (watch + direct kv.get for the join-time replay decision).
     // No `$KV.${channelBucket(space)}.*` publish — privileged-write, default-deny gives that free.
     `$JS.API.STREAM.MSG.GET.${CHKV}`,
-    `$JS.API.CONSUMER.CREATE.${CHKV}.>`,
-    `$JS.API.CONSUMER.INFO.${CHKV}.>`,
-    // The channel registry is the other client-managed ordered KV watch. Keep cleanup confined to
-    // exactly this second public read-only bucket, never another KV stream or a stream operation.
-    `$JS.API.CONSUMER.DELETE.${CHKV}.>`,
+    `$JS.API.CONSUMER.CREATE.${CHKV}.${channelWatchD}.$KV.${channelBucket(space)}.>`,
+    `$JS.API.CONSUMER.INFO.${CHKV}.${channelWatchD}`,
+    `$JS.API.CONSUMER.DELETE.${CHKV}.${channelWatchD}`,
     // Delivery lease/readiness: READ-ONLY (kv.get) for the non-gating `cotal_channels` delivery-health
     // surface (Component 6). The lease key is daemon-availability info, like the world-readable roster;
     // NO write grant — only the `delivery` cred writes it.

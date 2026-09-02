@@ -64,6 +64,7 @@ import {
   aclBucket,
   channelBucket,
   managerLeaseKey,
+  agentKvWatchConsumerName,
   epRequestSubject,
   BASELINE_LIFECYCLE_ENDPOINT,
 } from "../src/index.js";
@@ -281,16 +282,20 @@ try {
       await tryPublish(agCreds, `$JS.API.CONSUMER.MSG.NEXT.${DM}.${dmDurable(DEV_OWNER, agId.id, otherUid)}`, agId.id) === "denied");
     check("bind the SAME alias's dlv durable under a LIED lifecycle uid DENIED",
       await tryPublish(agCreds, `$JS.API.CONSUMER.MSG.NEXT.${DLV}.${dlvDurable(DEV_OWNER, agId.id, otherUid)}`, agId.id) === "denied");
-    // A KV watch is a client-managed ordered consumer. The client deletes the current `oc_*`
-    // consumer when the watch resets or stops, so CREATE+INFO without DELETE is not a usable
-    // read grant: cleanup is broker-refused, the watcher rebuilds again, and consumers accumulate
-    // until the broker's inactivity reaper catches up. Generated names cannot be pinned at mint
-    // time, so the narrow boundary is the two public read-only KV streams an agent actually
-    // watches — never another KV stream or a stream delete.
-    check("delete an ordered presence-watch consumer ALLOWED (watch reset/stop cleanup)",
-      await tryPublish(agCreds, `$JS.API.CONSUMER.DELETE.${PKV}.oc_agent-presence-probe_1`, agId.id) === "allowed");
-    check("delete an ordered channel-registry-watch consumer ALLOWED (watch reset/stop cleanup)",
-      await tryPublish(agCreds, `$JS.API.CONSUMER.DELETE.KV_${channelBucket(space)}.oc_agent-channels-probe_1`, agId.id) === "allowed");
+    // The endpoint replaces nats.js's generated `oc_*` consumer with exact lifecycle-owned names.
+    // That lets the broker admit reset/stop cleanup for this incarnation without granting an agent
+    // availability authority over a peer watcher in either public bucket.
+    const ownPresenceWatch = agentKvWatchConsumerName("presence", DEV_OWNER, agId.id, agUid);
+    const ownChannelWatch = agentKvWatchConsumerName("channels", DEV_OWNER, agId.id, agUid);
+    const peerPresenceWatch = agentKvWatchConsumerName("presence", DEV_OWNER, agId.id, otherUid);
+    check("delete OWN lifecycle-pinned presence watcher ALLOWED",
+      await tryPublish(agCreds, `$JS.API.CONSUMER.DELETE.${PKV}.${ownPresenceWatch}`, agId.id) === "allowed");
+    check("delete OWN lifecycle-pinned channel-registry watcher ALLOWED",
+      await tryPublish(agCreds, `$JS.API.CONSUMER.DELETE.KV_${channelBucket(space)}.${ownChannelWatch}`, agId.id) === "allowed");
+    check("delete SAME-PRINCIPAL peer lifecycle watcher DENIED (cleanup is lifecycle-pinned)",
+      await tryPublish(agCreds, `$JS.API.CONSUMER.DELETE.${PKV}.${peerPresenceWatch}`, agId.id) === "denied");
+    check("delete a generated oc_* watcher in the same bucket DENIED (no bucket-wide fallback)",
+      await tryPublish(agCreds, `$JS.API.CONSUMER.DELETE.${PKV}.oc_agent-presence-probe_1`, agId.id) === "denied");
     check("delete a consumer on a different KV stream DENIED (cleanup grant is not KV-wide)",
       await tryPublish(agCreds, `$JS.API.CONSUMER.DELETE.KV_${membersBucket(space)}.oc_agent-escape-probe_1`, agId.id) === "denied");
     check("delete the presence STREAM itself DENIED (consumer cleanup is not bucket destruction)",

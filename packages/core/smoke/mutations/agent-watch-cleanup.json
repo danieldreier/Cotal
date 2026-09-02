@@ -1,33 +1,41 @@
 {
-  "suite": "packages/core/smoke/manager-split-auth.smoke.ts",
-  "guard": "a minted agent credential can delete only its client-managed ordered consumers on the public presence and channel-registry KV streams",
-  "command": "corepack pnpm --filter @cotal-ai/core build && PATH=/workspace/state/tools/nats-server-v2.12.12-b:$PATH corepack pnpm smoke:manager-split",
-  "completionMarker": "MANAGER-SPLIT SMOKE",
+  "suite": "packages/core/smoke/agent-watch-cleanup-auth.smoke.ts",
+  "guard": "a real authenticated agent endpoint creates and deletes only its lifecycle-pinned public-KV watchers, while a same-principal peer lifecycle remains broker-denied",
+  "command": "corepack pnpm --filter @cotal-ai/core build && PATH=/workspace/state/tools/nats-server-v2.12.12-b:$PATH corepack pnpm smoke:manager-split && PATH=/workspace/state/tools/nats-server-v2.12.12-b:$PATH corepack pnpm smoke:agent-watch-cleanup:auth",
+  "completionMarker": "AGENT-WATCH-CLEANUP SMOKE",
   "proveWith": "node scripts/mutation-proof.mjs --config packages/core/smoke/mutations/agent-watch-cleanup.json",
   "why": [
-    "nats.js ordered KV watches explicitly delete their generated oc_* consumer when they reset or",
-    "stop. The agent profile already permits CREATE+INFO on the two public KV streams it watches,",
-    "but without DELETE those cleanup attempts are broker-refused and consumers persist until the",
-    "broker's inactivity reaper catches up. Each mutation removes one exact bucket grant; the real",
-    "JWT broker matrix must reject that cleanup while retaining the cross-bucket and stream denials."
+    "The stock ordered KV watch generates oc_* names that cannot be authorized per principal. The",
+    "agent endpoint instead binds stable lifecycle-owned consumers and its JWT names those exact",
+    "CREATE/INFO/DELETE subjects. The real endpoint smoke proves the production branch and cleanup;",
+    "the broker matrix proves a same-principal peer lifecycle and generated oc_* names stay denied."
   ],
   "mutations": [
     {
       "name": "drop the agent presence-watch consumer cleanup grant",
       "file": "packages/core/src/provision.ts",
-      "find": "    `$JS.API.CONSUMER.DELETE.${KV}.>`,\n    \"$JS.FC.>\",",
+      "find": "    `$JS.API.CONSUMER.DELETE.${KV}.${presenceWatchD}`,\n    \"$JS.FC.>\",",
       "replace": "    \"$JS.FC.>\",",
-      "expectRed": "delete an ordered presence-watch consumer ALLOWED (watch reset/stop cleanup)",
-      "cell": "delete an ordered presence-watch consumer ALLOWED (watch reset/stop cleanup)",
+      "expectRed": "delete OWN lifecycle-pinned presence watcher ALLOWED",
+      "cell": "delete OWN lifecycle-pinned presence watcher ALLOWED",
       "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
     },
     {
       "name": "drop the agent channel-registry-watch consumer cleanup grant",
       "file": "packages/core/src/provision.ts",
-      "find": "    `$JS.API.CONSUMER.DELETE.${CHKV}.>`,\n",
+      "find": "    `$JS.API.CONSUMER.DELETE.${CHKV}.${channelWatchD}`,\n",
       "replace": "",
-      "expectRed": "delete an ordered channel-registry-watch consumer ALLOWED (watch reset/stop cleanup)",
-      "cell": "delete an ordered channel-registry-watch consumer ALLOWED (watch reset/stop cleanup)",
+      "expectRed": "delete OWN lifecycle-pinned channel-registry watcher ALLOWED",
+      "cell": "delete OWN lifecycle-pinned channel-registry watcher ALLOWED",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
+    },
+    {
+      "name": "route the authenticated agent through the stock generated presence watcher",
+      "file": "packages/core/src/endpoint.ts",
+      "find": "    if (this.usesLifecyclePinnedAgentWatch()) {\n      await this.startLifecyclePinnedAgentWatch(this.kv, \"presence\",",
+      "replace": "    if (false && this.usesLifecyclePinnedAgentWatch()) {\n      await this.startLifecyclePinnedAgentWatch(this.kv, \"presence\",",
+      "expectRed": "real endpoint creates exactly its lifecycle-pinned presence watcher",
+      "cell": "real endpoint creates exactly its lifecycle-pinned presence watcher",
       "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
     }
   ]
