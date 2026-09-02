@@ -30,7 +30,7 @@ check("task accepts its 12,000-character boundary", spawnTool?.schema.safeParse(
 check("task refuses an empty string", spawnTool?.schema.safeParse({ name: "tasked", task: "" }).success === false);
 check("task refuses more than 12,000 characters", spawnTool?.schema.safeParse({ name: "tasked", task: "x".repeat(12_001) }).success === false);
 
-// Record the generic invoke instead of sending it; mark connected so assertConnected() passes.
+// Record the generic invoke instead of sending it; mark connected so requireConnected() passes.
 type Recorded = { endpoint: string; command: string; args?: Record<string, unknown>; opts?: { target?: unknown; deadlineMs?: number } };
 let rec: Recorded | undefined;
 (a as unknown as {

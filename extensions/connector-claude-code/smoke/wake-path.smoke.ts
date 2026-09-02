@@ -282,7 +282,7 @@ try {
 
   // ---- 3. a failed presence write must never swallow the Stop wake -----------------------------
   // A DM lands mid-turn (held), then presence fails exactly as it does when the endpoint is
-  // mid-reconnect (setStatus calls assertConnected). The turn-end flush must still fire.
+  // mid-reconnect (setStatus calls requireConnected). The turn-end flush must still fire.
   await fireHook({ hook_event_name: "UserPromptSubmit" }); // open a turn
   await dmOtto("dm-three: held behind a turn");
   await waitFor("the third DM to buffer", () => stillPending("dm-three: held behind a turn"));

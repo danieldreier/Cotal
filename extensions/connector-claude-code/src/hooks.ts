@@ -97,7 +97,7 @@ export interface ClaudeHooks {
  * Two properties keep an unattended peer answering:
  *
  * **Presence never gates delivery.** `setStatus`/`setAttention` are broker round-trips that throw
- * while the endpoint is mid-reconnect ({@link MeshAgent.setStatus} calls `assertConnected`). They
+ * while the endpoint is mid-reconnect ({@link MeshAgent.setStatus} calls `requireConnected`). They
  * used to sit inside the same try/catch as the delivery work that followed them, so a single failed
  * presence write skipped the injection on `UserPromptSubmit` and — worse — the `Stop` wake flush,
  * leaving held messages with nothing left to deliver them. Presence is observability; the wake path
