@@ -744,6 +744,7 @@ export class CotalEndpoint extends EventEmitter {
    *  single-flight requirement. Runs `fn` after any in-flight transaction settles, whatever its
    *  outcome; the internal chain never rejects. */
   private credsTxn: Promise<unknown> = Promise.resolve();
+  private credsSameBackoffMs = 0;
   private runCredsTxn<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.credsTxn.then(fn, fn);
     this.credsTxn = next.then(() => undefined, () => undefined);
@@ -785,6 +786,18 @@ export class CotalEndpoint extends EventEmitter {
     // `RenewalRecord.adoption.error`, so neither the observed nor the expected digest may appear.
     if (opts.expected !== undefined && credsFingerprint(candidate) !== opts.expected)
       throw new Error("reloadCreds: re-read credential generation did not match the expected re-signed generation (a different store, or a torn/stale read); nothing adopted");
+    const claims = credsClaims(candidate);
+    if (this.currentCreds && credsFingerprint(candidate) === credsFingerprint(this.currentCreds)) {
+      const expiryMs = typeof claims.exp === "number" ? claims.exp * 1000 - Date.now() : 0;
+      this.credsSameBackoffMs = Math.min(
+        15 * 60_000,
+        Math.max(60_000, this.credsSameBackoffMs ? this.credsSameBackoffMs * 2 : 60_000),
+      );
+      const delayMs = Math.max(1_000, Math.min(this.credsSameBackoffMs, Math.max(1_000, expiryMs)));
+      console.info(`creds renewal unchanged identity=${this.connId} seconds-to-expiry=${Math.max(0, Math.floor(expiryMs / 1000))} backoff-seconds=${Math.ceil(delayMs / 1000)}`);
+      this.armCredsRefresh(delayMs);
+      return claims;
+    }
     // PREFLIGHT = the proof. A disposable connection presenting exactly the candidate BEFORE the live
     // cache is touched; a refused cred throws here, leaving the resident connection untouched.
     const probe = await probeConnect(this.servers, { creds: candidate, tls: this.tls, timeoutMs: Math.max(500, Math.min(CotalEndpoint.PREFLIGHT_MS, deadline - Date.now())) });
@@ -797,8 +810,9 @@ export class CotalEndpoint extends EventEmitter {
     // authenticator would present on the next reconnect (a post-preflight validation failure is a no-op).
     const delay = credsRenewalDelayMs(candidate);
     this.currentCreds = candidate;
+    this.credsSameBackoffMs = 0;
     this.armCredsRefresh(delay);
-    return credsClaims(candidate);
+    return claims;
   }
 
   /** The 75%-of-lifetime renewal timer tick: prove + adopt + swap the LIVE connection. Preflights (it
