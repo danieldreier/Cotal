@@ -405,7 +405,21 @@ try {
   }
   check("the session recovers and round-trips after the failed swap", backUp && delivered, { backUp, heard: heard.length });
 
-  // ── 12) A SECOND agent, direct to the broker, on a deliberately tiny lease: cross the original
+  // ── 12) Concurrent adoption is one serialized state machine. The first wire swap is refused;
+  // the second must wait for its rollback, then commit on top of the restored previous credential.
+  const genA4 = await provisionAgent(mgr, auth, identityFromCreds(genA2), { ...acl, role: "helper", lifecycleUid: uidA, expiresInSeconds: LEASE_A * 8 });
+  const genA5 = await provisionAgent(mgr, auth, identityFromCreds(genA2), { ...acl, role: "helper", lifecycleUid: uidA, expiresInSeconds: LEASE_A * 10 });
+  armRefusalOfTheReconnect();
+  const concurrent = await Promise.allSettled([agentA.adoptCpnCreds(genA4), agentA.adoptCpnCreds(genA5)]);
+  const finalCell = agentA.cpnCredsWindow();
+  check(
+    "overlapping adoption leaves the cell and endpoint on the later committed credential",
+    concurrent[0]?.status === "rejected" && concurrent[1]?.status === "fulfilled" &&
+      finalCell?.exp === credsClaims(genA5).exp,
+    { first: concurrent[0]?.status, second: concurrent[1]?.status, cellExp: finalCell?.exp },
+  );
+
+  // ── 13) A SECOND agent, direct to the broker, on a deliberately tiny lease: cross the original
   // credential's own expiry on the renewed one. Agent B exists so this wait is 25 s, not 125 s.
   const LEASE_B = 20;
   const idB = newIdentity();
@@ -465,7 +479,7 @@ try {
     },
   );
 
-  assert.ok(checks === 12, `cpn-renew-adoption ran ${checks} checks, expected 12`);
+  assert.ok(checks === 13, `cpn-renew-adoption ran ${checks} checks, expected 13`);
   console.log(`\nCPN RENEW ADOPTION SMOKE OK ✅  (${checks} checks)`);
 } catch (err) {
   // The banner has to carry the SAME marker on both outcomes. This suite is fail-fast (every check

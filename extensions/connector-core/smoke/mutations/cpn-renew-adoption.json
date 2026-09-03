@@ -66,6 +66,13 @@
       "find": "    } catch (e) {\n      cell.adopt(previous);\n      let restored: CpnCredsWindow | undefined;",
       "replace": "    } catch (e) {\n      let restored: CpnCredsWindow | undefined;",
       "expectRed": "a failed wire swap puts BOTH the cell and the endpoint back on the previous credential"
+    },
+    {
+      "name": "M7 overlapping adoptions are serialized",
+      "file": "extensions/connector-core/src/agent.ts",
+      "find": "    const run = this.cpnAdoptionChain.then(",
+      "replace": "    const run = this.adoptCpnCredsSerial(next);",
+      "expectRed": "the first refused reconnect cannot roll back over the second committed adoption"
     }
   ]
 }

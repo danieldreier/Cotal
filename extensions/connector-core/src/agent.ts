@@ -203,6 +203,11 @@ export class MeshAgent extends EventEmitter {
   private focusExcludedIds = new Map<string, string>();
   private focusRecallUnsafeChannels = new Set<string>();
   private stopping = false;
+  /** Serializes CPN cell updates with endpoint commit/reconnect/rollback. The cell and endpoint
+   *  are one state machine; allowing a second adoption to capture its previous value while the
+   *  first is between reconnect and rollback can otherwise restore stale state over a committed
+   *  successor. */
+  private cpnAdoptionChain: Promise<unknown> = Promise.resolve();
 
   constructor(config: AgentConfig) {
     super();
@@ -354,6 +359,15 @@ export class MeshAgent extends EventEmitter {
    * currentCreds is the one state no backstop recovers from.
    */
   async adoptCpnCreds(next: string): Promise<CpnCredsWindow> {
+    const run = this.cpnAdoptionChain.then(
+      () => this.adoptCpnCredsSerial(next),
+      () => this.adoptCpnCredsSerial(next),
+    );
+    this.cpnAdoptionChain = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private async adoptCpnCredsSerial(next: string): Promise<CpnCredsWindow> {
     const cell = this.credsCell;
     if (!cell) throw new Error("this session was not built with CPN renewal; there is no credential cell to adopt into");
     const previous = cell.current();
