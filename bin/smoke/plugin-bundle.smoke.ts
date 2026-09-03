@@ -15,6 +15,7 @@ const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const pluginDir = join(ROOT, "plugins", "cotal-mesh");
 const sourceSkillsDir = join(ROOT, "implementations", "cli", "cotal-skills", "skills");
 const marketplacePath = join(ROOT, ".agents", "plugins", "marketplace.json");
+const releaseManifestPath = join(ROOT, "bin", "package.json");
 
 type PluginManifest = {
   name: string;
@@ -26,6 +27,7 @@ type PluginManifest = {
 };
 
 const json = <T>(path: string): T => JSON.parse(readFileSync(path, "utf8")) as T;
+const isPublishableSemver = (version: string): boolean => /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.test(version);
 const names = (dir: string) =>
   readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
@@ -37,8 +39,12 @@ assert.ok(existsSync(sourceSkillsDir), "CLI canonical skill bundle exists");
 assert.ok(existsSync(marketplacePath), "repo-local Codex marketplace exists");
 
 const manifest = json<PluginManifest>(join(pluginDir, ".codex-plugin", "plugin.json"));
+const releaseManifest = json<{ version: string }>(releaseManifestPath);
 assert.equal(manifest.name, "cotal-mesh");
-assert.match(manifest.version, /^\d+\.\d+\.\d+$/, "plugin version is publishable semver");
+assert.ok(isPublishableSemver(releaseManifest.version), "canonical release version is publishable semver");
+assert.equal(manifest.version, releaseManifest.version, "plugin version is bound to the canonical release version");
+assert.ok(isPublishableSemver(manifest.version), "plugin version is publishable semver");
+assert.equal(isPublishableSemver("0.34.0-cpn..1"), false, "malformed prerelease is rejected");
 assert.equal(manifest.skills, "./skills/");
 assert.equal(manifest.mcpServers, "./.mcp.json");
 assert.equal(manifest.interface.displayName, "Cotal Mesh");
