@@ -376,6 +376,7 @@ try {
     swapErr instanceof CpnAdoptError &&
       swapErr.stage === "reconnect" &&
       swapErr.leftOn === "previous" &&
+      swapErr.cause instanceof Error &&
       swapErr.window?.exp === credsClaims(genA2).exp &&
       cellNow!.exp === credsClaims(genA2).exp,
     {

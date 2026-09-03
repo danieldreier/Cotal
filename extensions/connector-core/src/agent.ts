@@ -380,7 +380,7 @@ export class MeshAgent extends EventEmitter {
       // adopted and reverting the cell alone is sufficient HERE and only here.
       cell.adopt(previous);
       throw new CpnAdoptError("reload", "previous", undefined,
-        `the endpoint refused the renewed credential: ${(e as Error).message}`);
+        `the endpoint refused the renewed credential: ${e instanceof Error ? e.message : String(e)}`, e);
     }
     try {
       // Swap the LIVE wire onto the proven credential; reloadCreds deliberately does not
@@ -395,12 +395,12 @@ export class MeshAgent extends EventEmitter {
       if (restoreFailed) {
         cell.adopt(next);
         throw new CpnAdoptError("rollback", "new", committed,
-          `the wire did not swap (${(e as Error).message}) and the previous credential could not be ` +
-            `re-proved (${restoreFailed.message}); the session is left on the broker-accepted new credential`);
+          `the wire did not swap (${e instanceof Error ? e.message : String(e)}) and the previous credential could not be ` +
+            `re-proved (${restoreFailed instanceof Error ? restoreFailed.message : String(restoreFailed)}); the session is left on the broker-accepted new credential`, e);
       }
       throw new CpnAdoptError("reconnect", "previous", restored,
-        `the renewed credential was proved but the wire did not swap (${(e as Error).message}); ` +
-          "the session is left on the previous credential");
+        `the renewed credential was proved but the wire did not swap (${e instanceof Error ? e.message : String(e)}); ` +
+          "the session is left on the previous credential", e);
     }
     return committed;
   }

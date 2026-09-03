@@ -241,8 +241,9 @@ export class CpnAdoptError extends Error {
     readonly leftOn: "previous" | "new",
     readonly window: CpnCredsWindow | undefined,
     message: string,
+    cause?: unknown,
   ) {
-    super(message);
+    super(message, { cause });
     this.name = "CpnAdoptError";
   }
 }
