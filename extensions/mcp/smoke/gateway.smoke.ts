@@ -74,10 +74,13 @@ async function cell(mode: "open" | "auth"): Promise<void> {
     const offline = new Set<string>();
     peer = new CotalEndpoint({ space, servers: server, creds: peerPrepared?.creds, lifecycleUid: peerPrepared?.lifecycleUid, channels: ["general"], card: { id: peerPrepared?.id, name: peerPrepared?.name ?? `peer-${mode}`, role: peerPrepared?.role ?? "witness", kind: "agent" } }); peer.on("error", () => {}); peer.on("presence", (event: { type: string; presence: { card: { id: string } } }) => { if (event.type === "offline") offline.add(event.presence.card.id); }); await peer.start();
     const stderr: string[] = [];
-    const raw = await rawStdioProbe(tsx, [main, "--space", space, "--persona", "gateway"], root, { ...process.env, COTAL_HOME: home });
+    const childEnv: NodeJS.ProcessEnv = { ...process.env };
+    for (const key of Object.keys(childEnv)) if (key.startsWith("COTAL_")) delete childEnv[key];
+    childEnv.COTAL_HOME = home;
+    const raw = await rawStdioProbe(tsx, [main, "--space", space, "--persona", "gateway"], root, childEnv);
     check(`${mode}: raw newline-framed stdio has JSON-RPC-only stdout`, raw.clean);
     check(`${mode}: initialize teaches an unfamiliar host to open an identity, orient, and use the skill when available`, raw.instructions.includes("cotal_identity_open") && raw.instructions.includes("cotal_orientation") && raw.instructions.includes("$cotal-mesh"), raw.instructions);
-    transport = new StdioClientTransport({ command: tsx, args: [main, "--space", space, "--persona", "gateway"], cwd: root, env: { ...process.env, COTAL_HOME: home }, stderr: "pipe" }); transport.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk.toString()));
+    transport = new StdioClientTransport({ command: tsx, args: [main, "--space", space, "--persona", "gateway"], cwd: root, env: childEnv, stderr: "pipe" }); transport.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk.toString()));
     const updates: string[] = [];
     client = new Client({ name: "gateway-smoke", version: "0.0.0" }); client.setNotificationHandler(ResourceUpdatedNotificationSchema, async (notification) => { updates.push(notification.params.uri); }); await client.connect(transport);
     const tools = await client.listTools(); check(`${mode}: initialize and tool discovery expose gateway identity tools`, ["cotal_identity_open", "cotal_identity_list", "cotal_identity_use", "cotal_identity_close"].every((name) => tools.tools.some((tool) => tool.name === name)));

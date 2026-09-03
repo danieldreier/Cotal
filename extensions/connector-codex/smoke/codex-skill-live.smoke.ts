@@ -62,13 +62,14 @@ try {
   if (git.status !== 0) throw new Error(`could not create isolated Codex project: ${git.stderr}`);
   const last = join(root, "last-message.txt");
   const prompt = "Use $cotal-mesh for this Cotal collaboration task. You may use only read-only local activity needed to load that skill; do not use MCP, network, or project tools. Reply with exactly: Discovery marker: mesh edges are contracts, not vibes. If the skill is unavailable, reply SKILL_NOT_DISCOVERED.";
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of Object.keys(env)) if (key.startsWith("COTAL_")) delete env[key];
+  Object.assign(env, {
     HOME: home,
     USERPROFILE: home,
     CODEX_HOME: codexHome,
     COTAL_HOME: cotalHome,
-  };
+  });
   const run = spawnSync(codex, [
     "exec",
     "--ephemeral",
