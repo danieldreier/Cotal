@@ -103,7 +103,7 @@ try {
 
   // A scoped agent: read ACL = ["allowed"] only. The stub provisioner skips durable pre-create —
   // we only need the cred's grants, which is what nats-server enforces.
-  const noop = { commitAcl: async () => {}, reissueAcl: async () => {}, provisionDmInbox: async () => {}, provisionDlvInbox: async () => {}, provisionTaskQueue: async () => {} };
+  const noop = { commitAcl: async () => {}, reissueAcl: async () => {}, provisionDmInbox: async () => {}, provisionDlvInbox: async () => {}, provisionAgentKvWatches: async () => {}, provisionTaskQueue: async () => {} };
   const id = newIdentity();
   const uid = mintLifecycleUid();
   const agentCreds = await provisionAgent(noop, auth, id, { subscribe: ["allowed"], allowSubscribe: ["allowed"], lifecycleUid: uid });

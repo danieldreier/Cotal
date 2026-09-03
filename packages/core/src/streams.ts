@@ -40,6 +40,7 @@ import {
   DEV_OWNER,
   principalKey,
   deprovisionTargetPrincipal,
+  agentKvWatchConsumerName,
 } from "./subjects.js";
 import { idFromCreds } from "./identity.js";
 import { ensureAuthorityStores } from "./endpoint-binding.js";
@@ -709,7 +710,7 @@ export async function clearChannel(opts: {
 
 /** Delete a departed agent LIFECYCLE's provisioning footprint (#159 Part B) — the teardown counterpart
  *  to {@link provisionAgent}. Removes exactly what the provisioner minted for THIS incarnation: its two
- *  bind-only durables (`dm_<o>-<a>-<uid>`, `dlv_<o>-<a>-<uid>`) and its lifecycle-keyed read-ACL row.
+ *  bind-only mailboxes, two fixed-destination public-KV watchers, and lifecycle-keyed read-ACL row.
  *  Idempotent — a missing consumer / absent ACL row is a no-op (the agent may have exited before a
  *  durable was created, or a re-run). LIFECYCLE-EXACT by construction (SPEC §13.1): every name this
  *  deletes embeds the target uid, so a stale/replayed teardown for a retired lifecycle names only
@@ -746,6 +747,8 @@ export async function deprovisionAgent(opts: {
     const jsm = await jetstreamManager(nc);
     await deleteConsumerIdempotent(jsm, dmStream(opts.space), dmDurable(t.owner, t.actor, t.lifecycleUid));
     await deleteConsumerIdempotent(jsm, dlvStream(opts.space), dlvDurable(t.owner, t.actor, t.lifecycleUid));
+    await deleteConsumerIdempotent(jsm, `KV_${presenceBucket(opts.space)}`, agentKvWatchConsumerName("presence", t.owner, t.actor, t.lifecycleUid));
+    await deleteConsumerIdempotent(jsm, `KV_${channelBucket(opts.space)}`, agentKvWatchConsumerName("channels", t.owner, t.actor, t.lifecycleUid));
     await deleteAcl(await openAclRegistry(nc, opts.space), principalKey(t.owner, t.actor).key, t.lifecycleUid);
   } finally {
     await nc.drain();
