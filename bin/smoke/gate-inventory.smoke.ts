@@ -66,6 +66,9 @@ const UNGATED: Record<string, string> = {
   // Need external tooling no CI runner has.
   "smoke:orca:live": "drives the public orca CLI",
   "smoke:orca-e2e:live": "drives the public orca CLI", "smoke:pi": "needs a pi install", "smoke:codex-live": "needs a logged-in codex CLI",
+  "smoke:codex-skill-live": "needs a logged-in Codex CLI to prove native skill discovery in a fresh session",
+  "smoke:mcp-gateway-codex-live": "needs a logged-in Codex CLI to prove the packaged MCP gateway through a real model turn",
+  "smoke:codex-plugin-live": "needs an installed Codex CLI for the real marketplace/plugin-host acceptance",
   "smoke:codex-tui-live": "needs a codex TUI session",
   "smoke:jcode-live": "needs an installed, authenticated jcode CLI (COTAL_E2E_JCODE=1)",
   // A STANDING DECISION, and only for the REAL-SESSION arm. The same suite is GATED as

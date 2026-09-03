@@ -282,7 +282,7 @@ try {
 
   // ---- 3. a failed presence write must never swallow the Stop wake -----------------------------
   // A DM lands mid-turn (held), then presence fails exactly as it does when the endpoint is
-  // mid-reconnect (setStatus calls assertConnected). The turn-end flush must still fire.
+  // mid-reconnect (setStatus calls requireConnected). The turn-end flush must still fire.
   await fireHook({ hook_event_name: "UserPromptSubmit" }); // open a turn
   await dmOtto("dm-three: held behind a turn");
   await waitFor("the third DM to buffer", () => stillPending("dm-three: held behind a turn"));
@@ -383,7 +383,7 @@ try {
   await fireHook({ hook_event_name: "Stop" });
 
   // ---- 5. the ack ITSELF fails — the branch that runs when the commit does not ------------------
-  // A JetStream ack publishes, so a closed connection throws. `drainInboxIds` removes the batch from
+  // A JetStream ack publishes, so a closed connection throws. `drainInboxDeliveries` removes the batch from
   // the in-memory buffer BEFORE acking, so a throw part-way through leaves the remainder neither
   // acked nor marked handled. That is the safe direction — JetStream still owns it — but it is the
   // branch nobody exercises, and it is safe ONLY because `commitPending` acks before it marks

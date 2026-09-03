@@ -98,10 +98,10 @@ fail-loud on collision.
   recorded the same way a detached `cotal up` is. Readers verify the recorded pid is alive and is a
   supervisor before trusting it ([Config](config.md#project-cotal)).
 
-The **web dashboard** is *not* part of `cotal up`. It ships inside `cotal-ai` as the `@cotal-ai/web`
-extension and is seeded automatically by the boot reconcile — the same durable, version-locked path as
-the built-in connectors (`SEEDED_EXTENSIONS`) — so it always matches the CLI version and needs no
-separate install. Start it with `cotal web`; it records
+The **web dashboard** is *not* part of `cotal up`. It and the local MCP gateway ship inside `cotal-ai`
+as the `@cotal-ai/web` and `@cotal-ai/mcp` extensions and are seeded automatically by the boot reconcile
+— the same durable, version-locked path as the built-in connectors (`SEEDED_EXTENSIONS`) — so they always
+match the CLI version and need no separate install. Start the dashboard with `cotal web`; it records
 `.cotal/web.pid`, self-registers that process with `down`, and is addressed as
 `http://cotal.localhost:7799` (binds loopback; `*.localhost` resolves in Chrome/Firefox/Edge,
 Safari may need plain `127.0.0.1`). `webUp()` probes the port for setup's status card.
@@ -124,12 +124,12 @@ default, and a failed install is non-fatal (warn plus manual command). The same 
 exposes `displayCmd()`, the prefix (`cotal` / `npx cotal-ai` / `pnpm cotal`) used in the
 status-card hints so they match how you ran it.
 
-## Built-in connectors are seeded extensions
+## Built-in extensions are seeded
 
-The first-party connectors (`claude`, `opencode`, `codex`, `hermes`, `pi`) are **not** static-imported by
-the binary. The composition root (`bin/cotal.ts`) registers no connector; they self-register only when
-imported, and they are imported only once installed. On the first real command of each boot the CLI
-**seeds** them through the same `cotal ext add` path a third party uses, so they are ordinary
+The first-party connectors (`claude`, `opencode`, `codex`, `hermes`, `pi`), web dashboard, and local MCP
+gateway are **not** static-imported by the binary. The composition root (`bin/cotal.ts`) registers none of
+them; they self-register only when imported, and they are imported only once installed. On the first real
+command of each boot the CLI **seeds** them through the same `cotal ext add` path a third party uses, so they are ordinary
 extensions you can `cotal ext remove`. Code lives in [`implementations/cli/src/seed/`](../implementations/cli/src/seed/);
 the entry is `reconcileSeededConnectors()`, gated in `runCli` before the manifest overlay so
 `ext seed --repair` survives a corrupt manifest.
@@ -137,8 +137,8 @@ the entry is `reconcileSeededConnectors()`, gated in `runCli` before the manifes
 **What ships where.** The connectors are `devDependencies` of `cotal-ai` (not runtime deps), and a
 `prepack` step ([`bin/scripts/copy-seeded-connectors.mjs`](../bin/scripts/copy-seeded-connectors.mjs))
 `npm pack`s each into `bin/seeded-connectors/<name>/` (honoring each connector's own `files`), added to
-the package `files`. `SEEDED_EXTENSIONS` (`@cotal-ai/workspace`) is the shared list — the connectors plus
-`web` — and the prepack asserts every bundled payload's `name` and `version` match the umbrella (the
+the package `files`. `SEEDED_EXTENSIONS` (`@cotal-ai/workspace`) is the shared list — the connectors,
+`web`, and `mcp` — and the prepack asserts every bundled payload's `name` and `version` match the umbrella (the
 `fixed` changeset group keeps them lockstep), so a version-skewed payload can never be published; `web`
 also emits `dist/web/vendor/vendor-manifest.json` (name/version/license/sha512) as the auditable
 inventory of its vendored browser libs (marked/DOMPurify ship as opaque `dist` bytes, not runtime deps).

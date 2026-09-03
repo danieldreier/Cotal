@@ -1,0 +1,6 @@
+interface:
+  display_name: "Cotal Engineering"
+  short_description: "Develop and verify Cotal safely"
+  default_prompt: "Use $cotal-engineering to inspect this Cotal product or source task."
+policy:
+  allow_implicit_invocation: true

@@ -44,7 +44,18 @@ for (const [name, { pkg, srcDir: srcSubdir }] of Object.entries(SEEDED_EXTENSION
   const tmp = mkdtempSync(join(tmpdir(), "cotal-seed-"));
   try {
     // --ignore-scripts: dist is already built above; don't re-run the connector's own prepack.
-    const stdout = execFileSync("npm", ["pack", "--ignore-scripts", "--silent", "--pack-destination", tmp, srcDir], { encoding: "utf8" });
+    // A publish artifact must not depend on npm's user-global cache or update-notifier state being
+    // writable. Either can turn a clean pack into a platform-specific exit 255 before this helper
+    // receives any useful diagnostic, despite being unrelated to tarball contents.
+    const stdout = execFileSync("npm", ["pack", "--ignore-scripts", "--silent", "--pack-destination", tmp, srcDir], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        NO_UPDATE_NOTIFIER: "1",
+        NPM_CONFIG_UPDATE_NOTIFIER: "false",
+        NPM_CONFIG_CACHE: join(tmp, "npm-cache"),
+      },
+    });
     const tgz = stdout.trim().split("\n").filter(Boolean).pop();
     if (!tgz) throw new Error(`npm pack produced no tarball for ${pkg}`);
     const dest = join(outRoot, name);

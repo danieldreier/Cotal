@@ -19,7 +19,16 @@ export const jcodeConnector: Connector = {
   kind: "connector",
   name: "jcode",
   requires: ["jcode"],
-  launchHint: "starting Jcode and joining the mesh",
+  // Jcode may download model material, bring up its MCP bridge, then run a provider-backed
+  // cotal_orientation turn before it joins. A generic 30s presence window is therefore not a
+  // verdict for this connector; keep the manager's wait bounded but long enough for that required
+  // bootstrap sequence (#827).
+  readinessTimeoutMs: 180_000,
+  // variant = Jcode's per-session reasoning effort (`set_reasoning_effort`). The accepted tiers are
+  // per provider AND per model, and the Harness API publishes no ladder to check against — so the
+  // tier is carried verbatim and validated at launch by Jcode itself, which owns that catalog.
+  supportsModelVariant: true,
+  launchHint: "starting Jcode and joining the mesh (first boot can take several minutes)",
 
   buildLaunch(opts: LaunchOpts): LaunchSpec {
     if (process.platform === "win32")
@@ -28,8 +37,6 @@ export const jcodeConnector: Connector = {
       throw new Error("jcode connector does not support exact-session continuation — its private Harness API instance is retired with the seat");
     if (opts.resume)
       throw new Error("jcode connector: resuming an existing session is not supported — the private Harness API instance never shares a session with another seat");
-    if (opts.variant)
-      throw new Error("jcode connector: model variants are not supported");
     if (opts.mcpServers && Object.keys(opts.mcpServers).length > 0)
       throw new Error("jcode connector: tool-sharing (connectors.jcode.mcpServers) is not implemented — the connector owns the private MCP configuration that carries cotal_*");
 
@@ -48,7 +55,7 @@ export const jcodeConnector: Connector = {
     if (opts.lifecycleUid) env.COTAL_LIFECYCLE_UID = opts.lifecycleUid;
     // Like Codex, the TUI decision belongs to the process that builds this launch. A foreground
     // spawn reads the operator shell; a detached spawn is built in the manager and reads its env.
-    // It must cross explicitly because launchEnv resets the per-session COTAL_* namespace.
+    // Copied by name because launchEnv does not inherit ambient COTAL_* (this name is per-launch).
     const tui = process.env.COTAL_JCODE_TUI?.trim();
     if (tui) env.COTAL_JCODE_TUI = tui;
 
@@ -60,12 +67,24 @@ export const jcodeConnector: Connector = {
     }
 
     let model = opts.model;
+    let variant = opts.variant;
     if (opts.configPath) {
       const path = resolve(opts.configPath);
       env.COTAL_AGENT_FILE = path;
-      model ??= loadAgentFile(path).model;
+      const def = loadAgentFile(path);
+      model ??= def.model;
+      variant ??= def.variant;
     }
     if (model) env.COTAL_MODEL = model;
+    // The host applies the requested tier before its first turn. Do not drop a whitespace-only
+    // variant: that would make an operator's request look accepted while silently selecting the
+    // provider default.
+    if (variant !== undefined) {
+      variant = variant.trim();
+      if (!variant)
+        throw new Error("jcode connector: a model variant was given but it is empty — there is no reasoning effort to select");
+      env.COTAL_VARIANT = variant;
+    }
 
     // The Harness API exposes model selection, but no stable generic equivalent to arbitrary
     // CLI/config overrides. Do not accept `--opt` merely because Jcode's TUI has flags: an option

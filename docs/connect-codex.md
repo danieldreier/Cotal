@@ -14,15 +14,37 @@ spawn options that are not wired **fail loud** rather than degrade: resuming a s
 ## Install
 
 The connector ships with the CLI as a seeded extension (`@cotal-ai/connector-codex`): no
-separate install step and no Codex-side plugin. You only need an authenticated `codex` binary
-on your PATH (a ChatGPT-plan login or an `OPENAI_API_KEY`). If an older install is missing it,
-`cotal ext seed --repair` (or `cotal ext add @cotal-ai/connector-codex`) brings it in.
+separate install step and no Codex-side plugin are needed for a **Cotal-managed** agent. You only
+need an authenticated `codex` binary on your PATH (a ChatGPT-plan login or an `OPENAI_API_KEY`).
+If an older install is missing it, `cotal ext seed --repair` (or `cotal ext add
+@cotal-ai/connector-codex`) brings it in. The connector drives Codex from the outside over
+`codex app-server`.
 
-**Don't install the `cotal` plugin Codex offers you.** Searching Codex's plugin list for "cotal"
-turns up a plugin named `cotal`, from the `cotal-mesh` marketplace. That is the **Claude Code**
-adapter, which appears there only because Codex reads the same plugin-marketplace format; it is
-not this connector and installing it does not connect Codex to a mesh. Codex needs nothing
-installed on its side: the connector drives it from the outside, over `codex app-server`.
+For a person running their own local Codex client, the separate `cotal-mesh` Codex plugin bundles
+the portable Cotal skills and a trusted local MCP server. The CPN personal-marketplace declaration
+runs `cotal mcp --cpn`: it enrolls independent, scoped session identities through the CPN launcher
+rather than resolving a local mesh. Install and validate it through the [operator MCP gateway
+guide](operator-mcp-gateway.md#cotal-mesh-codex-plugin).
+
+Cotal's workflow guidance is also installed by `cotal setup` in Codex's native skill root: normally
+`~/.codex/skills/`, or `$CODEX_HOME/skills/` when you set `CODEX_HOME`. The portable set is
+`cotal-mesh`, `team-topology`, and `cotal-engineering`. It explains how to orient and verify live
+mesh state; the `cotal_*` MCP tools remain the authority for state and side effects. A fresh-session
+skill load is distinct from MCP `tools/list` discovery.
+
+## ChatGPT Desktop
+
+ChatGPT Desktop supports local stdio MCP servers and shares its MCP configuration with Codex CLI
+and the Codex IDE extension. Configure `cotal mcp --space <space>
+--config <persona>` as a stdio server in **Settings → MCP servers**, save, restart, and check the
+Composer's `/mcp` view. See [Operator MCP gateway](operator-mcp-gateway.md) for the exact setup and
+the identity-first workflow.
+
+This direct local gateway is separate from Cotal's spawned `@cotal-ai/connector-codex` adapter: it
+creates session-scoped standalone identities rather than attaching to a Cotal-spawned Codex thread.
+The server's initialization instructions and tool descriptions guide a host that has no Cotal skill;
+do not infer a native skill load from MCP registration. Hosted ChatGPT Web/plugin use is a separate
+remote-connector path and does not read the workstation's local MCP configuration.
 
 **Codex version.** The connector drives `codex app-server` over its experimental v2 surface.
 Minimum **codex-cli 0.145.0**; tested against 0.145.0 and 0.146.0. An older binary authenticates fine but has
@@ -78,6 +100,10 @@ pipe, which is what lets Codex's own TUI attach to the very thread the mesh is d
   execute against the host's single mesh endpoint: no sidecar process, no second identity. The
   app-server is the MCP client, so the tools work the same on a turn a peer message started and
   on one **you** typed into the TUI.
+- **Ready means on the mesh.** The host announces `ready` and hands the terminal to Codex only
+  after the app-server, MCP surface, and mesh endpoint are all live (including the initial
+  presence publish). If the broker cannot be reached, startup fails within 15 seconds with the
+  broker address and latest connection error; it never opens an offline-looking TUI.
 - **At-least-once delivery.** A turn's surfaced messages are acked (by exact id) only when the
   turn completes. A failed turn retries with backoff, and an interrupted turn leaves the batch to
   redeliver. If the Codex app-server itself dies, the host restarts it in place (same mesh

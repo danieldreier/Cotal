@@ -1,0 +1,22 @@
+{
+  "suite": "extensions/connector-core/smoke/mcp-server.smoke.ts",
+  "guard": "the shared MCP server exposes exact context/inbox resources, keeps inbox reads peek-only, and scopes resource notifications to explicit subscriptions",
+  "command": "pnpm smoke:mcp-server",
+  "proveWith": "node scripts/mutation-proof.mjs --config extensions/connector-core/smoke/mutations/mcp-server.json",
+  "mutations": [
+    {
+      "name": "M1 resource inbox accidentally drains instead of forcing peek",
+      "file": "extensions/connector-core/src/mcp-server.ts",
+      "find": "(await inboxSpec.run(agent, config, { peek: true })).text",
+      "replace": "(await inboxSpec.run(agent, config, { peek: false })).text",
+      "expectRed": "resource must never drain"
+    },
+    {
+      "name": "M2 resource update escapes the per-server subscription set",
+      "file": "extensions/connector-core/src/mcp-server.ts",
+      "find": "!subscriptions.has(uri) || !server.isConnected()",
+      "replace": "!server.isConnected()",
+      "expectRed": "subscription is URI-scoped"
+    }
+  ]
+}

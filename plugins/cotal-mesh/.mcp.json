@@ -1,0 +1,6 @@
+{
+  "cotal": {
+    "command": "cotal",
+    "args": ["mcp", "--cpn"]
+  }
+}

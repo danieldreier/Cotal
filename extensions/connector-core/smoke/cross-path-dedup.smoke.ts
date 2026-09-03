@@ -185,7 +185,7 @@ try {
     a2.ep.emit("message", msg("surfaced-overflow"), mkDelivery(false, { n: 0 }), meta);
     for (let i = 0; i < 200; i++) a2.ep.emit("message", msg(`fill-${i}`), mkDelivery(false, { n: 0 }), meta);
     check("exact completion setup overflow-evicts the surfaced id", !a2.peekInbox().some((i) => i.id === "surfaced-overflow"));
-    a2.drainInboxIds(["surfaced-overflow"]);
+    a2.drainInboxDeliveries(["surfaced-overflow"]);
     const late = { n: 0 };
     a2.ep.emit("message", msg("surfaced-overflow"), mkDelivery(true, late), meta);
     check("exact completion marks an absent requested id handled", !a2.peekInbox().some((i) => i.id === "surfaced-overflow"));
@@ -281,14 +281,19 @@ try {
     const a2 = new MeshAgent({ ...cfg, id: `focus_transition_${quiet}`, quiet: quiet ? ["ch"] : [] });
     a2.on("error", () => {});
     (a2 as unknown as { _connected: boolean })._connected = true;
+    let releaseConnected!: () => void;
+    const connected = new Promise<void>((resolve) => { releaseConnected = resolve; });
     let release!: (sequence: number) => void;
     const frontier = new Promise<number>((resolve) => { release = resolve; });
+    (a2 as unknown as { requireConnected(): Promise<void> }).requireConnected = async () => connected;
     (a2.ep as unknown as { chatFrontier(): Promise<number> }).chatFrontier = () => frontier;
     (a2.ep as unknown as { setAttention(mode: string): Promise<void> }).setAttention = async () => {};
     const focusing = a2.setAttention("focus");
     await Promise.resolve();
     const id = quiet ? "focus-transition-quiet" : "focus-transition-normal";
     a2.ep.emit("message", msg(id), mkDelivery(false, { n: 0 }), meta);
+    releaseConnected();
+    await Promise.resolve();
     release(0);
     await focusing;
     (a2.ep as unknown as { joinedChannels(): string[] }).joinedChannels = () => ["ch"];

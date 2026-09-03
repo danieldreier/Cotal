@@ -12,7 +12,7 @@ name: dave              # → COTAL_NAME / card.name
 role: builder           # → COTAL_ROLE / card.role (presence + anycast address)
 description: …          # → card.description
 tags: [edit, test]      # → card.tags ("what it can do")
-subscribe: [general, team.backend]     # channels it reads at boot
+subscribe: [general, team.backend]     # channels it reads at boot (omit = none)
 allowSubscribe: [general, team.>]      # read ACL (omit = same as subscribe)
 allowPublish: [general, team.backend]  # post ACL (omit = none, default-deny)
 agent: codex            # optional connector/harness; explicit --agent wins
@@ -39,7 +39,7 @@ Authoritative shape: [`agent-file.ts`](../packages/core/src/agent-file.ts).
 | `kind` | `agent` \| `endpoint` | Participation class; default `agent`. |
 | `description` | string | One-line summary → `card.description`. |
 | `tags` | string[] | Capability tags → `card.tags`. |
-| `subscribe` | string[] | The **active read set**: channels subscribed at boot (mutable at runtime via join/leave). Must be ⊆ `allowSubscribe`. Default `[general]`. |
+| `subscribe` | string[] | The **active read set**: channels subscribed at boot (mutable at runtime via join/leave). Must be ⊆ `allowSubscribe`. **Omitted ⇒ no channels**: an agent reads exactly what it lists, and one that lists none joins none (still reachable by DM, anycast and presence). List `general` if you want it. |
 | `allowSubscribe` | string[] | The **read ACL**: channels it *may* read. Wildcard subtrees allowed (`team.>`). Omitted ⇒ same as `subscribe`. |
 | `allowPublish` | string[] | The **post ACL**: channels it may publish to. **Omitted ⇒ deny**; posting is the dangerous capability, declare it explicitly. |
 | `quiet` | string[] | Per-channel attention *default*: ambient stays buffered and pull-only until `cotal_inbox`; `@mention`s remain automatic. Concrete channels within the read ACL. |
@@ -50,7 +50,7 @@ Authoritative shape: [`agent-file.ts`](../packages/core/src/agent-file.ts).
 | `launchOptions` | map | Opaque per-connector launch options forwarded **raw** to the harness (Claude flags, OpenCode agent config; Hermes and pi have no option surface and fail loud). A CLI `--opt key=value` overrides a key set here. See [run a mesh](run-a-mesh.md#spawning-agents). |
 | `capabilities` | string[] | Control-plane capabilities minted into the cred. `spawn` grants the privileged control subject (spawn / named stop / persona definition), default-deny when absent, enforced by the broker, not a handler. On a per-user-auth mesh, `role:<r>` additionally lets the agent delegate role `r` when spawning ([identity & auth](identity-and-auth.md)); `admin` is never a persona capability. |
 | `owner` | string | **Policy, not content**: set once by `definePersona` (owner = creator); only the owner (or admin) may redefine the file over the wire. Never write it by hand. |
-| *(any other key)* | string | Kept verbatim in `meta` so a connector can read its own launcher hints without core knowing them. Live presence still overlays the connector/model/variant/host actually in use, so a file cannot misreport what a running session uses. |
+| *(any other key)* | string | Kept verbatim in `meta` so a connector can read its own launcher hints without core knowing them. The connector-owned keys are the exception: `connector`, `model`, `variant`, and `host` (the machine the session runs on) are overlaid from the live session, so a file cannot misreport the harness or the host it is actually running on. `agent:` above *requests* a harness at spawn; the live card still reports the one that ran. |
 
 The three channel verbs on one card, with the common recipes:
 [Channels & permissions](channels-and-permissions.md). Attention semantics (`quiet` /

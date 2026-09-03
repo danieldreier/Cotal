@@ -79,15 +79,28 @@ export interface ReconcileResult {
   readonly removedKept: string[];
 }
 
-/** Auto reconcile for the boot gate: silent no-op when the stamp is current and healthy. */
+/** Auto reconcile for the boot gate: silent no-op when the stamp is current and healthy.
+ *
+ *  Its progress is written to STDERR, always. This reconcile is a side effect of running some
+ *  OTHER command, and that command owns stdout — which for `cotal mcp` over stdio is the JSON-RPC
+ *  channel itself, so a `✓ added …` line forwarded out of a seed child on a cold config root
+ *  lands in the protocol stream ahead of the first frame and the client fails to initialize. The
+ *  routing cannot be conditioned on which command is being dispatched: on a cold root this gate
+ *  runs BEFORE the extension providing that command is installed, so at the moment the bytes are
+ *  written there is no command object — and therefore no per-command declaration — to consult.
+ *  Unconditional is the only form that holds, and it is also the right default: the boot gate is
+ *  never the command the operator asked for, so everything it says is diagnostics.
+ *
+ *  `cotal ext seed` is the other caller and keeps stdout, because there the reconcile IS the
+ *  command. */
 export async function reconcileSeededConnectors(): Promise<void> {
-  await reconcile("auto");
+  await reconcile("auto", process.stderr);
 }
 
 /** `cotal ext seed [--repair|--reset|--force]`: the maintenance entry. Prints a summary. */
 export async function runSeed(flags: SeedFlags): Promise<void> {
   const mode: Mode = flags.reset ? "reset" : flags.repair ? "repair" : flags.force ? "force" : "auto";
-  const result = await reconcile(mode);
+  const result = await reconcile(mode, process.stdout);
   if (result.noop) {
     console.log(c.green("✓ built-in connectors up to date"));
     return;
@@ -101,7 +114,9 @@ export async function runSeed(flags: SeedFlags): Promise<void> {
 
 const NOOP: ReconcileResult = { noop: true, seeded: [], refreshed: [], removedKept: [] };
 
-async function reconcile(mode: Mode): Promise<ReconcileResult> {
+/** `progress` takes everything this run prints that is not an error: the boot gate passes stderr,
+ *  the explicit `ext seed` command passes stdout. See {@link reconcileSeededConnectors}. */
+async function reconcile(mode: Mode, progress: NodeJS.WritableStream): Promise<ReconcileResult> {
   const generation = seedGeneration();
   // Cheap lock-free pre-check: the steady state (stamp current, authority intact) is the common case
   // on EVERY command and must not pay a lock acquire. Health checks run FIRST so a lost authority or a
@@ -136,7 +151,7 @@ async function reconcile(mode: Mode): Promise<ReconcileResult> {
     // themselves fail fast.
     const releaseMutation = claimExtensionMutation({ waitMs: 30000 });
     try {
-      return await runUnderLocks(mode, generation, lock.nonce);
+      return await runUnderLocks(mode, generation, lock.nonce, progress);
     } finally {
       releaseMutation();
     }
@@ -171,7 +186,7 @@ function builtinsAccounted(): boolean {
   }
 }
 
-async function runUnderLocks(mode: Mode, generation: string, nonce: string): Promise<ReconcileResult> {
+async function runUnderLocks(mode: Mode, generation: string, nonce: string, progress: NodeJS.WritableStream): Promise<ReconcileResult> {
   // Refuse to touch the prefix while an orphaned seed child (a crashed parent's still-running
   // installer) is mutating it — reclaiming the lock does not stop that process. An ambiguous marker
   // (pending with a dead parent, or corrupt) is fail-loud: we cannot prove no installer is running.
@@ -268,12 +283,12 @@ async function runUnderLocks(mode: Mode, generation: string, nonce: string): Pro
       // The interrupted package (the cursor only ever names an ADD in progress — removals never write
       // it): re-install it regardless of current manifest state, whether the crash tore the files or
       // died before the manifest commit. Verified below before the cursor is cleared.
-      seedOne(name, generation, nonce, true);
+      seedOne(name, generation, nonce, true, progress);
       verifyInstalled(name, generation);
       everSeeded.add(name);
       refreshed.push(name);
     } else if (!wasSeeded) {
-      seedOne(name, generation, nonce, mode === "reset" || mode === "force");
+      seedOne(name, generation, nonce, mode === "reset" || mode === "force", progress);
       verifyInstalled(name, generation);
       everSeeded.add(name);
       seeded.push(name);
@@ -287,7 +302,7 @@ async function runUnderLocks(mode: Mode, generation: string, nonce: string): Pro
       const torn = mode === "repair" && isSeeded && (repairAllSeeded || !isIntact(name));
       const refresh = mode === "force" || torn || (isSeeded && isStrictlyNewer(generation, stampGen));
       if (refresh) {
-        seedOne(name, generation, nonce, true);
+        seedOne(name, generation, nonce, true, progress);
         verifyInstalled(name, generation);
         refreshed.push(name);
       }
@@ -295,7 +310,7 @@ async function runUnderLocks(mode: Mode, generation: string, nonce: string): Pro
       // The manifest was corrupt and quarantined, but this connector is STILL on disk: its entry was
       // lost with the manifest, not removed. Re-seed it to rebuild the record (a quarantined manifest
       // carries no reliable "removed" fact — only on-disk presence can distinguish the two).
-      seedOne(name, generation, nonce, true);
+      seedOne(name, generation, nonce, true, progress);
       verifyInstalled(name, generation);
       refreshed.push(name);
     } else {
@@ -452,7 +467,7 @@ function resolveEverSeeded(mode: Mode, generation: string): Set<string> {
 /** Stage the payload and `ext add` it as a seed child, journaling the crash cursor around each step.
  *  The child is authenticated: it carries the live reconcile lock's nonce + this parent's PID so a
  *  forged `COTAL_EXT_SEEDING` can't skip the mutation lock for an arbitrary `ext add`. */
-function seedOne(name: string, generation: string, nonce: string, force: boolean): void {
+function seedOne(name: string, generation: string, nonce: string, force: boolean, progress: NodeJS.WritableStream): void {
   writeCursor({ nonce, package: name, phase: "copy" });
   const storePath = stageSeedPayload(generation, name, { force });
   writeCursor({ nonce, package: name, phase: "add" });
@@ -465,7 +480,11 @@ function seedOne(name: string, generation: string, nonce: string, force: boolean
     env: { ...process.env, COTAL_EXT_SEEDING: nonce, COTAL_EXT_SEEDING_PARENT: String(process.pid) },
   });
   clearChildMarker(); // parent survived the child: the marker's job is done (child also clears its own)
-  if (r.stdout) process.stdout.write(r.stdout);
+  // The child is piped, never inherited, so THIS write is the only way its surface reaches a
+  // terminal - which is what makes one guard here sufficient and a second one inside `ext add`
+  // actively wrong: routing the child's own print to ITS stderr was measured to swallow the line
+  // entirely, because only stdout is forwarded.
+  if (r.stdout) progress.write(r.stdout);
   if (r.status !== 0) {
     const tail = `${r.stderr ?? ""}`.trim().split("\n").slice(-8).join("\n");
     throw new Error(`failed to seed connector "${name}" from ${storePath}:\n${tail}`);

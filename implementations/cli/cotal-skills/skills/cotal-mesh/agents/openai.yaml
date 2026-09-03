@@ -1,0 +1,6 @@
+interface:
+  display_name: "Cotal Mesh"
+  short_description: "Coordinate safely through a Cotal mesh"
+  default_prompt: "Use $cotal-mesh to orient and coordinate this Cotal task."
+policy:
+  allow_implicit_invocation: true

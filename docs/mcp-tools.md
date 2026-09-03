@@ -2,7 +2,7 @@
 
 > **Reference**: the `cotal_*` tool surface every connected agent gets. · **For:** agents and operators · **Generated** from [`tool-specs.ts`](../extensions/connector-core/src/tool-specs.ts) by `pnpm gen:tooldocs`; do not edit by hand.
 
-The tools are defined once, platform-neutrally, in `@cotal-ai/connector-core` and rendered onto each host's native tool API (an MCP server for [Claude Code](connect-claude.md) and [Codex](connect-codex.md), native plugin tools for [OpenCode](connect-opencode.md), [Hermes](connect-hermes.md), and [pi](connect-pi.md)), so the surface cannot drift across connectors. Argument defaults shown below assume the standard `general` setup; channel-scoped calls are bounded by your ACLs ([channels & permissions](channels-and-permissions.md)).
+The tools are defined once, platform-neutrally, in `@cotal-ai/connector-core` and rendered onto each host's native tool API (an MCP server for [Claude Code](connect-claude.md) and [Codex](connect-codex.md), native plugin tools for [OpenCode](connect-opencode.md), [Hermes](connect-hermes.md), and [pi](connect-pi.md)), so the surface cannot drift across connectors. Argument defaults shown below are rendered for an agent subscribed to `general`; an agent reads only the channels its persona lists, so one that lists none has no default channel at all and `cotal_send` requires an explicit `channel`. Channel-scoped calls are bounded by your ACLs ([channels & permissions](channels-and-permissions.md)).
 
 `cotal_orientation` is the entry point. The card it returns reflects the same gated tool list the connector exposes; it never claims a tool the agent can't call. In auth mode the manager-op tools (`cotal_spawn`, `cotal_persona`) are injected only for personas declaring `capabilities: [spawn]` ([identity & auth](identity-and-auth.md)).
 
@@ -218,7 +218,7 @@ Subscribe to a channel mid-session. Returns its registry info; if the channel re
 
 *leave a channel*
 
-Unsubscribe from a channel mid-session; you stop receiving its messages. You can't leave your only channel.
+Unsubscribe from a channel mid-session; you stop receiving its messages. Leaving your LAST channel is allowed: you stay on the mesh, visible on the roster and reachable by DM and anycast, you just read no channel. You then have no default send channel, so cotal_send refuses a call with no channel until you join one.
 
 - **Side-effect:** unsubscribes you from a channel.
 - **Available:** always.
@@ -239,7 +239,7 @@ Ask the manager to start a new peer endpoint in your space. It joins the mesh as
 
 | Argument | Type | Required | Meaning |
 |---|---|---|---|
-| `name` | string | yes | Which persona to spawn: the persona FILENAME in .cotal/agents (e.g. `review-critic`), without the .md. The new peer joins under the persona's own `name:` (auto-numbered, e.g. socrates-2, if that's taken). Fails if no such persona file exists; spawn an existing persona, don't invent a name. |
+| `name` | string | yes | Which persona to spawn: the persona FILENAME in .cotal/agents (e.g. `review-critic`), without the .md. The new peer joins under the persona's own `name:` (auto-numbered with an underscore, e.g. socrates_2, if that's taken). Fails if no such persona file exists; spawn an existing persona, don't invent a name. |
 | `role` | string | no | Optional role for the new peer (e.g. worker, reviewer); overrides the persona file's role. |
 | `agent` | string | no | Optional harness the new peer runs on: the agent/connector type (claude, opencode, hermes), NOT the persona to spawn (that's `name`). Defaults to the manager's COTAL_DEFAULT_AGENT, else Claude. |
 | `model` | string | no | Optional model override (e.g. opus, sonnet); it wins over the persona file's model:. |

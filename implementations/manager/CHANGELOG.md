@@ -1,5 +1,251 @@
 # @cotal-ai/manager
 
+## 0.33.1
+
+### Patch Changes
+
+- @cotal-ai/core@0.33.1
+- @cotal-ai/workspace@0.33.1
+
+## 0.33.0
+
+### Minor Changes
+
+- ba74c84: An agent now reads only the channels it lists. An omitted or empty read set means **no channels**,
+  where it previously meant `general`: the agent-file loader, the provisioner, the credential mint and
+  the endpoint each defaulted an absent read set to `["general"]`, so any persona that simply did not
+  mention channels was subscribed to `general` by code and had the matching channel read row baked
+  into its credential.
+
+  An agent on no channel is still a full mesh peer: it appears on the roster and sends and receives
+  DMs and anycasts, and the same default-deny that already governed `allowPublish` now governs reads.
+  An empty list and an omitted one mean the same thing, for both read keys. That has one consequence
+  worth stating plainly: when **both** are omitted, `allowSubscribe` falls back to the read set and so
+  resolves empty too, which leaves the agent unable to `cotal_join` a channel at runtime. Give it an
+  explicit `allowSubscribe` if it should be able to join one later.
+
+  With no concrete channel there is no default broadcast target, so a send with no explicit channel is
+  refused with a message saying so, rather than resolving to `general`. Leaving your last channel is
+  allowed and always was; the `cotal_leave` description said otherwise and now says what actually
+  happens, including that the default send channel is gone until you join one.
+
+  Migration: **list `general` explicitly if you want it.** A hand-written persona that relied on the
+  old default needs `subscribe: [general]` added.
+
+  This changes the default `cotal setup` install as well. The seeded `default_agent` carries
+  `subscribe: []`, which used to resolve to `general` and now resolves to no channel; it keeps
+  `allowSubscribe: [">"]`, so it can still `cotal_join` anything, it just no longer arrives on a
+  channel it never asked for — which is what its own seed comment already described.
+
+  Already-running agents are not narrowed retroactively: a live seat keeps the read ACL its credential
+  was minted with, across renewal, until it is respawned.
+
+### Patch Changes
+
+- Updated dependencies [ba74c84]
+  - @cotal-ai/core@0.33.0
+  - @cotal-ai/workspace@0.33.0
+
+## 0.32.0
+
+### Patch Changes
+
+- @cotal-ai/core@0.32.0
+- @cotal-ai/workspace@0.32.0
+
+## 0.31.0
+
+### Minor Changes
+
+- 4ef59c3: A spawned seat now receives a constructed environment (PATH/HOME/locale, the machine-wide COTAL\_\* knobs, connector-declared provider keys) instead of the manager's ambient environment. Host-session markers such as CLAUDE_CODE_CHILD_SESSION no longer leak into seats and silently disable transcript saving. The Claude connector declares CLAUDE_CODE_OAUTH_TOKEN (and the rest of claude's documented credential set) so a container seat still authenticates; spawn.env remains the explicit opt-in for extra names, including a host marker a persona has chosen to receive.
+
+### Patch Changes
+
+- Updated dependencies [4ef59c3]
+  - @cotal-ai/core@0.31.0
+  - @cotal-ai/workspace@0.31.0
+
+## 0.30.2
+
+### Patch Changes
+
+- 2395efd: A manager that died mid-registration left the issuance gate frozen, and the successor refused to
+  register until an operator ran `cotal reconcile-gate`. Boot now completes that same dead
+  registration itself when the freeze-holder is affirmatively gone under a complete CONNZ sweep
+  (`gone` and `sweepComplete=true`), then continues the normal takeover. Live, unknown,
+  unestablishable, and wrong-op-kind still refuse; there is no TTL.
+  - @cotal-ai/core@0.30.2
+  - @cotal-ai/workspace@0.30.2
+
+## 0.30.1
+
+### Patch Changes
+
+- Updated dependencies [aea08f9]
+  - @cotal-ai/core@0.30.1
+  - @cotal-ai/workspace@0.30.1
+
+## 0.30.0
+
+### Minor Changes
+
+- 97dea94: A manager that lost its liveness lease hard-stopped every agent it managed and
+  deprovisioned each one's credential, durables and broker footprint. Stopping
+  serving is the right conclusion on that path; destroying the seats is a separate
+  act, and a broker timeout is not a finding about whether an agent should die.
+  From the active state the path now detaches: children are left alone, each is
+  marked retained so no deprovision call site can select it, and the seats are
+  named on the operator channel.
+
+  Two boundaries are unchanged and pinned by cells. Ordinary shutdown (`cotal
+down`, Ctrl-C) stays destructive — an operator who asked for a shutdown gets
+  one. A maintenance cut that has committed and not finalized still stops its
+  children, because that inventory is owed a replay and a successor replaying it
+  over live children would spawn a second copy of every seat.
+
+  This does not make a child outlive the manager — a pty child dies with the
+  process that spawned it — it removes the manager's deliberate kill and revoke.
+
+- ef01887: Add closed, host-issued remote manager-service authority for registered user-auth participants. It requires the dedicated `supervise` scope, restricts manager registration and credentials to one owner and opaque instance, and uses a lifecycle-bound prepare, activate, and renew flow with fail-closed renewal and same-owner descendant provisioning.
+
+### Patch Changes
+
+- cc1f2e2: `cotal attach` now coalesces rapid wheel input and PTY redraw bursts, waits for local stdout drain
+  before returning session credit, and automatically repaints the canonical terminal snapshot after an
+  explicit backpressure drop. Session teardown also lets the distinct terminal reason drain before the
+  unsequenced close control can overtake it. The bounded 64-frame rail window is unchanged.
+- b282f70: Honor a connector's declared startup readiness window and make Jcode provider launch refusals diagnosable without exposing private harness output.
+- 0323f5b: The manager logged nothing when a seat left its ownership, on any path. A live
+  supervisor lost several seats while it kept running, and because its log carried
+  no per-seat exit line, "the supervisor reaped them" and "they died on their own"
+  were indistinguishable afterwards — the incident could not be attributed from
+  supervisor state at all.
+
+  Every free path now emits one line at `freeSlot`, the single chokepoint they all
+  pass through, naming the seat, its lifecycle uid, which path gave up the slot,
+  and what the runtime saw when the child ended. The cause is a required argument
+  with no default, so a new free path cannot compile without naming itself.
+
+  `AgentHandle` gains an optional `exitInfo()`; the pty runtime stops discarding
+  the exit code and signal node-pty already hands it. Absent means UNKNOWN and
+  prints as unavailable naming the runtime — a backend that attaches to an
+  externally-owned process (tmux/cmux/orca/herdr) cannot see how the child ended,
+  and a default of `code 0` there would fabricate a clean exit on precisely the
+  seats whose death nobody can explain.
+
+- 0def128: Report the host-authority requirement when a registered user-auth participant tries to supervise a remote mesh, and derive the registered broker address without accepting a mismatched override.
+- Updated dependencies [0e673ff]
+- Updated dependencies [569f4d3]
+- Updated dependencies [b282f70]
+- Updated dependencies [0323f5b]
+- Updated dependencies [ef01887]
+- Updated dependencies [196dddb]
+  - @cotal-ai/core@0.30.0
+  - @cotal-ai/workspace@0.30.0
+
+## 0.29.2
+
+### Patch Changes
+
+- Updated dependencies [8531c13]
+  - @cotal-ai/core@0.29.2
+  - @cotal-ai/workspace@0.29.2
+
+## 0.29.1
+
+### Patch Changes
+
+- @cotal-ai/core@0.29.1
+- @cotal-ai/workspace@0.29.1
+
+## 0.29.0
+
+### Patch Changes
+
+- Updated dependencies [1f025c3]
+  - @cotal-ai/core@0.29.0
+  - @cotal-ai/workspace@0.29.0
+
+## 0.28.2
+
+### Patch Changes
+
+- Updated dependencies [53f66c2]
+  - @cotal-ai/core@0.28.2
+  - @cotal-ai/workspace@0.28.2
+
+## 0.28.1
+
+### Patch Changes
+
+- Updated dependencies [2a383fe]
+  - @cotal-ai/core@0.28.1
+  - @cotal-ai/workspace@0.28.1
+
+## 0.28.0
+
+### Minor Changes
+
+- 86f6b10: Remove the implicit `general` channel floor: undeclared access now grants nothing
+
+  An agent that declared no channel access used to fall back to `["general"]` for its
+  active read set and read ACL. That floor was applied in seven places — the provisioner,
+  the agent-file loader, the manager's spawn path, the CLI's `spawn`, the connector's
+  config resolver, and the endpoint's own channel list — so an agent with no frontmatter
+  silently joined a channel nobody had granted it.
+
+  The fallback also could not see the credentials it was guessing against. On a manifest
+  spawn the materialized persona carries no access frontmatter, so the connector fell back
+  to `general` while the minted creds allowed only the manifest's channels; the broker then
+  refused the subscription and the agent joined nothing, with no error naming the cause.
+  `COTAL_SUBSCRIBE` forwarding was added to paper over exactly this.
+
+  Undeclared read is now empty, matching the repo's no-fallbacks rule and the existing
+  default-deny on `allowPublish`. `Endpoint.send()` throws instead of defaulting to
+  `general` when the endpoint is on no concrete channel — a caller that never declared a
+  channel now gets a loud error rather than a message delivered somewhere it never asked
+  for.
+
+  The seeded personas change with it: `default_agent` no longer auto-subscribes to
+  `general` and no longer carries a wildcard post ACL (`allowPublish: [">"]` → `[]`,
+  default-deny), and the demo personas move to their own `welcome` channel. Channels are
+  implicit — created on first use — so no channel provisioning is required.
+
+  Breaking for anyone relying on the implicit floor: an agent that read `general` without
+  declaring it must now declare it.
+
+- a84cb62: Saving a persona now requires it to name the channels it reads. `saveAgentFile` refuses a
+  definition with no `subscribe`, `cotal personas new` takes a required `--subscribe` (pass
+  an empty value for an agent reachable only by direct message and anycast), and a persona
+  defined over the wire is created with an empty read set, since that path deliberately
+  accepts no policy from its caller, and records that the caller was never offered the
+  choice so a reader can tell it apart from a persona whose author chose no channels. Previously a saved persona with no read set inherited
+  whatever default was current, so a file could grant a channel its author never chose and a
+  later reader could not tell a deliberate silence from a forgotten field. An empty list is
+  written rather than filled in, so the two stay distinguishable.
+
+### Patch Changes
+
+- e377c7b: The manager's session signing key now renews itself instead of expiring after a day. It was minted
+  once at startup with a flat 24-hour window and the same frozen anchor was returned for the life of
+  the process, so any manager with more than a day of uptime lost its session plane permanently: every
+  attach failed closed with "outside its validity window", and the only recovery was restarting the
+  manager, which kills every live session. Failing closed on an expired key is correct and is
+  unchanged; never renewing the key was the defect. The key now rotates once a third of its window has
+  elapsed, the previous key stays verifiable for a ten-minute overlap so an artifact signed just
+  before a swap is not orphaned, renewal is driven both by a timer and opportunistically before
+  signing so a stalled timer alone cannot reintroduce the outage, and the newest key is never dropped.
+- Updated dependencies [09b6a3b]
+- Updated dependencies [b8ee849]
+- Updated dependencies [9216d21]
+- Updated dependencies [86f6b10]
+- Updated dependencies [a84cb62]
+- Updated dependencies [45db9f8]
+- Updated dependencies [e377c7b]
+- Updated dependencies [44738b2]
+  - @cotal-ai/core@0.28.0
+  - @cotal-ai/workspace@0.28.0
+
 ## 0.27.0
 
 ### Patch Changes

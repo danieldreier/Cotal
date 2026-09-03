@@ -38,6 +38,24 @@ export type { AttentionMode, ChannelMode };
  *  relation by test. */
 export const SPAWN_TIMEOUT_MS = 40_000;
 
+/** Grace for a mesh op issued while the link is still coming up. `start()` deliberately returns
+ *  immediately so the connector's MCP surface boots while the broker is absent — which means a
+ *  host that auto-submits a prompt (`cotal spawn --prompt`) can call a mesh tool a second or two
+ *  after launch, several seconds before the first bind lands. Failing that call on the spot
+ *  reports "the mesh is down" about a mesh that is merely still connecting, and the agent then
+ *  repeats it to the user as fact. Waiting the window out is the honest answer; the bound is what
+ *  keeps a genuinely dead broker from becoming a hang instead of an error. */
+export const CONNECT_GRACE_MS = 10_000;
+
+/** Whether the configured broker is one the caller could actually start themselves. Matches the
+ *  host of a `nats://`/`ws://`/`wss://` server string; anything else (a hosted mesh, a LAN box) is
+ *  someone else's process. */
+export function isLocalServer(servers: string): boolean {
+  return servers
+    .split(",")
+    .every((s) => /^(?:[a-z]+:\/\/)?(?:[^@/]*@)?(?:localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(?::\d+)?(?:\/|$)/i.test(s.trim()));
+}
+
 /** The display-only `AgentCard.meta` for a session. Agent-file metadata is preserved, then
  *  connector-owned fields are overlaid so files cannot spoof the hosting harness. */
 function buildMeta(config: AgentConfig): Record<string, string> | undefined {
@@ -71,6 +89,14 @@ function execBearerCmd(argv: string[]): Promise<string> {
 /** A message that has arrived for us, normalized for the agent to read. */
 export interface InboxItem {
   id: string;
+  /** Opaque per-delivery RECEIVE key (#624): the address a host uses to drain/ack THIS buffered
+   *  delivery. It is the wire `id` for every message that carries one; a message whose `id` is the
+   *  empty string gets a minted key, because an empty id is never a dedup key and never a
+   *  selectable one. It is NOT wire identity and NOT dedup authority: nothing coalesces on it, so
+   *  a redelivered copy of an id-less message mints its own key and surfaces again (at-least-once,
+   *  the disclosed cost). It exists so the exact-id drains and in-flight protection can select the
+   *  DELIVERY rather than an id value that two distinct messages share. */
+  recvKey: string;
   ts: number;
   fromId: string;
   fromName: string;
@@ -108,26 +134,53 @@ export interface RecallMark {
 
 /** Total order on {@link RecallMark}: by time, then by id, so items sharing a millisecond still queue. */
 export function afterRecallMark(a: RecallMark, b: RecallMark): boolean {
+  // #624: recall marks and items are addressed by RECEIVE key (never the wire id), and a minted
+  // key is never the empty string, so the tie-break comparator never sees an empty id on either
+  // side: the only empty id in a RecallMark is the initial cursor {ts: 0, id: ""}, whose ts
+  // differs from every real item and so never reaches the id comparison. (The empty-id guard this
+  // comparator once carried was removed after a root chase showed it unreachable: with the wire id
+  // out of the marks, no real path can put two empty ids, or an empty id against a real one, into
+  // the comparison.)
   return a.ts !== b.ts ? a.ts > b.ts : a.id > b.id;
 }
 
 const MAX_INBOX = 200;
+/** How many times overflow may evict the SAME directed id before it is acked and given up on.
+ *  The un-ack reprieve exists so a sacrificed message can be redelivered once there is room; if the
+ *  inbox is still full on the Nth redelivery, room is not coming and the cycle is pure cost. */
+const OVERFLOW_REDELIVERY_LIMIT = 5;
+/** Bound on the eviction bookkeeping itself, so tracking churn cannot become a leak of its own. */
+const OVERFLOW_EVICTION_CAP = 4 * MAX_INBOX;
 /** How many future-stamped recall ids one session will remember having handed over. See
  *  {@link MeshAgent.recallAheadRoom}. */
 const MAX_AHEAD = 256;
 const CLASSIFICATION_CAP = 4096;
 const FOCUS_EXCLUSION_CAP = 4096;
 const PROTECTED_DISPOSITION_CAP = 4096;
+/** Repeated async NATS status errors can arrive once per ordered-consumer retry. They describe one
+ * fault, not one hundred useful facts; keep the first visible and summarize at most twice a minute. */
+const ENDPOINT_ERROR_LOG_WINDOW_MS = 30_000;
 
 export type InboxScope = "all" | "automatic" | "pull-only";
 
 export interface ExactDrainResult {
   items: InboxItem[];
-  missingIds: string[];
+  missingKeys: string[];
 }
+
+import { randomUUID } from "node:crypto";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** The dedup key a received message id contributes to ingest's coalescing, or undefined when the id
+ *  is EMPTY: an empty id is never a dedup key (#624). Undefined means "no identity to coalesce on",
+ *  so every id-keyed lookup in {@link MeshAgent.ingest} is skipped for such a message and it flows to
+ *  the buffer on its own merits. Real ids are returned unchanged: their coalescing (live/durable
+ *  copies of one message, and redelivery after handle) is untouched. */
+function ingestDedupKey(id: string): string | undefined {
+  return id === "" ? undefined : id;
 }
 
 /**
@@ -164,6 +217,9 @@ export class MeshAgent extends EventEmitter {
    *  permanently degrades unknown ambient to pull-only for this session rather than risk a late
    *  live/durable copy changing from quiet to automatic. */
   private evictedClassifications = new Map<string, { pullOnly: boolean; channel: string }>();
+  /** How many times overflow has evicted each directed id without it ever being handled. Bounds the
+   *  un-ack reprieve so a redelivery cycle cannot run forever — see the eviction path in `buffer`. */
+  private overflowEvictions = new Map<string, number>();
   /** Surfaced to the host but not yet committed or abandoned, counted per holding frame because
    *  frames overlap. See {@link holdInFlight}. */
   private inFlightIds = new Map<string, number>();
@@ -175,6 +231,10 @@ export class MeshAgent extends EventEmitter {
   private protectedDropIds = new Set<string>();
   private dropUnsafe = false;
   private _connected = false;
+  /** Latest connection failure, retained until the endpoint binds so a bounded readiness gate can
+   * explain why an otherwise healthy host never joined the mesh. */
+  private lastConnectionError?: string;
+  private endpointErrorLog = new Map<string, { lastLoggedAt: number; suppressed: number }>();
   private _status: PresenceStatus = "idle";
   private _attention: AttentionMode = "open"; // F3: fail-open default; reset to open on SessionStart
   private _recallCursor: RecallMark = { ts: 0, id: "" };
@@ -192,9 +252,14 @@ export class MeshAgent extends EventEmitter {
    *  published after it ("since you entered focus"). Undefined unless in focus. */
   private focusSince?: number;
   private enteringFocus = false;
-  /** IDs received under quiet/muted while focused must never reappear through stream recall after a
-   *  mode toggle. If this bounded exclusion history fills, recall for the affected channel fails
-   *  closed and reports the channel as incomplete. */
+  /** The receive-key namespace secret (#624): a per-session random value minted at construction,
+   *  never written to any wire or log. Minted receive keys are `${secret}.${seq}`, so they are
+   *  DISJOINT from wire ids by construction: an attacker-chosen wire id cannot equal one, so one
+   *  verdict can never select two entries through a forged collision. Recognition is FUNCTIONAL
+   * (the key starts with the secret), so it cannot saturate the way a bounded set would: every
+   * minted key stays recognizable for the session's life, with nothing to expire or overflow. */
+  private readonly recvKeySecret = randomUUID().replace(/-/g, "");
+  private recvKeySeq = 0;
   private focusExcludedIds = new Map<string, string>();
   private focusRecallUnsafeChannels = new Set<string>();
   private stopping = false;
@@ -239,11 +304,18 @@ export class MeshAgent extends EventEmitter {
       },
     });
     this.ep.on("message", (m: CotalMessage, d: Delivery, meta?: MessageMeta) => this.ingest(m, d, meta));
-    this.ep.on("error", (e: Error) => this.log(`endpoint error: ${e.message}`));
+    this.ep.on("error", (e: Error) => this.handleEndpointError(e));
     // The endpoint's (re)binds are the single source of truth for connectedness: this fires on
     // initial start, manual reconnect, AND the background self-heal — so a recovery the endpoint
     // did on its own can't leave us thinking we're offline (which would skip stop() → leak).
-    this.ep.on("connection", (e: { connected: boolean }) => { this._connected = e.connected; });
+    this.ep.on("connection", (e: { connected: boolean }) => {
+      this._connected = e.connected;
+      if (e.connected) {
+        this.lastConnectionError = undefined;
+        this.endpointErrorLog.clear();
+      }
+      this.emit("connection", e);
+    });
   }
 
   get id(): string {
@@ -254,15 +326,49 @@ export class MeshAgent extends EventEmitter {
     return this._connected;
   }
 
+  /** The latest safe diagnostic for a connection that has not become live yet. */
+  get connectionIssue(): string | undefined {
+    return this.lastConnectionError;
+  }
+
+  /** Wait for the endpoint's real post-bind connection signal. `start()` deliberately stays
+   * background for connectors whose MCP surface must boot while the broker is absent; a host that
+   * advertises mesh readiness uses this bounded gate before making that claim. */
+  async waitUntilConnected(timeoutMs = 15_000): Promise<void> {
+    if (this._connected) return;
+    await new Promise<void>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      const finish = (error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        this.off("connection", onConnection);
+        if (error) reject(error);
+        else resolve();
+      };
+      const onConnection = (event: { connected: boolean }): void => {
+        if (event.connected) finish();
+      };
+      this.on("connection", onConnection);
+      timer = setTimeout(() => {
+        const detail = this.connectionIssue ? ` Last error: ${this.connectionIssue}` : "";
+        finish(new Error(`mesh did not become ready at ${this.config.servers} within ${timeoutMs}ms.${detail}`));
+      }, Math.max(1, timeoutMs));
+      // Close the check→listen race if the endpoint connected between the first guard and handler bind.
+      if (this._connected) finish();
+    });
+  }
+
   /** Correlates outgoing messages to the host agent's current context/window. */
   setContextId(contextId: string | undefined): void {
     const clean = contextId?.trim();
     this._contextId = clean ? clean : undefined;
   }
 
-  /** Begin connecting (with background retry). Returns immediately. */
-  start(retryMs = 3000): void {
-    void this.connectLoop(retryMs);
+  /** Begin connecting with background retry. Resolves after the first completed mesh join. */
+  start(retryMs = 3000): Promise<void> {
+    return this.connectLoop(retryMs);
   }
 
   private async connectLoop(retryMs: number): Promise<void> {
@@ -274,7 +380,9 @@ export class MeshAgent extends EventEmitter {
           `connected to ${this.config.servers} as ${this.who()} in space "${this.config.space}" on #${this.config.subscribe.join(", #")}`,
         );
       } catch (e) {
-        this.log(`mesh unreachable (${(e as Error).message}); retrying in ${retryMs}ms`);
+        const error = e instanceof Error ? e : new Error(String(e));
+        this.lastConnectionError = error.message;
+        this.log(`mesh unreachable (${error.message}); retrying in ${retryMs}ms`);
         await sleep(retryMs);
       }
     }
@@ -312,15 +420,24 @@ export class MeshAgent extends EventEmitter {
   // ---- inbox ---------------------------------------------------------------
 
   private ingest(m: CotalMessage, delivery: Delivery, meta?: MessageMeta): void {
+    // #624: an EMPTY id is never a dedup key. The id-keyed coalescing below exists to collapse the
+    // copies of ONE message across the live/durable paths, and identity is what makes that safe. A
+    // message that carries an empty id asserts no identity (SPEC §5 requires a unique id; the sender
+    // already violated it), so keying the coalescing on "" reads empty-equals-empty as a duplicate
+    // and silently drops every empty-id message after the first: measured live, two distinct
+    // empty-id messages arrived and only the first ever buffered. Treating an empty id as NO id
+    // costs the coalescing for those messages only (a redelivered copy can surface twice), which is
+    // the wire contract's at-least-once stance; collapsing distinct messages is not a stance at all.
+    const key = ingestDedupKey(m.id);
     // Already SURFACED and drained? This is a post-handle cross-path duplicate (the transition window's
     // second copy, arriving after the first was handled). Don't surface it again; if it's the durable
     // copy, ack it so JetStream stops redelivering — safe because the logical message was already
     // handled (handledIds is recorded at drain time, never at receive time).
-    if (this.handledIds.has(m.id) || this.handledIdsPrev.has(m.id)) {
+    if (key !== undefined && (this.handledIds.has(key) || this.handledIdsPrev.has(key))) {
       if (delivery.durable) delivery.ack();
       return;
     }
-    if (this.protectedPullOnlyIds.has(m.id) || this.protectedDropIds.has(m.id)) {
+    if (key !== undefined && (this.protectedPullOnlyIds.has(key) || this.protectedDropIds.has(key))) {
       if (delivery.durable) delivery.ack();
       return;
     }
@@ -333,7 +450,7 @@ export class MeshAgent extends EventEmitter {
     // dropped as-is. A durable duplicate also re-announces the still-pending item through the
     // ordinary `incoming` policy path. That turns JetStream redelivery into a timer-free retry for
     // a wake the host dropped, without bypassing quiet/attention or adapter in-flight guards.
-    const existing = this.inbox.find((p) => p.item.id === m.id);
+    const existing = key === undefined ? undefined : this.inbox.find((p) => p.item.id === key);
     if (existing) {
       if (delivery.durable) {
         existing.ack = delivery.ack;
@@ -370,7 +487,7 @@ export class MeshAgent extends EventEmitter {
         delivery.ack();
         return;
       }
-      const remembered = this.evictedClassifications.get(item.id);
+      const remembered = item.id === "" ? undefined : this.evictedClassifications.get(item.id); // #624: an empty id never carries a remembered classification
       if (remembered) this.evictedClassifications.delete(item.id);
       const snapshottedPullOnly = !item.mentionsMe && (remembered?.pullOnly ?? cm === "quiet");
       if (cm === "quiet" || snapshottedPullOnly) this.excludeFromFocus(item);
@@ -425,13 +542,49 @@ export class MeshAgent extends EventEmitter {
         // surfaced batch is made of, so without this an arrival can ack a message a host is still
         // trying to hand to its runtime. Evicting bounds memory; acking is what makes it
         // unrecoverable — gone from the buffer, never marked handled, no longer redeliverable. Left
-        // un-acked it redelivers; and if the delivery does succeed, {@link drainInboxIds} marks the
+        // un-acked it redelivers; and if the delivery does succeed, {@link drainInboxDeliveries} marks the
         // now-missing id handled so that redelivery is silently acked.
         //
         // A directed message is never acked on overflow: leaving it un-acked lets JetStream redeliver
         // it once we have room, which turns unrecoverable loss into a delay. Channel ambient is still
         // acked, because replaying it is what the history flood was (#775).
-        if (!this.inFlightIds.has(evicted.item.id) && !sacrificingDirected) evicted.ack();
+        //
+        // ...but a delay only helps if it ENDS. An un-acked id is one the broker may hand straight
+        // back, into an inbox that is still full, to be evicted again - a cycle that spends broker
+        // and connector throughput while every seat involved looks healthy. So the reprieve is
+        // counted: after OVERFLOW_REDELIVERY_LIMIT evictions of the SAME message we stop hoping for
+        // room and ack it, recording the loss loudly. A message lost with a log line beats a mesh
+        // that quietly stops moving (#807).
+        //
+        // The counter is keyed on the RECEIVE key — the wire id for real messages, the minted key
+        // for id-less ones — so two id-less deliveries never share one tally (#624). It is cleared
+        // whenever the message is actually handled ({@link drainInboxDeliveries}), so one that
+        // eventually lands never accumulates toward the cap.
+        let giveUp = false;
+        if (sacrificingDirected) {
+          const seen = (this.overflowEvictions.get(evicted.item.recvKey) ?? 0) + 1;
+          if (seen >= OVERFLOW_REDELIVERY_LIMIT) {
+            giveUp = true;
+            this.overflowEvictions.delete(evicted.item.recvKey);
+            // Reported on stderr via the existing log path, NOT emit("error"): an EventEmitter with
+            // no "error" listener turns an emit into an unhandled exception that takes the process
+            // down, so announcing a dropped message would kill the seat that was trying to survive
+            // the flood. Nothing else in this class emits "error" either.
+            this.log(
+              `overflow: dropping directed message ${evicted.item.recvKey} after ${seen} evictions - ` +
+                `the inbox has stayed full across every redelivery, so the reprieve is not helping`,
+            );
+          } else {
+            this.overflowEvictions.set(evicted.item.recvKey, seen);
+            if (this.overflowEvictions.size > OVERFLOW_EVICTION_CAP) {
+              // Bounded bookkeeping: the map must not become its own leak under a sustained flood.
+              // Dropping the oldest entry only forgives a message, never destroys one.
+              const oldest = this.overflowEvictions.keys().next();
+              if (!oldest.done) this.overflowEvictions.delete(oldest.value);
+            }
+          }
+        }
+        if (!this.inFlightIds.has(evicted.item.recvKey) && (!sacrificingDirected || giveUp)) evicted.ack();
       }
     }
     this.emit("incoming", item);
@@ -439,6 +592,7 @@ export class MeshAgent extends EventEmitter {
 
   private rememberEvicted(p: Pending): void {
     if (p.item.kind !== "channel" || p.item.mentionsMe || !p.item.channel) return;
+    if (p.item.id === "") return; // #624: an empty id is never a key; one delivery's classification must not inherit to another
     if (this.classificationUnsafe) return;
     if (!this.evictedClassifications.has(p.item.id) && this.evictedClassifications.size >= CLASSIFICATION_CAP) {
       this.classificationUnsafe = true;
@@ -461,6 +615,7 @@ export class MeshAgent extends EventEmitter {
   }
 
   private protectDisposition(id: string, disposition: "pull-only" | "drop"): void {
+    if (id === "") return; // #624: an empty id is never a dedup key, so it is never recorded as one
     const ids = disposition === "drop" ? this.protectedDropIds : this.protectedPullOnlyIds;
     if ((disposition === "drop" ? this.dropUnsafe : this.classificationUnsafe) || ids.has(id)) return;
     if (ids.size >= PROTECTED_DISPOSITION_CAP) {
@@ -481,6 +636,10 @@ export class MeshAgent extends EventEmitter {
     const text = partsToText(m.parts);
     return {
       id: m.id,
+      // The wire id when there is one; a minted opaque key when the id is the empty string (#624:
+      // an empty id is never a dedup key, so it is never an address either; but the delivery still
+      // needs to be individually drainable/ackable, or it can never clear and never commit).
+      recvKey: m.id !== "" ? m.id : `${this.recvKeySecret}.${++this.recvKeySeq}`,
       ts: m.ts,
       fromId: m.from.id,
       fromName: m.from.name,
@@ -518,6 +677,11 @@ export class MeshAgent extends EventEmitter {
    *  valve free to ack them. Declining to surface costs a deferral: the messages stay buffered and go
    *  out on a later frame, once a verdict releases capacity. */
   holdInFlight(ids: readonly string[]): boolean {
+    // #624: the keys here are RECEIVE keys. An id-less delivery's wire id is "", so raw-id keying
+    // merged the counts of DISTINCT empty-id deliveries, and the eviction valve's in-flight check
+    // then deferred acking an evicted id-less item while any other id-less batch was held:
+    // cross-delivery interference in the safe direction, but interference. Receive keys are unique
+    // per delivery, so each is protected exactly for the frames holding it.
     let fresh = 0;
     for (const id of ids) if (!this.inFlightIds.has(id)) fresh++;
     if (this.inFlightIds.size + fresh > MAX_INBOX * 2) return false;
@@ -549,30 +713,48 @@ export class MeshAgent extends EventEmitter {
     const eligible = this.inbox.filter((p) => this.inScope(p, scope));
     const n = limit && limit > 0 ? Math.min(limit, eligible.length) : eligible.length;
     const selected = eligible.slice(0, n);
-    const ids = new Set(selected.map((p) => p.item.id));
-    this.inbox = this.inbox.filter((p) => !ids.has(p.item.id));
+    // Remove by OBJECT IDENTITY, not by a set of wire ids (#624): the id-less entries share "", so
+    // an id set would remove every id-less neighbor beyond the limit and outside the scope while
+    // acking only the selected — silent loss by selection. Identity removes exactly what was taken.
+    const taken = new Set(selected);
+    this.inbox = this.inbox.filter((p) => !taken.has(p));
     return this.commitPending(selected);
   }
 
-  /** Ack exact surfaced ids without assuming they still form the physical inbox prefix. Every
-   *  requested id is marked handled, including an item overflow-evicted during the turn. */
-  drainInboxIds(ids: readonly string[]): ExactDrainResult {
-    const requested = [...new Set(ids)];
+  /** Ack exact surfaced deliveries without assuming they still form the physical inbox prefix.
+   *  Takes RECEIVE keys ({@link InboxItem.recvKey}): the wire id for real messages, a minted key
+   *  for id-less ones, and selects by them, so a host that surfaced one empty-id item drains THAT
+   *  delivery, never its neighbors: the sweep the raw id produced (every pending empty-id item
+   *  acked and marked handled in one call) is closed by construction, not by filtering. Every
+   *  requested key whose item is present is acked and (for a real id) marked handled, including an
+   *  item overflow-evicted during the turn. */
+  drainInboxDeliveries(keys: readonly string[]): ExactDrainResult {
+    const requested = [...new Set(keys)];
     const wanted = new Set(requested);
-    const selected = this.inbox.filter((p) => wanted.has(p.item.id));
-    const present = new Set(selected.map((p) => p.item.id));
-    const pullOnly = new Map(selected.map((p) => [p.item.id, p.pullOnly]));
+    const selected = this.inbox.filter((p) => wanted.has(p.item.recvKey));
+    const present = new Set(selected.map((p) => p.item.recvKey));
+    const pullOnly = new Map(selected.map((p) => [p.item.recvKey, p.pullOnly]));
     for (const id of requested) {
-      const remembered = this.evictedClassifications.get(id);
+      const remembered = id !== "" ? this.evictedClassifications.get(id) : undefined;
       if (!pullOnly.has(id) && remembered) pullOnly.set(id, remembered.pullOnly);
     }
-    this.inbox = this.inbox.filter((p) => !present.has(p.item.id));
+    this.inbox = this.inbox.filter((p) => !present.has(p.item.recvKey));
     const items = this.commitPending(selected);
     for (const id of requested) {
-      if (!present.has(id)) this.markHandled(id, pullOnly.get(id) ?? false);
-      this.evictedClassifications.delete(id);
+      // A MINTED key (an id-less delivery) is never handled-authority: its wire id is "", which
+      // markHandled already refuses, so skipping it here is the same at-least-once stance rather
+      // than a new one. Recording the minted key itself would pollute handledIds with a string a
+      // future REAL id could legitimately equal, arming the exact suppression this change removes.
+      if (!present.has(id) && !id.startsWith(`${this.recvKeySecret}.`)) {
+        this.markHandled(id, pullOnly.get(id) ?? false);
+        this.evictedClassifications.delete(id);
+      }
+      // A message that actually landed is not churning, whatever it survived on the way here: clear
+      // its overflow tally so one that is redelivered, evicted, then finally handled never carries
+      // history toward the give-up cap. Keyed on the receive key, like the tally itself.
+      this.overflowEvictions.delete(id);
     }
-    return { items, missingIds: requested.filter((id) => !present.has(id)) };
+    return { items, missingKeys: requested.filter((key) => !present.has(key)) };
   }
 
   private commitPending(taken: Pending[]): InboxItem[] {
@@ -592,6 +774,7 @@ export class MeshAgent extends EventEmitter {
    *  two rotating windows: when the live set fills, it becomes the previous window and a fresh one
    *  starts — so memory stays ~2× the cap while the lookup horizon never shrinks below it. */
   private markHandled(id: string, pullOnly = false): void {
+    if (id === "") return; // #624: an empty id is never a dedup key, so it is never recorded as one
     if (pullOnly) this.protectDisposition(id, "pull-only");
     this.handledIds.add(id);
     if (this.handledIds.size >= 4096) {
@@ -704,9 +887,10 @@ export class MeshAgent extends EventEmitter {
     this.aheadDelivered.clear();
   }
 
-  /** Buffered receive-time lane for one id. Undefined means it is no longer pending. */
-  inboxScope(id: string): Exclude<InboxScope, "all"> | undefined {
-    const pending = this.inbox.find((p) => p.item.id === id);
+  /** Buffered receive-time lane for one delivery, addressed by its receive key. Undefined means it
+   *  is no longer pending. */
+  inboxScope(key: string): Exclude<InboxScope, "all"> | undefined {
+    const pending = this.inbox.find((p) => p.item.recvKey === key);
     return pending ? (pending.pullOnly ? "pull-only" : "automatic") : undefined;
   }
 
@@ -788,11 +972,11 @@ export class MeshAgent extends EventEmitter {
     *  switch is ack-dropped. */
   async setAttention(mode: AttentionMode): Promise<void> {
     if (mode === "focus") {
-      this.assertConnected();
       this.focusExcludedIds.clear();
       this.focusRecallUnsafeChannels.clear();
       this.enteringFocus = this._attention !== "focus";
       try {
+        await this.requireConnected();
         this.focusSince = await this.ep.chatFrontier();
       } catch (error) {
         this.enteringFocus = false;
@@ -846,7 +1030,7 @@ export class MeshAgent extends EventEmitter {
   // ---- sending -------------------------------------------------------------
 
   async send(text: string, channel?: string, mentions?: string[]): Promise<CotalMessage> {
-    this.assertConnected();
+    await this.requireConnected();
     const clean = normalizeMentions(mentions);
     if (clean) this.assertKnownMentions(clean);
     return this.ep.multicast(text, { channel, mentions: clean, contextId: this._contextId });
@@ -868,7 +1052,7 @@ export class MeshAgent extends EventEmitter {
   }
 
   async anycast(role: string, text: string): Promise<CotalMessage> {
-    this.assertConnected();
+    await this.requireConnected();
     return this.ep.anycast(role, text, { contextId: this._contextId });
   }
 
@@ -880,7 +1064,7 @@ export class MeshAgent extends EventEmitter {
   }
 
   async dm(target: string, text: string): Promise<{ msg: CotalMessage; peer: Presence }> {
-    this.assertConnected();
+    await this.requireConnected();
     const peer = this.resolvePeer(target);
     if (!peer) throw new Error(`no peer "${target}" in space "${this.config.space}"`);
     const msg = await this.ep.unicast(peer.card.id, text, { contextId: this._contextId });
@@ -911,7 +1095,7 @@ export class MeshAgent extends EventEmitter {
      *  initial-prompt rail, so ordinary local runtimes retain their established first-turn behavior. */
     task?: string;
   }): Promise<ControlReply> {
-    this.assertConnected();
+    await this.requireConnected();
     const args = {
       name, role, agent: opts?.agent, model: opts?.model, variant: opts?.variant,
       launchOptions: opts?.launchOptions, cwd: opts?.cwd, prompt: opts?.task,
@@ -985,7 +1169,7 @@ export class MeshAgent extends EventEmitter {
    *  ever stop itself, never a peer. A `name` ⇒ rides the privileged control subject
    *  (transport-gated to spawn-capable/admin); the manager refines own-child vs admin. */
   async despawn(name?: string, opts?: { graceful?: boolean }): Promise<ControlReply> {
-    this.assertConnected();
+    await this.requireConnected();
     const graceful = opts?.graceful ?? true;
     if (!name) // self-halt: the baseline `stop` command, authz-mode self (the caller triple IS the target)
       return this.managerInvoke("stop", { graceful }, { target: { mode: "self" } });
@@ -997,7 +1181,7 @@ export class MeshAgent extends EventEmitter {
   /** Ask the manager to purge the space's retained chat backlog (its `purge` op). Cleanup only —
    *  it doesn't touch live agents or the anycast work queue. `includeDms` also clears DM history. */
   async purgeHistory(opts?: { includeDms?: boolean }): Promise<ControlReply> {
-    this.assertConnected();
+    await this.requireConnected();
     const args = { includeDms: opts?.includeDms ?? false };
     return this.managerInvoke("purge", args);
   }
@@ -1028,7 +1212,7 @@ export class MeshAgent extends EventEmitter {
     model?: string;
     announce?: string;
   }): Promise<ControlReply & { announceError?: string; announceOutcome?: "denied" | "unknown" }> {
-    this.assertConnected();
+    await this.requireConnected();
     // Validate the destination BEFORE the write, and here rather than only in the tool's schema —
     // this is the API every host's tool surface funnels through, so a caller that reaches
     // definePersona directly gets the same guarantee. `announce` present must mean EXACTLY that
@@ -1102,7 +1286,7 @@ export class MeshAgent extends EventEmitter {
   }
 
   async setStatus(status: PresenceStatus, activity?: string): Promise<void> {
-    this.assertConnected();
+    await this.requireConnected();
     this._status = status;
     if (activity !== undefined) await this.ep.setActivity(activity);
     await this.ep.setStatus(status);
@@ -1111,7 +1295,7 @@ export class MeshAgent extends EventEmitter {
   /** Record the host's actual model and optional variant learned after launch, so peers see the
    *  selection in `cotal_roster` and the web roster even when the operator never pinned one. Explicit
    *  `model:` / `variant:` config wins; this only fills the gap. Best-effort presence mirror (no
-   *  `assertConnected` — safe pre-connect; it rides the first publish). */
+   *  `requireConnected` — safe pre-connect; it rides the first publish). */
   async setModel(model: string, variant?: string): Promise<void> {
     if (this.config.model) return; // operator pin is authoritative — never override it with the runtime value
     await this.ep.setCardModel(model, this.config.variant ?? variant);
@@ -1156,7 +1340,7 @@ export class MeshAgent extends EventEmitter {
     channel: string,
     description?: string,
   ): Promise<{ channel: string; created: boolean }> {
-    this.assertConnected();
+    await this.requireConnected();
     return this.ep.registerChannel(channel, {
       ...(description === undefined ? {} : { description }),
     });
@@ -1246,13 +1430,13 @@ export class MeshAgent extends EventEmitter {
   async joinChannel(
     channel: string,
   ): Promise<{ joined: boolean; backfilled: number; durable: boolean; reason?: string }> {
-    this.assertConnected();
+    await this.requireConnected();
     return this.ep.joinChannel(channel);
   }
 
   /** Leave a channel mid-session (refuses to leave the last one). */
   async leaveChannel(channel: string): Promise<{ left: boolean }> {
-    this.assertConnected();
+    await this.requireConnected();
     return this.ep.leaveChannel(channel);
   }
 
@@ -1262,12 +1446,73 @@ export class MeshAgent extends EventEmitter {
     return this.config.role ? `${this.config.name}/${this.config.role}` : this.config.name;
   }
 
-  private assertConnected(): void {
-    if (!this._connected) {
-      throw new Error(
-        `not connected to the mesh at ${this.config.servers} — is it running? (pnpm cotal up)`,
-      );
+  /** The connectedness gate every mesh op goes through. Waits out the initial connect window
+   *  rather than failing into it (see CONNECT_GRACE_MS), so the common startup race resolves as
+   *  a slightly slow first call instead of a false "mesh is down". */
+  private async requireConnected(): Promise<void> {
+    return this.whenConnected(CONNECT_GRACE_MS);
+  }
+
+  /** Public bounded wait for the mesh link, for callers OUTSIDE the op methods that need to gate
+   *  their own startup on it. The AG-UI emitter is the proven case: it lazy-starts from the first
+   *  lifecycle hook, `--prompt` fires that hook within a second of launch, and its start reached
+   *  the endpoint before the first bind — "endpoint not started", terminal by the holder's design,
+   *  so one race at spawn silenced the event plane for the whole session. */
+  async whenConnected(timeoutMs: number = CONNECT_GRACE_MS): Promise<void> {
+    if (this._connected) return;
+    if (!(await this.awaitConnection(timeoutMs))) throw new Error(this.notConnectedMessage());
+  }
+
+  /** Resolves true on the endpoint's real post-bind connection signal, false if the window closes
+   *  first. Listens on the ENDPOINT because its (re)binds are the single source of truth (see the
+   *  constructor), and re-checks after binding the listener so a connection that lands between the
+   *  guard above and the subscription cannot be missed. */
+  private awaitConnection(timeoutMs: number): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (ok: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.ep.off("connection", onConnection);
+        resolve(ok);
+      };
+      const onConnection = (e: { connected: boolean }): void => {
+        if (e.connected) finish(true);
+      };
+      const timer = setTimeout(() => finish(false), Math.max(1, timeoutMs));
+      this.ep.on("connection", onConnection);
+      if (this._connected) finish(true); // closes the check→listen race
+    });
+  }
+
+  /** `cotal up` starts a broker on THIS machine, so it is only advice when the configured one is
+   *  local. Someone whose agent joins a hosted mesh cannot fix it by starting their own, and being
+   *  told to try sends them to repair the wrong thing entirely. */
+  private notConnectedMessage(): string {
+    const remedy = isLocalServer(this.config.servers)
+      ? "is it running? (`cotal up`)"
+      : "it did not become reachable — check that the mesh is up and that this machine can reach it.";
+    return `not connected to the mesh at ${this.config.servers} — ${remedy}`;
+  }
+
+  /** Keep an ordered-consumer reset storm from painting hundreds of status lines through an
+   * attached Codex TUI. Consumer names are generated per reset, so normalize them before
+   * deduplicating; otherwise every `_71`, `_72`, ... would look like a new fault. */
+  private handleEndpointError(error: Error): void {
+    const now = Date.now();
+    this.lastConnectionError = error.message;
+    const fingerprint = error.message.replace(/oc_[A-Za-z0-9]+_\d+/g, "oc_*");
+    const prior = this.endpointErrorLog.get(fingerprint);
+    if (prior && now - prior.lastLoggedAt < ENDPOINT_ERROR_LOG_WINDOW_MS) {
+      prior.suppressed++;
+      return;
     }
+    const suffix = prior?.suppressed ? ` (${prior.suppressed} repeats suppressed)` : "";
+    this.endpointErrorLog.set(fingerprint, { lastLoggedAt: now, suppressed: 0 });
+    // Bound the map even for a server producing novel error text on every request.
+    if (this.endpointErrorLog.size > 16) this.endpointErrorLog.delete(this.endpointErrorLog.keys().next().value!);
+    this.log(`endpoint error: ${error.message}${suffix}`);
   }
 
   private log(msg: string): void {
