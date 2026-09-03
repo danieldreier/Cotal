@@ -54,6 +54,27 @@ export function epcStreamName(space: string): string { return `EPC_${token(space
  *  fact. It sits beside the §13 decision-fact journal, never on top of it. */
 export function wfjStreamName(space: string): string { return `WFJ_${token(space)}`; }
 
+/** Every endpoint, workflow, and session stream that {@link createEndpointStreams} creates or
+ * ensures. Setup, backup inventory, and teardown consume this one list so a family cannot be
+ * created without being accounted for or reaped. The separately tracked records/auth pair is
+ * deliberately outside this list. */
+export function endpointSpaceStreams(space: string) {
+  const epj = epjStreamName(space);
+  const epf = epfStreamName(space);
+  const epe = epeStreamName(space);
+  const eptReq = eptReqStreamName(space);
+  const epr = eprStreamName(space);
+  const ept = eptStreamName(space);
+  const epw = epwStreamName(space);
+  const wfj = wfjStreamName(space);
+  const epc = epcStreamName(space);
+  const sessions = `KV_${sessionsBucket(space)}`;
+  return {
+    epj, epf, epe, eptReq, epr, ept, epw, wfj, epc, sessions,
+    all: [epj, epf, epe, eptReq, epr, ept, epw, wfj, epc, sessions] as const,
+  } as const;
+}
+
 /**
  * The ONE subject a run's journal entries append to.
  *
@@ -234,6 +255,7 @@ export async function createEndpointStreams(
   opts: EndpointStreamOptions = {},
 ): Promise<void> {
   const p = spacePrefix(space);
+  const streams = endpointSpaceStreams(space);
   // Refused BEFORE the first stream exists, so a breaching config never leaves a half-built space.
   assertFactRetentionFloor(opts.factMaxAgeMs, {
     horizonMs: opts.idempotencyHorizonMs ?? IDEMPOTENCY_HORIZON_MS_DEFAULT,
@@ -243,7 +265,7 @@ export async function createEndpointStreams(
   // EPJ — raw submissions, untrusted, at-least-once. NO allow_direct (nothing reads it but the
   // canonicalizer's durable and harness MSG.GET); duplicate window pinned to the server minimum.
   await jsm.streams.add({
-    name: epjStreamName(space),
+    name: streams.epj,
     subjects: [`${p}.epj.>`],
     retention: RetentionPolicy.Limits,
     storage: StorageType.File,
@@ -253,7 +275,7 @@ export async function createEndpointStreams(
   // EPF — canonical facts; acceptance is create-only CAS; allow_direct serves the §13.9
   // last-by-subject fact reads (trusted principals only; callers read via the mediator).
   await jsm.streams.add({
-    name: epfStreamName(space),
+    name: streams.epf,
     subjects: [`${p}.epf.>`],
     retention: RetentionPolicy.Limits,
     storage: StorageType.File,
@@ -262,7 +284,7 @@ export async function createEndpointStreams(
   });
   // EPE — events/progress.
   await jsm.streams.add({
-    name: epeStreamName(space),
+    name: streams.epe,
     subjects: [`${p}.epe.>`],
     retention: RetentionPolicy.Limits,
     storage: StorageType.File,
@@ -272,7 +294,7 @@ export async function createEndpointStreams(
   // smoke): a client-set scheduling header here cannot arm anything, which is what closes the
   // ADR-51 confused deputy — only the timer writer's `.armed` publish (on EPT) schedules.
   await jsm.streams.add({
-    name: eptReqStreamName(space),
+    name: streams.eptReq,
     subjects: [`${p}.ept.*.*.*.*.schedule`],
     retention: RetentionPolicy.Limits,
     storage: StorageType.File,
@@ -280,7 +302,7 @@ export async function createEndpointStreams(
   });
   // EPR — record-write ingress, consumed only by the per-kind record writers.
   await jsm.streams.add({
-    name: eprStreamName(space),
+    name: streams.epr,
     subjects: [`${p}.epr.>`],
     retention: RetentionPolicy.Limits,
     storage: StorageType.File,
@@ -290,7 +312,7 @@ export async function createEndpointStreams(
   // targets its sibling `.fire` (ADR-51 forbids target = publish subject), and both patterns
   // live on THIS stream because ADR-51 requires the target be captured by the same stream.
   await jsm.streams.add({
-    name: eptStreamName(space),
+    name: streams.ept,
     subjects: [`${p}.ept.*.*.*.*.armed`, `${p}.ept.*.*.*.*.fire`],
     retention: RetentionPolicy.Limits,
     storage: StorageType.File,
@@ -304,7 +326,7 @@ export async function createEndpointStreams(
   // would re-arm settled work. Nothing else reads EPW: the pool workers drain it via the
   // WorkQueue consumer (CONSUMER.MSG.NEXT), not by subject read.
   await jsm.streams.add({
-    name: epwStreamName(space),
+    name: streams.epw,
     subjects: [`${p}.epw.>`],
     retention: RetentionPolicy.Workqueue,
     storage: StorageType.File,
@@ -318,7 +340,7 @@ export async function createEndpointStreams(
   // NO allow_direct: a resume must read its own predecessor's last appends, and Direct Get is
   // follower-servable — a stale miss there reads as "this step never ran".
   await jsm.streams.add({
-    name: wfjStreamName(space),
+    name: streams.wfj,
     subjects: [`${p}.wfj.*`],
     retention: RetentionPolicy.Limits,
     storage: StorageType.File,
