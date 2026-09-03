@@ -44,8 +44,8 @@
       "file": "packages/core/src/provision.ts",
       "find": "  await provisioner.provisionAgentKvWatches(pr.owner, pr.actor, uid);\n",
       "replace": "",
-      "expectRed": "real endpoint starts both lifecycle-pinned public-KV watchers",
-      "cell": "real endpoint starts both lifecycle-pinned public-KV watchers",
+      "expectRed": "trusted provisioner pins the presence watcher delivery rail",
+      "cell": "trusted provisioner pins the presence watcher delivery rail",
       "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
     },
     {
@@ -53,8 +53,8 @@
       "file": "packages/core/src/provision.ts",
       "find": "  return { pub: { allow: pubAllow, deny: pubDeny }, sub: { allow: [inbox, deliveryReplies, ...kvWatchDelivery, ...subChat, ...epSub] } };",
       "replace": "  return { pub: { allow: [...pubAllow, `$JS.API.CONSUMER.CREATE.${KV}.${presenceWatchD}.>`], deny: pubDeny.filter((subject) => !subject.includes(`CONSUMER.CREATE.${KV}`) && !subject.includes(`CONSUMER.DURABLE.CREATE.${KV}`)) }, sub: { allow: [inbox, deliveryReplies, ...kvWatchDelivery, ...subChat, ...epSub] } };",
-      "expectRed": "agent cannot create its exact watcher with a foreign deliver_subject",
-      "cell": "agent cannot create its exact watcher with a foreign deliver_subject",
+      "expectRed": "CREATE OWN exact presence watcher DENIED (deliver_subject is body-controlled)",
+      "cell": "CREATE OWN exact presence watcher DENIED (deliver_subject is body-controlled)",
       "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
     },
     {
@@ -78,7 +78,7 @@
     {
       "name": "drop acknowledgements from lifecycle public-KV watchers",
       "file": "packages/core/src/endpoint.ts",
-      "find": "        msg.ack();\n",
+      "find": "      msg.ack();\n",
       "replace": "",
       "expectRed": "channel watcher acknowledges the materialized update",
       "cell": "channel watcher acknowledges the materialized update",

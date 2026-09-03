@@ -108,6 +108,25 @@ try {
   const creds = await provisionAgent(provisioner, auth, identity, {
     subscribe: [], allowSubscribe: [], durableMembership: false, lifecycleUid: uid,
   });
+  const presenceStream = `KV_${presenceBucket(space)}`;
+  const channelStream = `KV_${channelBucket(space)}`;
+  const ownPresence = agentKvWatchConsumerName("presence", DEV_OWNER, identity.id, uid);
+  const ownChannels = agentKvWatchConsumerName("channels", DEV_OWNER, identity.id, uid);
+  const [provisionedPresence, provisionedChannels] = await Promise.allSettled([
+    provisionerJsm.consumers.info(presenceStream, ownPresence),
+    provisionerJsm.consumers.info(channelStream, ownChannels),
+  ]);
+  check("trusted provisioner pins the presence watcher delivery rail",
+    provisionedPresence.status === "fulfilled"
+      && provisionedPresence.value.config.deliver_subject
+        === agentKvWatchDeliverySubject(space, "presence", DEV_OWNER, identity.id, uid),
+    provisionedPresence.status === "fulfilled" ? provisionedPresence.value.config.deliver_subject : provisionedPresence.reason);
+  check("trusted provisioner pins the channel watcher delivery rail",
+    provisionedChannels.status === "fulfilled"
+      && provisionedChannels.value.config.deliver_subject
+        === agentKvWatchDeliverySubject(space, "channels", DEV_OWNER, identity.id, uid),
+    provisionedChannels.status === "fulfilled" ? provisionedChannels.value.config.deliver_subject : provisionedChannels.reason);
+
   const endpointErrors: string[] = [];
   const endpoint = new CotalEndpoint({
     space,
@@ -132,10 +151,6 @@ try {
     startError instanceof Error ? startError.message : startError);
   if (startError) throw startError;
 
-  const presenceStream = `KV_${presenceBucket(space)}`;
-  const channelStream = `KV_${channelBucket(space)}`;
-  const ownPresence = agentKvWatchConsumerName("presence", DEV_OWNER, identity.id, uid);
-  const ownChannels = agentKvWatchConsumerName("channels", DEV_OWNER, identity.id, uid);
   const presenceLive = await consumers(presenceStream);
   const channelsLive = await consumers(channelStream);
   check("real endpoint creates exactly its lifecycle-pinned presence watcher",
@@ -146,12 +161,6 @@ try {
     ![...presenceLive, ...channelsLive].some((name) => name.startsWith("oc_")), { presenceLive, channelsLive });
   const presenceInfo = await provisionerJsm.consumers.info(presenceStream, ownPresence);
   const channelInfo = await provisionerJsm.consumers.info(channelStream, ownChannels);
-  check("trusted provisioner pins the presence watcher delivery rail",
-    presenceInfo.config.deliver_subject === agentKvWatchDeliverySubject(space, "presence", DEV_OWNER, identity.id, uid),
-    presenceInfo.config.deliver_subject);
-  check("trusted provisioner pins the channel watcher delivery rail",
-    channelInfo.config.deliver_subject === agentKvWatchDeliverySubject(space, "channels", DEV_OWNER, identity.id, uid),
-    channelInfo.config.deliver_subject);
   check("both trusted watchers are ack-explicit LastPerSubject consumers",
     presenceInfo.config.ack_policy === AckPolicy.Explicit
       && channelInfo.config.ack_policy === AckPolicy.Explicit
