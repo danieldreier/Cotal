@@ -972,11 +972,11 @@ export class MeshAgent extends EventEmitter {
     *  switch is ack-dropped. */
   async setAttention(mode: AttentionMode): Promise<void> {
     if (mode === "focus") {
-      await this.requireConnected();
       this.focusExcludedIds.clear();
       this.focusRecallUnsafeChannels.clear();
       this.enteringFocus = this._attention !== "focus";
       try {
+        await this.requireConnected();
         this.focusSince = await this.ep.chatFrontier();
       } catch (error) {
         this.enteringFocus = false;
