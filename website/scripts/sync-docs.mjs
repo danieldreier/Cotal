@@ -55,6 +55,7 @@ const groups = [
       'docs/connect-claude.md',
       'docs/connect-opencode.md',
       'docs/connect-codex.md',
+      'docs/operator-mcp-gateway.md',
       'docs/connect-hermes.md',
       'docs/connect-jcode.md',
       'docs/connect-pi.md',
