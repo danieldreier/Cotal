@@ -86,7 +86,6 @@ const spawnTool = cotalToolSpecs(configFromEnv({ COTAL_NAME: "parity-smoke" }), 
   | undefined;
 assert.ok(spawnTool, "cotal_spawn tool spec exists");
 const toolParams = Object.keys(spawnTool.schema.shape);
-const toolToOpKey: Record<string, string> = { task: "prompt" };
 for (const p of toolParams) {
   const key = toolToOpKey[p] ?? p;
   assert.ok(START_OP_KEYS.has(key), `cotal_spawn param "${p}" has no start-op key (${key}) — vocabulary drift`);
