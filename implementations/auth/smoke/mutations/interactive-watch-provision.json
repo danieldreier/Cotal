@@ -4,7 +4,7 @@
   "command": "corepack pnpm --filter @cotal-ai/core build && corepack pnpm --filter @cotal-ai/auth build && PATH=/workspace/state/tools/nats-server-v2.12.12-b:$PATH corepack pnpm smoke:user-spawn:live",
   "progressPattern": "^  [✓✗]",
   "minTicks": 8,
-  "completionMarker": "USER-SPAWN SMOKE OK",
+  "completionMarker": "USER-SPAWN SMOKE",
   "proveWith": "node scripts/mutation-proof.mjs --config implementations/auth/smoke/mutations/interactive-watch-provision.json",
   "why": [
     "Interactive CLI bearers use the agent profile's lifecycle-pinned public-KV watch rails even",

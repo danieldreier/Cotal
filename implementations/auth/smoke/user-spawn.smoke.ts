@@ -107,7 +107,7 @@ const {
   setupSpaceStreams, principalKey, registry, spaceWildcard, clearChannel, mintLifecycleUid, eventChannel,
   resolveService, invokeCommand, standaloneConnectOpts, EpEnvelopeError, epAuthBucket,
   mintMembershipObserverCreds, observePlaneLivenessWithCreds, agentKvWatchConsumerName,
-  presenceBucket, channelBucket,
+  presenceBucket, channelBucket, ensureAgentKvWatches,
 } = await import("@cotal-ai/core");
 const { connect: rawConnect } = await import("@nats-io/transport-node");
 const { jetstreamManager } = await import("@nats-io/jetstream");
@@ -473,6 +473,16 @@ try {
     interactiveWatches = true;
   } catch { /* the named check below owns the failure */ }
   check("human exchange pre-provisions both lifecycle-pinned CLI public-KV watchers", interactiveWatches);
+  // Keep the rest of this broad lifecycle smoke discriminating when the mutation above removes the
+  // auth-service ensure: record the named red, then repair only the fixture so later cells still run.
+  if (!interactiveWatches) {
+    await ensureAgentKvWatches(watchProbe, SPACE, OWNER, "cli", opClaims.act.lifecycleUid);
+    const infos = await Promise.all([
+      watchJsm.consumers.info(`KV_${presenceBucket(SPACE)}`, agentKvWatchConsumerName("presence", OWNER, "cli", opClaims.act.lifecycleUid)),
+      watchJsm.consumers.info(`KV_${channelBucket(SPACE)}`, agentKvWatchConsumerName("channels", OWNER, "cli", opClaims.act.lifecycleUid)),
+    ]);
+    watchCreated = infos.map((info) => info.created);
+  }
   observer = new CotalEndpoint({
     space: SPACE, servers: SERVER, bearer: opCreds.bearer, sentinelCreds: opCreds.sentinelCreds,
     lifecycleUid: opClaims.act.lifecycleUid,
