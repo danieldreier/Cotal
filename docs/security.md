@@ -80,7 +80,8 @@ The guarantees, at a glance, each enforced by the broker per
   consumers created by the ephemeral provisioner with a fixed lifecycle-owned delivery subject.
   Agents receive only exact bind/ack/delete and subscribe grants—never consumer create or pull
   delivery—so JetStream cannot be used as a confused deputy to relay their allowed KV writes onto
-  another principal's private inbox.
+  another principal's private inbox. For interactive user actors, the auth service performs that
+  trusted ensure before returning a bearer and preserves an already-canonical live watcher.
 - **Transport secrecy (optional)**: `cotals://` enforces TLS for the hop to the broker.
   It protects that hop, not the broker itself.
 

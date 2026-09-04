@@ -64,6 +64,11 @@ normative shapes are [SPEC Appendix B](../SPEC.md#appendix-b-profile-acls); in b
 | **admin** | Elevated *read-only* god-view: sees DMs and anycast live, still writes nothing. A deliberate opt-in (`cotal web`). |
 | operator-side | Narrow single-purpose creds for the machinery (supervising, provisioning, teardown, delivery); the reference implementation splits these so no one connection can read every DM *and* delete every stream ([security model](security.md)). |
 
+Interactive user actors also receive the `agent` profile. Before the auth service releases one of
+their bearers, it uses a short-lived trusted provisioner to ensure the lifecycle-pinned presence and
+channel watchers exist with their fixed delivery rails. A canonical existing watcher is retained,
+so overlapping CLI commands and bearer refreshes do not reset one another's live observer.
+
 **An agent's channel scope is three verbs**: `subscribe` (reads at boot),
 `allowSubscribe` (read ACL), `allowPublish` (post ACL, default-deny), declared in its
 [agent file](agent-files.md) or [manifest](manifest.md), minted into its cred. One card

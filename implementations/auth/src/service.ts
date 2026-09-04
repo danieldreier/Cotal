@@ -55,7 +55,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { connect, credsAuthenticator, type NatsConnection } from "@nats-io/transport-node";
 import { jetstreamManager } from "@nats-io/jetstream";
 import { Kvm } from "@nats-io/kv";
-import { admissionMediatorGrants, EpEnvelopeError, ensureAuthorityStores, isReachable, type ParsedArgs, type SecretStore } from "@cotal-ai/core";
+import { admissionMediatorGrants, ensureAgentKvWatches, EpEnvelopeError, ensureAuthorityStores, isReachable, permissionsFor, type ParsedArgs, type SecretStore } from "@cotal-ai/core";
 import { findCotalRoot, userAuthStateDir, workspaceSecretStore } from "@cotal-ai/workspace";
 import { decodeJwt } from "jose";
 import { startAuthCallout } from "./callout.js";
@@ -117,6 +117,60 @@ const PUBLIC_MAX_IN_FLIGHT = 64; // global concurrent-admission cap on the publi
 const PUBLIC_DEADLINE_MS = 10_000; // hard wall-clock deadline per public request
 
 type Values = Record<string, string | undefined>;
+
+function provisionerGrants(space: string, connId: string): { publish: string[]; subscribe: string[] } {
+  const permissions = permissionsFor(
+    "provisioner",
+    space,
+    { owner: "local", actor: connId, connId },
+    {},
+  ) as { pub?: { allow?: unknown }; sub?: { allow?: unknown } };
+  const publish = permissions.pub?.allow;
+  const subscribe = permissions.sub?.allow;
+  if (!Array.isArray(publish) || !publish.every((v) => typeof v === "string")
+    || !Array.isArray(subscribe) || !subscribe.every((v) => typeof v === "string"))
+    throw new Error("auth-service: core provisioner profile did not produce string publish/subscribe grants");
+  return { publish, subscribe } as { publish: string[]; subscribe: string[] };
+}
+
+/** One ephemeral trusted provisioner per interactive lifecycle ensure. Coalesce concurrent bearer
+ * exchanges for the same actor incarnation so neither can replace a just-bound watcher underneath
+ * the other. The account signing seed is already resident in this service for callout credential
+ * minting; the short-lived connection adds no stronger authority and closes before a bearer leaves. */
+function interactiveWatchProvisioner(opts: {
+  server: string;
+  space: string;
+  dataAccount: { pub: string; signingSeed: string };
+  log: (line: string) => void;
+}): (args: { owner: string; actor: string; lifecycleUid: string }) => Promise<void> {
+  const inFlight = new Map<string, Promise<void>>();
+  return (args) => {
+    const key = JSON.stringify([args.owner, args.actor, args.lifecycleUid]);
+    const existing = inFlight.get(key);
+    if (existing) return existing;
+    const run = (async () => {
+      const client = await openAuthorityClient({
+        server: opts.server,
+        space: opts.space,
+        dataAccount: opts.dataAccount,
+        label: `cotal:auth-watch-provision:${opts.space}`,
+        grants: (connId) => provisionerGrants(opts.space, connId),
+        log: opts.log,
+        noReconnect: true,
+      });
+      try {
+        await ensureAgentKvWatches(client.nc, opts.space, args.owner, args.actor, args.lifecycleUid);
+      } finally {
+        await client.close();
+      }
+    })();
+    inFlight.set(key, run);
+    void run.finally(() => {
+      if (inFlight.get(key) === run) inFlight.delete(key);
+    }).catch(() => {});
+    return run;
+  };
+}
 
 /** The service's AUTHORITY PLANE (R1, SPEC 13.1): the two self-minted data-account connections
  *  behind (a) the composed connect authorizer — the file-ledger arm PLUS the credential deny-new
@@ -505,7 +559,21 @@ export async function runAuthService(args: ParsedArgs, store?: SecretStore): Pro
     space,
     spaceSecret: ownerSecret,
     issuer,
-    authorizeActor: ledgerAuthorizeGrant(dir),
+    authorizeActor: (() => {
+      const authorize = ledgerAuthorizeGrant(dir);
+      const ensureWatches = interactiveWatchProvisioner({
+        server,
+        space,
+        dataAccount: { pub: keys.dataAccount.pub, signingSeed: keys.dataAccount.signingSeed },
+        log: (line) => console.error(line),
+      });
+      return async (owner: string, actor: string) => {
+        const grant = authorize(owner, actor);
+        if (typeof grant.lifecycleUid === "string" && grant.lifecycleUid)
+          await ensureWatches({ owner, actor, lifecycleUid: grant.lifecycleUid });
+        return grant;
+      };
+    })(),
     mintConnectCredential: plane.mintConnectCredential,
   });
   const cap = randomBytes(32).toString("hex"); // per-start exchange capability (rotates with the daemon)

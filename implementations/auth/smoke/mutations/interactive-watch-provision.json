@@ -1,0 +1,35 @@
+{
+  "suite": "implementations/auth/smoke/user-spawn.smoke.ts",
+  "guard": "a human bearer is released only after its lifecycle-pinned public-KV watchers exist, and repeated exchanges retain canonical live consumers",
+  "command": "corepack pnpm --filter @cotal-ai/core build && corepack pnpm --filter @cotal-ai/auth build && PATH=/workspace/state/tools/nats-server-v2.12.12-b:$PATH corepack pnpm smoke:user-spawn:live",
+  "progressPattern": "^  [✓✗]",
+  "minTicks": 8,
+  "completionMarker": "USER-SPAWN SMOKE OK",
+  "proveWith": "node scripts/mutation-proof.mjs --config implementations/auth/smoke/mutations/interactive-watch-provision.json",
+  "why": [
+    "Interactive CLI bearers use the agent profile's lifecycle-pinned public-KV watch rails even",
+    "though their presentation card is an endpoint. The auth service must therefore use its",
+    "ephemeral trusted provisioner before releasing the bearer, while preserving an already-safe",
+    "consumer so overlapping commands and bearer refreshes do not reset a live observer."
+  ],
+  "mutations": [
+    {
+      "name": "release an interactive bearer without provisioning its public-KV watchers",
+      "file": "implementations/auth/src/service.ts",
+      "find": "        if (typeof grant.lifecycleUid === \"string\" && grant.lifecycleUid)\n          await ensureWatches({ owner, actor, lifecycleUid: grant.lifecycleUid });",
+      "replace": "        if (typeof grant.lifecycleUid === \"string\" && grant.lifecycleUid) void ensureWatches;",
+      "expectRed": "✗ FAIL: human exchange pre-provisions both lifecycle-pinned CLI public-KV watchers",
+      "cell": "human exchange pre-provisions both lifecycle-pinned CLI public-KV watchers",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/auth build"
+    },
+    {
+      "name": "reset a canonical live watcher on every bearer exchange",
+      "file": "packages/core/src/endpoint.ts",
+      "find": "        assertAgentKvWatchConfig(existing.config, config);\n        continue;",
+      "replace": "        assertAgentKvWatchConfig(existing.config, config);\n        await deleteNamedAgentKvWatchConsumer(bucket, name);",
+      "expectRed": "✗ FAIL: a second human exchange retains both live watcher consumers instead of resetting them",
+      "cell": "a second human exchange retains both live watcher consumers instead of resetting them",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build && corepack pnpm --filter @cotal-ai/auth build"
+    }
+  ]
+}

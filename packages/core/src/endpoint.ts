@@ -364,6 +364,67 @@ function assertAgentKvWatchConfig(actual: ConsumerConfig, expected: ConsumerConf
   }
 }
 
+const consumerMissing = (err: unknown): boolean =>
+  (err as { code?: number }).code === 404 || /(consumer|stream) not found/i.test((err as Error).message);
+
+async function deleteNamedAgentKvWatchConsumer(bucket: Bucket, name: string): Promise<void> {
+  try {
+    const deleted = await bucket.jsm.consumers.delete(bucket.stream, name);
+    if (!deleted) throw new Error(`JetStream refused to delete pinned KV watcher ${name}`);
+  } catch (err) {
+    if (consumerMissing(err)) return;
+    throw err;
+  }
+}
+
+/** Ensure an interactive user actor's two lifecycle-owned public-KV watchers exist before its
+ * bearer is released. A canonical existing consumer is retained so concurrent/renewed operator
+ * connections do not reset one another's snapshot; a pre-cut or malformed consumer under the
+ * lifecycle name is replaced by the trusted provisioner. */
+export async function ensureAgentKvWatches(
+  nc: NatsConnection,
+  space: string,
+  owner: string,
+  actor: string,
+  lifecycleUid: string,
+): Promise<void> {
+  const kvm = new Kvm(nc);
+  const watches: [Bucket, "presence" | "channels"][] = [
+    [await kvm.open(presenceBucket(space)) as Bucket, "presence"],
+    [await kvm.open(channelBucket(space)) as Bucket, "channels"],
+  ];
+  for (const [bucket, kind] of watches) {
+    if (!(bucket instanceof Bucket)) throw new Error("agent KV watch provisioning needs the @nats-io/kv Bucket implementation");
+    const config = agentKvWatchConfig(bucket, space, kind, owner, actor, lifecycleUid);
+    const name = String(config.name);
+    let existing: ConsumerInfo | undefined;
+    try {
+      existing = await bucket.jsm.consumers.info(bucket.stream, name);
+    } catch (err) {
+      if (!consumerMissing(err)) throw err;
+    }
+    if (existing) {
+      try {
+        assertAgentKvWatchConfig(existing.config, config);
+        continue;
+      } catch {
+        await deleteNamedAgentKvWatchConsumer(bucket, name);
+      }
+    }
+    try {
+      await bucket.jsm.consumers.add(bucket.stream, config);
+    } catch (addError) {
+      // A concurrent exchange for this lifecycle may have won the same canonical create.
+      try {
+        const winner = await bucket.jsm.consumers.info(bucket.stream, name);
+        assertAgentKvWatchConfig(winner.config, config);
+      } catch {
+        throw addError;
+      }
+    }
+  }
+}
+
 export class CotalEndpoint extends EventEmitter {
   readonly card: AgentCard;
   readonly space: string;
@@ -4441,13 +4502,7 @@ export class CotalEndpoint extends EventEmitter {
    * No generated consumer name or agent-side bucket-wide delete grant exists.
    */
   private async deleteNamedAgentKvWatch(bucket: Bucket, name: string): Promise<void> {
-    try {
-      const deleted = await bucket.jsm.consumers.delete(bucket.stream, name);
-      if (!deleted) throw new Error(`JetStream refused to delete pinned KV watcher ${name}`);
-    } catch (err) {
-      if ((err as { code?: number }).code === 404 || /(consumer|stream) not found/i.test((err as Error).message)) return;
-      throw err;
-    }
+    await deleteNamedAgentKvWatchConsumer(bucket, name);
   }
 
   private async deleteAgentKvWatch(watch: AgentKvWatch | undefined): Promise<void> {

@@ -106,9 +106,11 @@ const {
   CotalEndpoint, createSpaceAuth, isReachable, mintCreds, newIdentity, serverConfig,
   setupSpaceStreams, principalKey, registry, spaceWildcard, clearChannel, mintLifecycleUid, eventChannel,
   resolveService, invokeCommand, standaloneConnectOpts, EpEnvelopeError, epAuthBucket,
-  mintMembershipObserverCreds, observePlaneLivenessWithCreds,
+  mintMembershipObserverCreds, observePlaneLivenessWithCreds, agentKvWatchConsumerName,
+  presenceBucket, channelBucket,
 } = await import("@cotal-ai/core");
 const { connect: rawConnect } = await import("@nats-io/transport-node");
+const { jetstreamManager } = await import("@nats-io/jetstream");
 const { Kvm } = await import("@nats-io/kv");
 const { createHash } = await import("node:crypto");
 const { decodeJwt } = await import("jose");
@@ -371,6 +373,7 @@ let broker: ChildProcess | undefined;
 let authChild: ChildProcess | undefined;
 let managerStopped = false;
 let observer: InstanceType<typeof CotalEndpoint> | undefined;
+let watchProbe: Awaited<ReturnType<typeof rawConnect>> | undefined;
 let shortEp: InstanceType<typeof CotalEndpoint> | undefined;
 const ctlEps: Array<InstanceType<typeof CotalEndpoint>> = []; // section O control callers, closed in finally
 try {
@@ -452,6 +455,24 @@ try {
   // Witness the presence join on the OPERATOR's OWN user bearer (login → exchange → connect), watching the roster.
   const opCreds = await cotalAuthProvider.userCredentials({ store, dir, space: SPACE, actor: "cli" });
   const opClaims = JSON.parse(Buffer.from(opCreds.bearer.split(".")[1], "base64url").toString("utf8")) as { act: { lifecycleUid: string } };
+  watchProbe = await rawConnect({
+    servers: SERVER,
+    ...standaloneConnectOpts({ creds: await mintCreds(auth, newIdentity(), "provisioner"), tls: false }),
+    maxReconnectAttempts: 0,
+  });
+  const watchJsm = await jetstreamManager(watchProbe);
+  let interactiveWatches = false;
+  let watchCreated: string[] = [];
+  try {
+    const uid = opClaims.act.lifecycleUid;
+    const infos = await Promise.all([
+      watchJsm.consumers.info(`KV_${presenceBucket(SPACE)}`, agentKvWatchConsumerName("presence", OWNER, "cli", uid)),
+      watchJsm.consumers.info(`KV_${channelBucket(SPACE)}`, agentKvWatchConsumerName("channels", OWNER, "cli", uid)),
+    ]);
+    watchCreated = infos.map((info) => info.created);
+    interactiveWatches = true;
+  } catch { /* the named check below owns the failure */ }
+  check("human exchange pre-provisions both lifecycle-pinned CLI public-KV watchers", interactiveWatches);
   observer = new CotalEndpoint({
     space: SPACE, servers: SERVER, bearer: opCreds.bearer, sentinelCreds: opCreds.sentinelCreds,
     lifecycleUid: opClaims.act.lifecycleUid,
@@ -463,6 +484,17 @@ try {
   await observer.start();
   const seen = await until(() => observer!.getRoster().some((p) => p.card.id === alphaPrincipal && p.card.name === "alpha"));
   check("observer (operator user bearer) sees alpha join as the owner.actor principal", seen, observer.getRoster().map((p) => p.card.id));
+  await cotalAuthProvider.userCredentials({ store, dir, space: SPACE, actor: "cli" });
+  const uid = opClaims.act.lifecycleUid;
+  const watchCreatedAfterRenewal = await Promise.all([
+    watchJsm.consumers.info(`KV_${presenceBucket(SPACE)}`, agentKvWatchConsumerName("presence", OWNER, "cli", uid)),
+    watchJsm.consumers.info(`KV_${channelBucket(SPACE)}`, agentKvWatchConsumerName("channels", OWNER, "cli", uid)),
+  ]).then((infos) => infos.map((info) => info.created));
+  check("a second human exchange retains both live watcher consumers instead of resetting them",
+    watchCreated.length === 2 && JSON.stringify(watchCreatedAfterRenewal) === JSON.stringify(watchCreated),
+    { before: watchCreated, after: watchCreatedAfterRenewal });
+  await watchProbe.drain();
+  watchProbe = undefined;
   // `mesh !== "absent"` accepted ANY other string, so a row carrying a value no roster can produce
   // read as live. The reach is a cast through `unknown`, which severs the local view from the real
   // return type, so no width declared above can catch that: the closed set has to be asserted here.
@@ -1375,6 +1407,7 @@ try {
   process.exitCode = 1;
 } finally {
   try { await observer?.stop(); } catch { /* */ }
+  try { await watchProbe?.drain(); } catch { /* */ }
   try { await shortEp?.stop(); } catch { /* */ }
   for (const e of ctlEps) { try { await e.stop(); } catch { /* */ } }
   if (manager && !managerStopped) await manager.stop().catch(() => {});

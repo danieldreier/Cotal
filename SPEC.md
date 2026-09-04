@@ -632,6 +632,9 @@ DM and TASK confidentiality, and the CHAT read boundary, close the leak paths:
    two `kvw-{p|c}-<owner>-<actor>-<uid>` public-KV watchers. Each KV watcher is a push consumer whose
    destination is fixed to its lifecycle-owned `kvwatch.{p|c}` rail before the agent connects; the
    agent verifies and binds it with INFO/ACK and an exact subscription, never CREATE/MSG.NEXT. Agents
+   launched through a manager are provisioned during onboarding; for an interactive user actor, the
+   trusted auth service MUST ensure the same canonical consumers before releasing its bearer and MUST
+   retain an already-canonical consumer so a concurrent command or bearer refresh cannot reset it.
    bind their own `dm_…-<uid>`/`svc_<role>`/`dlv_…-<uid>` only (never create); the mixed pre-auth
    fan-out store is read by a trusted reader, not the agent (§8, item 5).
    Those bare/multi-filter create forms are not granted to agents (default-deny), with explicit
