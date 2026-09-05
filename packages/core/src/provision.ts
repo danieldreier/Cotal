@@ -55,6 +55,8 @@ import {
   dlvDurable,
   presenceBucket,
   channelBucket,
+  agentKvWatchConsumerName,
+  agentKvWatchDeliverySubject,
   membersBucket,
   aclBucket,
   aclKey,
@@ -658,6 +660,10 @@ export interface DurableProvisioner {
    *  filtered to the lifecycle-scoped `dlv.<owner>.<actor>.<uid>`) so it can BIND its per-member
    *  durable handoff without holding CONSUMER.CREATE on the DLV stream. */
   provisionDlvInbox(owner: string, actor: string, lifecycleUid: string): Promise<void>;
+  /** Pre-create the two public-KV watchers with lifecycle-fixed delivery rails. The agent binds
+   *  them by name and never holds consumer CREATE/MSG.NEXT, because both push `deliver_subject`
+   *  and pull request replies are caller-controlled JetStream delivery destinations. */
+  provisionAgentKvWatches(owner: string, actor: string, lifecycleUid: string): Promise<void>;
   /** Record the lifecycle's read ACL (`allowSubscribe`) in the durable ACL registry, keyed
    *  `<owner>.<actor>.<lifecycleUid>` (SPEC §13.1) — the same act as baking it into the JWT, persisted
    *  so the **server-side delivery daemon** can re-authorize the agent's durable entries and validate
@@ -706,7 +712,7 @@ function principalOf(
 }
 
 /** Onboard an agent for launch (auth mode): pre-create its bind-only DM (+ Plane-3 DELIVER + role
- *  TASK) durables, RECORD its read ACL in the durable registry (unless `durableMembership:false`), and
+ *  TASK) durables and fixed-destination public-KV watchers, RECORD its read ACL in the durable registry (unless `durableMembership:false`), and
  *  mint its scoped creds. Live delivery is the agent's own core subscription — there is no per-instance
  *  chat durable. Boot durable MEMBERSHIP is not written here: the agent self-joins its durable channels
  *  via the server-side delivery daemon's `ctl.delivery` op at connect. A deliberately live-only
@@ -730,7 +736,7 @@ export async function provisionAgent(
 }
 
 /** The DURABLE half of agent onboarding, principal-keyed and credential-agnostic: pre-create the
- *  bind-only DM + DELIVER durables, record the read ACL, ensure the role TASK queue. The static
+ *  bind-only DM + DELIVER durables and fixed-destination public-KV watchers, record the read ACL, ensure the role TASK queue. The static
  *  path ({@link provisionAgent}) follows it with a mint; the USER-MODE spawn path runs it alone —
  *  a user agent's credential is its bearer (callout-minted per connect), never a static cred.
  *  Returns the resolved read ACL so both callers scope from the same computed set. */
@@ -754,6 +760,7 @@ export async function provisionAgentDurables(
       );
   await provisioner.provisionDmInbox(pr.owner, pr.actor, uid);
   await provisioner.provisionDlvInbox(pr.owner, pr.actor, uid);
+  await provisioner.provisionAgentKvWatches(pr.owner, pr.actor, uid);
   // Record the agent's read ACL in the durable registry (the same act as baking it into the JWT) so the
   // server-side delivery daemon can re-authorize this agent's durable entries + validate its runtime
   // durable-joins — it holds no in-memory ledger. The agent SELF-JOINS its durable boot channels via the
@@ -1087,6 +1094,8 @@ export function permissionsFor(
   const uid = assertLifecycleToken(pr.lifecycleUid);
   const chatHistD = chatHistDurable(pr.owner, pr.actor, uid), dmD = dmDurable(pr.owner, pr.actor, uid);
   const DLV = dlvStream(space), dlvD = dlvDurable(pr.owner, pr.actor, uid); // Plane-3 per-member delivery (bind-only)
+  const presenceWatchD = agentKvWatchConsumerName("presence", pr.owner, pr.actor, uid);
+  const channelWatchD = agentKvWatchConsumerName("channels", pr.owner, pr.actor, uid);
   const svcD = opts.role ? taskDurable(opts.role) : undefined;
   const pubAllow = [
     // peer publish — owner+actor identity + channel scope, built from the real builders. Default-deny:
@@ -1133,16 +1142,22 @@ export function permissionsFor(
     `$JS.API.CONSUMER.INFO.${DLV}.${dlvD}`,
     `$JS.API.CONSUMER.MSG.NEXT.${DLV}.${dlvD}`,
     `$JS.ACK.${DLV}.${dlvD}.>`,
-    // Presence: watch (read, public roster) + flow control + PUT OWN KEY ONLY.
-    `$JS.API.CONSUMER.CREATE.${KV}.>`,
-    `$JS.API.CONSUMER.INFO.${KV}.>`,
+    // Presence: bind the trusted-provisioned watcher + flow control + PUT OWN KEY ONLY. Consumer
+    // CREATE is deliberately absent: even an exact extended-create subject leaves deliver_subject
+    // caller-controlled, so JetStream could be used to publish permitted KV bytes onto a foreign
+    // private inbox. Pull MSG.NEXT has the same reply-subject problem. The fixed push rail is minted
+    // into sub.allow below; this credential can only INFO/ACK/DELETE its own lifecycle watcher.
+    `$JS.API.CONSUMER.INFO.${KV}.${presenceWatchD}`,
+    `$JS.API.CONSUMER.DELETE.${KV}.${presenceWatchD}`,
+    `$JS.ACK.${KV}.${presenceWatchD}.>`,
     "$JS.FC.>",
     `$KV.${presenceBucket(space)}.${pk.key}`, // own presence key (owner+actor) only — can't spoof peers
     // Channel registry: read-only (watch + direct kv.get for the join-time replay decision).
     // No `$KV.${channelBucket(space)}.*` publish — privileged-write, default-deny gives that free.
     `$JS.API.STREAM.MSG.GET.${CHKV}`,
-    `$JS.API.CONSUMER.CREATE.${CHKV}.>`,
-    `$JS.API.CONSUMER.INFO.${CHKV}.>`,
+    `$JS.API.CONSUMER.INFO.${CHKV}.${channelWatchD}`,
+    `$JS.API.CONSUMER.DELETE.${CHKV}.${channelWatchD}`,
+    `$JS.ACK.${CHKV}.${channelWatchD}.>`,
     // Delivery lease/readiness: READ-ONLY (kv.get) for the non-gating `cotal_channels` delivery-health
     // surface (Component 6). The lease key is daemon-availability info, like the world-readable roster;
     // NO write grant — only the `delivery` cred writes it.
@@ -1231,6 +1246,17 @@ export function permissionsFor(
     `$JS.API.CONSUMER.CREATE.${DLV}`,
     `$JS.API.CONSUMER.CREATE.${DLV}.>`,
     `$JS.API.CONSUMER.DURABLE.CREATE.${DLV}.>`,
+    // Public-KV contents are non-secret, but their consumer delivery destination is still an
+    // arbitrary publish primitive. Deny every create spelling and pull request explicitly; the
+    // trusted provisioner owns creation and fixes the push rail before the agent connects.
+    `$JS.API.CONSUMER.CREATE.${KV}`,
+    `$JS.API.CONSUMER.CREATE.${KV}.>`,
+    `$JS.API.CONSUMER.DURABLE.CREATE.${KV}.>`,
+    `$JS.API.CONSUMER.MSG.NEXT.${KV}.>`,
+    `$JS.API.CONSUMER.CREATE.${CHKV}`,
+    `$JS.API.CONSUMER.CREATE.${CHKV}.>`,
+    `$JS.API.CONSUMER.DURABLE.CREATE.${CHKV}.>`,
+    `$JS.API.CONSUMER.MSG.NEXT.${CHKV}.>`,
   ];
   // CHAT live read boundary (SPEC v0.3 §9 / Appendix B): mint the read ACL as a native `sub.allow`
   // over cotal.<space>.chat.*.<channel> — one per allowSubscribe channel, wildcards passed through
@@ -1244,7 +1270,11 @@ export function permissionsFor(
   const deliveryReplies = `${controlServiceSubject(space, CONTROL_DELIVERY, pr.owner, pr.actor)}.>`;
   // Manager control replies ride the v0.4 ep reply rail (in `epSub`, keyed on the caller triple) —
   // the `ctl.<tier>.<id>.reply.>` subtrees are gone with the ctl rail (1d).
-  return { pub: { allow: pubAllow, deny: pubDeny }, sub: { allow: [inbox, deliveryReplies, ...subChat, ...epSub] } };
+  const kvWatchDelivery = [
+    agentKvWatchDeliverySubject(space, "presence", pr.owner, pr.actor, uid),
+    agentKvWatchDeliverySubject(space, "channels", pr.owner, pr.actor, uid),
+  ];
+  return { pub: { allow: pubAllow, deny: pubDeny }, sub: { allow: [inbox, deliveryReplies, ...kvWatchDelivery, ...subChat, ...epSub] } };
 }
 
 /** The long-lived SUPERVISOR permission set (closure (ii), residual 2) — the always-on manager daemon
@@ -1692,14 +1722,14 @@ function purgerPermissions(space: string, pr: MintPrincipal): Record<string, unk
 
 /** The ephemeral PROVISIONER permission set (closure (ii), residual 2) — the onboarding authority,
  *  carved off the long-lived manager. Minted short-lived for per-spawn provisioning (pre-create each
- *  agent's bind-only DM/DLV/TASK durables + record its read ACL via `commitAcl`) — the daemon opens it per
+ *  agent's bind-only DM/DLV/TASK durables + fixed-rail public-KV watchers + record its read ACL) — the daemon opens it per
  *  spawn (`manager.ts withProvisioner`). It is ALSO the cred that creates the space's streams + KV buckets
  *  and seeds the channel registry via `setupSpaceStreams` (exercised by the manager-split smoke) — and
  *  `cotal up`'s ephemeral setup cred (`up.ts authSetup`) now mints THIS profile, not the broad `manager`.
  *  NEVER minted for an agent — `cotal mint` whitelists
  *  agent/observer/admin only, like `manager`/`delivery`.
  *
- *  This profile HOLDS the DM/DLV `CONSUMER.CREATE` push-consumer surface — the irreducible onboarding
+ *  This profile HOLDS the DM/DLV and public-KV `CONSUMER.CREATE` push-consumer surface — the irreducible onboarding
  *  power (the create-time `deliver_subject` of a push consumer is not ACL-constrained, so whoever can
  *  create a DM/DLV consumer can stream the bodies). That is exactly why it is split OFF the always-on
  *  supervisor and made EPHEMERAL: the daemon opens a provisioner connection per spawn and drains it
@@ -1709,8 +1739,10 @@ function purgerPermissions(space: string, pr: MintPrincipal): Record<string, unk
  *
  *  `$JS` is an ENUMERATED allow-list, never `$JS.>`: STREAM.CREATE + INFO for the space streams/buckets,
  *  DM/DLV/TASK consumer CREATE/DURABLE.CREATE/INFO — and deliberately NO `MSG.NEXT`/`MSG.GET`/`ACK` on
- *  DM/DLV (it creates the bind-only mailbox but never reads it), and NO STREAM.DELETE/PURGE/MSG.DELETE
- *  (it provisions, it does not tear down). STREAM.UPDATE is held on EXACTLY four streams and no others:
+ *  DM/DLV (it creates the bind-only mailbox but never reads it), and NO STREAM.DELETE/PURGE/MSG.DELETE.
+ *  It holds public-KV consumer DELETE only to replace stale lifecycle watcher config before create;
+ *  that bucket-wide availability power exists only during the ephemeral provisioning window.
+ *  STREAM.UPDATE is held on EXACTLY four streams and no others:
  *  the three TTL'd KV buckets (presence + the two leases, #286 — an existing bucket's `max_age` cannot be
  *  fixed by `kvm.create`, so reconciling a pre-TTL deployment requires updating it) and the records store.
  *  Stated positively on purpose: this docblock previously read "NO …/UPDATE", which was already untrue of
@@ -1783,6 +1815,15 @@ function provisionerPermissions(space: string, pr: MintPrincipal): Record<string
     `$JS.API.CONSUMER.DURABLE.CREATE.${s}.>`,
     `$JS.API.CONSUMER.INFO.${s}.>`,
   ]);
+  const publicKvWatcherAdmin = [
+    `KV_${presenceBucket(space)}`,
+    `KV_${channelBucket(space)}`,
+  ].flatMap((s) => [
+    `$JS.API.CONSUMER.CREATE.${s}.>`,
+    `$JS.API.CONSUMER.DURABLE.CREATE.${s}.>`,
+    `$JS.API.CONSUMER.INFO.${s}.>`,
+    `$JS.API.CONSUMER.DELETE.${s}.>`,
+  ]);
   return {
     pub: {
       allow: [
@@ -1790,6 +1831,7 @@ function provisionerPermissions(space: string, pr: MintPrincipal): Record<string
         ...streamSetup,
         ...streamReconcile,
         ...consumerCreate,
+        ...publicKvWatcherAdmin,
         // KV value-writes — exactly the two registries provisioning writes: the agent read-ACL registry
         // (`commitAcl` at provision) and the channel registry (seed defaults at `cotal up`, channel admin).
         // NO presence/members/membership/delivery writes (the agent's own key, the delivery cred, and the
@@ -2023,25 +2065,26 @@ function endpointServeExecutorPermissions(
  *  to {@link provisionerPermissions}, minted per departed agent inside the manager's `deprovision` tail
  *  (`withProvisioner`-style: a fresh scoped cred per teardown is cheap). It deletes exactly the
  *  dev/static principal footprint the provisioner created for ONE agent: that agent's two bind-only
- *  durables (`dm_local-<actor>`, `dlv_local-<actor>`) and its read-ACL row — pinned BY NAME to the target
+ *  mailboxes, fixed public-KV watchers, and read-ACL row — pinned BY NAME to the target
  *  actor under {@link DEV_OWNER}, so a leaked deprovisioner cred can tear down that one already-dead
  *  agent and NOTHING else.
  *
  *  Deliberately NOT granted (least-privilege / correctness): the role-SHARED `svc_<role>` TASK durable
  *  (one consumer for ALL agents of a role — deleting it on one agent's exit would break its siblings; it
- *  lives until space teardown), any peer's `dm_`/`dlv_`/ACL (the grants are target-name-pinned, never
+ *  lives until space teardown), any peer's mailbox/watcher/ACL (the grants are target-name-pinned, never
  *  `.>`), any MSG.NEXT/MSG.GET/ACK (it deletes mailboxes, never reads a body), and any STREAM
  *  DELETE/PURGE (it removes per-agent consumers, never a stream). The `chathist_<id>` history consumers
  *  need no grant here — they are ephemeral (`mem_storage`, 30s inactive threshold) and agent-deleted
  *  after each read, so they self-clean on the agent's disconnect.
  *
- *  Blast radius of a leaked cred (minted for target T): it can delete T's `dm_local-<T>`/`dlv_local-<T>`
- *  durables + purge T's ACL row — a denial-of-DELIVERY for T (broken DM/DLV bind + the reader DEFERs on
+ *  Blast radius of a leaked cred (minted for target T): it can delete T's mailboxes/watchers
+ *  + purge T's ACL row — a denial-of-DELIVERY for T (broken DM/DLV/KV-watch bind + the reader DEFERs on
  *  the absent ACL) if fired while T is still alive. It CANNOT read T's bodies, impersonate T, reach any peer, or
  *  delete a stream — and it is ephemeral (one per-exit teardown, minted then dropped). Contained and
  *  recoverable (re-provision T). */
 function deprovisionerPermissions(space: string, pr: MintPrincipal, deprovisionTarget: DeprovisionTarget): Record<string, unknown> {
   const DM = dmStream(space), DLV = dlvStream(space);
+  const PKV = `KV_${presenceBucket(space)}`, CHKV = `KV_${channelBucket(space)}`;
   const t = deprovisionTargetPrincipal(deprovisionTarget);
   const target = principalKey(t.owner, t.actor);
   return {
@@ -2053,6 +2096,8 @@ function deprovisionerPermissions(space: string, pr: MintPrincipal, deprovisionT
         // replayed teardown is broker-DENIED there (SPEC 13.1 / Appendix "deprovisioner").
         `$JS.API.CONSUMER.DELETE.${DM}.${dmDurable(t.owner, t.actor, t.lifecycleUid)}`,
         `$JS.API.CONSUMER.DELETE.${DLV}.${dlvDurable(t.owner, t.actor, t.lifecycleUid)}`,
+        `$JS.API.CONSUMER.DELETE.${PKV}.${agentKvWatchConsumerName("presence", t.owner, t.actor, t.lifecycleUid)}`,
+        `$JS.API.CONSUMER.DELETE.${CHKV}.${agentKvWatchConsumerName("channels", t.owner, t.actor, t.lifecycleUid)}`,
         // Purge the target lifecycle's read-ACL row (own-target exact key only — the reader then treats
         // it as an unknown owner). `kvm.open` binds the pre-created bucket; the purge rides
         // `$KV.<aclBucket>.<key>`.

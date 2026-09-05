@@ -45,6 +45,9 @@ import {
   dmDurable,
   dlvDurable,
   taskDurable,
+  presenceBucket,
+  channelBucket,
+  agentKvWatchConsumerName,
   DEV_OWNER,
   principalKey,
 } from "../src/index.js";
@@ -123,6 +126,7 @@ try {
   if (!up) throw new Error(`auth nats-server did not come up on ${PORT}`);
 
   const DM = dmStream(space), DLV = dlvStream(space), TASK = taskStream(space);
+  const PKV = `KV_${presenceBucket(space)}`, CHKV = `KV_${channelBucket(space)}`;
 
   // ---- provision an agent the real way (provisioner endpoint → provisionAgent) ----
   const provId = newIdentity();
@@ -143,6 +147,8 @@ try {
   console.log("after provisionAgent — the lifecycle-keyed footprint + the role-shared svc_<role> exist:");
   check("dm_local-<id>-<uidA> durable present", await consumerExists(provCreds, provId.id, DM, dmDurable(DEV_OWNER, agent.id, uidA)));
   check("dlv_local-<id>-<uidA> durable present", await consumerExists(provCreds, provId.id, DLV, dlvDurable(DEV_OWNER, agent.id, uidA)));
+  check("presence watcher for uidA present", await consumerExists(provCreds, provId.id, PKV, agentKvWatchConsumerName("presence", DEV_OWNER, agent.id, uidA)));
+  check("channel watcher for uidA present", await consumerExists(provCreds, provId.id, CHKV, agentKvWatchConsumerName("channels", DEV_OWNER, agent.id, uidA)));
   check("svc_<role> (worker) durable present", await consumerExists(provCreds, provId.id, TASK, taskDurable("worker")));
   check("read-ACL row present (lifecycle-keyed)", await aclPresent(provCreds, provId.id, localPrincipal(agent.id), uidA));
 
@@ -153,6 +159,8 @@ try {
   console.log("after deprovisionAgent — the lifecycle A footprint is gone; the role-shared durable survives:");
   check("dm_local-<id>-<uidA> durable GONE", !(await consumerExists(provCreds, provId.id, DM, dmDurable(DEV_OWNER, agent.id, uidA))));
   check("dlv_local-<id>-<uidA> durable GONE", !(await consumerExists(provCreds, provId.id, DLV, dlvDurable(DEV_OWNER, agent.id, uidA))));
+  check("presence watcher for uidA GONE", !(await consumerExists(provCreds, provId.id, PKV, agentKvWatchConsumerName("presence", DEV_OWNER, agent.id, uidA))));
+  check("channel watcher for uidA GONE", !(await consumerExists(provCreds, provId.id, CHKV, agentKvWatchConsumerName("channels", DEV_OWNER, agent.id, uidA))));
   check("read-ACL row GONE", !(await aclPresent(provCreds, provId.id, localPrincipal(agent.id), uidA)));
   check("svc_<role> (worker) durable UNTOUCHED (role-shared — siblings still bind it)", await consumerExists(provCreds, provId.id, TASK, taskDurable("worker")));
 
@@ -194,6 +202,8 @@ try {
   check("successor (uidB) footprint present after same-name re-provision",
     (await consumerExists(provCreds, provId.id, DM, dmDurable(DEV_OWNER, agent.id, uidB)))
     && (await consumerExists(provCreds, provId.id, DLV, dlvDurable(DEV_OWNER, agent.id, uidB)))
+    && (await consumerExists(provCreds, provId.id, PKV, agentKvWatchConsumerName("presence", DEV_OWNER, agent.id, uidB)))
+    && (await consumerExists(provCreds, provId.id, CHKV, agentKvWatchConsumerName("channels", DEV_OWNER, agent.id, uidB)))
     && (await aclPresent(provCreds, provId.id, localPrincipal(agent.id), uidB)));
 
   // REPLAY of the retired lifecycle A's teardown (the at-least-once world): its cred + its uid.
@@ -205,6 +215,8 @@ try {
   check("replayed retired-lifecycle teardown is a no-op (never resolves to the successor)", !replayThrew);
   check("successor dm durable SURVIVES the replayed teardown", await consumerExists(provCreds, provId.id, DM, dmDurable(DEV_OWNER, agent.id, uidB)));
   check("successor dlv durable SURVIVES the replayed teardown", await consumerExists(provCreds, provId.id, DLV, dlvDurable(DEV_OWNER, agent.id, uidB)));
+  check("successor presence watcher SURVIVES the replayed teardown", await consumerExists(provCreds, provId.id, PKV, agentKvWatchConsumerName("presence", DEV_OWNER, agent.id, uidB)));
+  check("successor channel watcher SURVIVES the replayed teardown", await consumerExists(provCreds, provId.id, CHKV, agentKvWatchConsumerName("channels", DEV_OWNER, agent.id, uidB)));
   check("successor read-ACL row SURVIVES the replayed teardown", await aclPresent(provCreds, provId.id, localPrincipal(agent.id), uidB));
 
   // A CONFUSED/HOSTILE holder of A's teardown cred aiming it AT B's names: the cred's exact-name
@@ -217,6 +229,8 @@ try {
   check("A's teardown cred aimed at B's names is broker-DENIED (threw, never deleted)", wrongUidOutcome === "threw", { wrongUidOutcome });
   check("successor dm durable INTACT after the denied wrong-uid attempt", await consumerExists(provCreds, provId.id, DM, dmDurable(DEV_OWNER, agent.id, uidB)));
   check("successor dlv durable INTACT after the denied wrong-uid attempt", await consumerExists(provCreds, provId.id, DLV, dlvDurable(DEV_OWNER, agent.id, uidB)));
+  check("successor presence watcher INTACT after the denied wrong-uid attempt", await consumerExists(provCreds, provId.id, PKV, agentKvWatchConsumerName("presence", DEV_OWNER, agent.id, uidB)));
+  check("successor channel watcher INTACT after the denied wrong-uid attempt", await consumerExists(provCreds, provId.id, CHKV, agentKvWatchConsumerName("channels", DEV_OWNER, agent.id, uidB)));
   check("successor read-ACL row INTACT after the denied wrong-uid attempt", await aclPresent(provCreds, provId.id, localPrincipal(agent.id), uidB));
 
   // FRONTIER PROBE assert: B's dm durable (ByStartSequence frontier+1) delivers ONLY the

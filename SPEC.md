@@ -495,6 +495,7 @@ Durable consumers. Per-instance durables are keyed on the principal's **dash-for
 | `chathist_<owner>-<actor>-<uid>` | CHAT | one `cotal.<space>.chat.*.*.<channel>` per read | transient single-filter consumer for history reads (join-backfill / focus-recall); created per read scoped to one channel in `allowSubscribe`, then deleted; `AckNone`. History is ACL-bounded by the pinned filter, not membership-gated (§7, §9) |
 | `dm_<owner>-<actor>-<uid>` | DM | `cotal.<space>.inst.<owner>.<actor>.>` | provisioner-created in auth mode at lifecycle activation; bind only; `DeliverPolicy.ByStartSequence` with `OptStartSeq = activationFrontier + 1`, where the **activation frontier** is the DM-stream's last sequence captured at activation (`0` on an empty stream, so the start is `1`): `ByStartSequence` is inclusive and the lifecycle interval is half-open, so the consumer starts strictly AFTER the frontier, never `All`, which would replay a recycled alias's history and the inactive-gap backlog; `AckExplicit`; `ack_wait=60000ms` |
 | `svc_<role>` | TASK | `cotal.<space>.svc.<role>.>` | provisioner-created in auth mode; bind only; `AckExplicit`; `ack_wait=60000ms`. **Intentionally role-shared, not lifecycle-scoped**: anycast work belongs to the role, and successive holders draining one pool is the contract |
+| `kvw-{p\|c}-<owner>-<actor>-<uid>` | `KV_cotal_{presence\|channels}_<space>` | `$KV.cotal_{presence\|channels}_<space>.>` | provisioner-created per lifecycle with a fixed `cotal.<space>.kvwatch.{p\|c}.<owner>.<actor>.<uid>` push destination; `DeliverPolicy.LastPerSubject`, `AckExplicit`; the agent receives exact INFO/ACK/DELETE plus subscribe to that fixed rail, but no consumer CREATE or pull `MSG.NEXT`. Provisioning deletes/recreates only this lifecycle's name for a fresh process snapshot; in-process reconnect binds the retained durable and a graceful stop deletes it |
 
 From v0.4, each lifecycle's durable state lives in the **half-open interval**
 `(activationFrontier, retirementFrontier]` per stream: consumers start strictly after the
@@ -607,7 +608,7 @@ credential diverge (§2): the principal keys subjects/durables/presence; the con
 
 | Profile | Application publish | Read surface | Notes |
 | --- | --- | --- | --- |
-| `agent` | own `chat.<owner>.<actor>.<ch>` for each `allowPublish` channel (post ACL, default-deny), `inst.*.*.<owner>.<actor>`, `svc.*.<owner>.<actor>`; endpoint request forms per minted capability (`ep.one`/`ep.all`/`ep.inst` with the capability's authz-mode/target pattern, caller triple `<owner>.<actor>.<uid>` pinned; `describe` by default; `epj` submissions for journaled capabilities; §13.9); own presence key | own `_INBOX_<connId>.>` + own endpoint reply rail (`ep.reply.*.*.*.<owner>.<actor>.<uid>.*`, exact arity); channel live tail via native `sub.allow` subscriptions to `chat.*.*.<channel>` per `allowSubscribe` (wildcards preserved); CHAT history via single-filter `chathist_<owner>-<actor>-<uid>` creates, one per `allowSubscribe` channel (ACL-bounded); own lifecycle-scoped `dm_…`/`svc_…` bind-only; durable backstop via own bind-only lifecycle-scoped `dlv_…` DELIVER consumer, **no** grant on the mixed pre-auth fan-out stream; granted record-key/event-topic read subtrees per capability | read bounded by `allowSubscribe`; durable copies re-authorized (current ACL + membership + lifecycle) by the trusted reader before the `dlv` handoff; no Direct Get; DM/TASK/DLV create denied |
+| `agent` | own `chat.<owner>.<actor>.<ch>` for each `allowPublish` channel (post ACL, default-deny), `inst.*.*.<owner>.<actor>`, `svc.*.<owner>.<actor>`; endpoint request forms per minted capability (`ep.one`/`ep.all`/`ep.inst` with the capability's authz-mode/target pattern, caller triple `<owner>.<actor>.<uid>` pinned; `describe` by default; `epj` submissions for journaled capabilities; §13.9); own presence key | own `_INBOX_<connId>.>` + own endpoint reply rail (`ep.reply.*.*.*.<owner>.<actor>.<uid>.*`, exact arity); fixed lifecycle-owned `kvwatch.{p\|c}.<owner>.<actor>.<uid>` rails for provisioner-created public-KV watchers (exact INFO/ACK/DELETE and subscribe, no CREATE/MSG.NEXT); channel live tail via native `sub.allow` subscriptions to `chat.*.*.<channel>` per `allowSubscribe` (wildcards preserved); CHAT history via single-filter `chathist_<owner>-<actor>-<uid>` creates, one per `allowSubscribe` channel (ACL-bounded); own lifecycle-scoped `dm_…`/`svc_…` bind-only; durable backstop via own bind-only lifecycle-scoped `dlv_…` DELIVER consumer, **no** grant on the mixed pre-auth fan-out stream; granted record-key/event-topic read subtrees per capability | read bounded by `allowSubscribe`; durable copies re-authorized (current ACL + membership + lifecycle) by the trusted reader before the `dlv` handoff; no Direct Get; DM/TASK/DLV/public-KV create denied |
 | `observer` | none | chat, CHAT history, presence, channel registry | DMs invisible |
 | `admin` | none | whole space live tap plus DM history | plaintext god-view, opt-in |
 | scoped host profiles | least-privilege per function | least-privilege per function | The former allow-all `manager` is **deleted**; its host duties split into scoped, single-function creds (`supervisor`, `provisioner`, `delivery`, `membership-rw`, `operator`, `purger`, `teardown`, `channel-writer`, …). No allow-all credential exists. Appendix B summarizes them; the concrete grant lists are **generated from the §13.9 ownership matrix** into `provision.ts` (the matrix is the single oracle; `provision.ts` is its artifact, Appendix B its summary). |
@@ -626,10 +627,18 @@ DM and TASK confidentiality, and the CHAT read boundary, close the leak paths:
    so an open ACL (`team.>`, `>`) grants selective single-channel join with no enumeration and no
    read-breakout. A `>` grant is read-all chat in the space by design (credential compromise reads
    all chat), so it suits trusted/local deployments, not least privilege.
-3. A consumer create on the bare/multi-filter subject is not ACL-constrainable, so the provisioner
-   pre-creates `dm_<owner>-<actor>-<uid>`, `svc_<role>`, and the per-member `dlv_<owner>-<actor>-<uid>` handoff
-   durables. Agents bind their own `dm_…-<uid>`/`svc_<role>`/`dlv_…-<uid>` only (never
-   create); the mixed pre-auth fan-out store is read by a trusted reader, not the agent (§8, item 5).
+3. Consumer-create request bodies are not fully ACL-constrainable, so the provisioner pre-creates
+   `dm_<owner>-<actor>-<uid>`, `svc_<role>`, the per-member `dlv_<owner>-<actor>-<uid>` handoff, and the
+   two `kvw-{p|c}-<owner>-<actor>-<uid>` public-KV watchers. Each KV watcher is a push consumer whose
+   destination is fixed to its lifecycle-owned `kvwatch.{p|c}` rail before the agent connects; the
+   agent verifies and binds it with INFO/ACK and an exact subscription, never CREATE/MSG.NEXT. Agents
+   launched through a manager are provisioned during onboarding; for an interactive user actor, the
+   trusted auth service MUST ensure the same canonical consumers before releasing its bearer and MUST
+   retain an already-canonical bound or not-yet-drained consumer so a concurrent command or bearer
+   refresh cannot reset it. An unbound, fully-acknowledged watcher MUST be replaced before bearer
+   release so a process following an ungraceful predecessor receives a fresh current-state snapshot.
+   bind their own `dm_…-<uid>`/`svc_<role>`/`dlv_…-<uid>` only (never create); the mixed pre-auth
+   fan-out store is read by a trusted reader, not the agent (§8, item 5).
    Those bare/multi-filter create forms are not granted to agents (default-deny), with explicit
    create-denies on `DM_<space>`, `TASK_<space>`, and the `DLV` stream; on `CHAT_<space>` the only
    consumer-create an agent holds is the pinned single-filter history create (next item), so a broad

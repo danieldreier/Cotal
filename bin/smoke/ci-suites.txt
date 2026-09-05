@@ -125,6 +125,7 @@ smoke:sub-acl:auth
 smoke:self-serve-join:auth
 smoke:control-auth
 smoke:manager-split
+smoke:agent-watch-cleanup:auth
 smoke:cred-lifetime
 smoke:standing-renewal
 smoke:delivery-renewal

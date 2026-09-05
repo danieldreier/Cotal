@@ -64,6 +64,8 @@ import {
   aclBucket,
   channelBucket,
   managerLeaseKey,
+  agentKvWatchConsumerName,
+  agentKvWatchDeliverySubject,
   epRequestSubject,
   BASELINE_LIFECYCLE_ENDPOINT,
 } from "../src/index.js";
@@ -203,7 +205,7 @@ try {
   const dp = newIdentity(), dpUid = mintLifecycleUid(), dpCreds = await mintCreds(auth, dp, "deployer", { lifecycleUid: dpUid });
 
   const CHAT = chatStream(space), DM = dmStream(space), DLV = dlvStream(space), TASK = taskStream(space);
-  const PKV = `KV_${presenceBucket(space)}`;
+  const PKV = `KV_${presenceBucket(space)}`, AGENT_CHKV = `KV_${channelBucket(space)}`;
   // The DM/DLV consumer-create push-bypass (the create-time deliver_subject isn't ACL-constrained, so a
   // consumer-create = body read). The supervisor MUST NOT have it; the provisioner must.
   const victimUid = mintLifecycleUid();
@@ -246,6 +248,10 @@ try {
   check("CONSUMER.DURABLE.CREATE on DM ALLOWED (the onboarding power)", await tryPublish(provCreds, dmCreate, prov.id) === "allowed");
   check("CONSUMER.DURABLE.CREATE on DLV ALLOWED", await tryPublish(provCreds, dlvCreate, prov.id) === "allowed");
   check("CONSUMER.DURABLE.CREATE on TASK ALLOWED", await tryPublish(provCreds, `$JS.API.CONSUMER.DURABLE.CREATE.${TASK}.svc_worker`, prov.id) === "allowed");
+  check("CONSUMER.CREATE on public presence KV ALLOWED only to the ephemeral provisioner",
+    await tryPublish(provCreds, `$JS.API.CONSUMER.CREATE.${PKV}.probe.$KV.${presenceBucket(space)}.>`, prov.id) === "allowed");
+  check("CONSUMER.CREATE on public channel KV ALLOWED only to the ephemeral provisioner",
+    await tryPublish(provCreds, `$JS.API.CONSUMER.CREATE.${AGENT_CHKV}.probe.$KV.${channelBucket(space)}.>`, prov.id) === "allowed");
   check("write the ACL registry ALLOWED (commitAcl)", await tryPublish(provCreds, `$KV.${aclBucket(space)}.${sup.id}`, prov.id) === "allowed");
   check("read the ACL registry ALLOWED (commitAcl read-before-write)", await tryPublish(provCreds, `$JS.API.STREAM.MSG.GET.KV_${aclBucket(space)}`, prov.id) === "allowed");
   check("write the channel registry ALLOWED (seed)", await tryPublish(provCreds, `$KV.${channelBucket(space)}.general`, prov.id) === "allowed");
@@ -281,6 +287,39 @@ try {
       await tryPublish(agCreds, `$JS.API.CONSUMER.MSG.NEXT.${DM}.${dmDurable(DEV_OWNER, agId.id, otherUid)}`, agId.id) === "denied");
     check("bind the SAME alias's dlv durable under a LIED lifecycle uid DENIED",
       await tryPublish(agCreds, `$JS.API.CONSUMER.MSG.NEXT.${DLV}.${dlvDurable(DEV_OWNER, agId.id, otherUid)}`, agId.id) === "denied");
+    // The endpoint replaces nats.js's generated `oc_*` consumer with exact lifecycle-owned names.
+    // That lets the broker admit reset/stop cleanup for this incarnation without granting an agent
+    // availability authority over a peer watcher in either public bucket.
+    const ownPresenceWatch = agentKvWatchConsumerName("presence", DEV_OWNER, agId.id, agUid);
+    const ownChannelWatch = agentKvWatchConsumerName("channels", DEV_OWNER, agId.id, agUid);
+    const peerPresenceWatch = agentKvWatchConsumerName("presence", DEV_OWNER, agId.id, otherUid);
+    const ownPresenceDelivery = agentKvWatchDeliverySubject(space, "presence", DEV_OWNER, agId.id, agUid);
+    const ownChannelDelivery = agentKvWatchDeliverySubject(space, "channels", DEV_OWNER, agId.id, agUid);
+    const peerPresenceDelivery = agentKvWatchDeliverySubject(space, "presence", DEV_OWNER, agId.id, otherUid);
+    check("CREATE OWN exact presence watcher DENIED (deliver_subject is body-controlled)",
+      await tryPublish(agCreds, `$JS.API.CONSUMER.CREATE.${PKV}.${ownPresenceWatch}.$KV.${presenceBucket(space)}.>`, agId.id) === "denied");
+    check("pull MSG.NEXT on OWN presence watcher DENIED (reply subject is caller-controlled)",
+      await tryPublish(agCreds, `$JS.API.CONSUMER.MSG.NEXT.${PKV}.${ownPresenceWatch}`, agId.id) === "denied");
+    check("subscribe trusted OWN presence watcher delivery rail ALLOWED",
+      await trySubscribe(agCreds, agId.id, ownPresenceDelivery) === "allowed");
+    check("subscribe trusted OWN channel watcher delivery rail ALLOWED",
+      await trySubscribe(agCreds, agId.id, ownChannelDelivery) === "allowed");
+    check("subscribe SAME-PRINCIPAL peer lifecycle delivery rail DENIED",
+      await trySubscribe(agCreds, agId.id, peerPresenceDelivery) === "denied");
+    check("ACK OWN lifecycle-pinned presence watcher ALLOWED",
+      await tryPublish(agCreds, `$JS.ACK.${PKV}.${ownPresenceWatch}.1.1.1.1.1`, agId.id) === "allowed");
+    check("delete OWN lifecycle-pinned presence watcher ALLOWED",
+      await tryPublish(agCreds, `$JS.API.CONSUMER.DELETE.${PKV}.${ownPresenceWatch}`, agId.id) === "allowed");
+    check("delete OWN lifecycle-pinned channel-registry watcher ALLOWED",
+      await tryPublish(agCreds, `$JS.API.CONSUMER.DELETE.KV_${channelBucket(space)}.${ownChannelWatch}`, agId.id) === "allowed");
+    check("delete SAME-PRINCIPAL peer lifecycle watcher DENIED (cleanup is lifecycle-pinned)",
+      await tryPublish(agCreds, `$JS.API.CONSUMER.DELETE.${PKV}.${peerPresenceWatch}`, agId.id) === "denied");
+    check("delete a generated oc_* watcher in the same bucket DENIED (no bucket-wide fallback)",
+      await tryPublish(agCreds, `$JS.API.CONSUMER.DELETE.${PKV}.oc_agent-presence-probe_1`, agId.id) === "denied");
+    check("delete a consumer on a different KV stream DENIED (cleanup grant is not KV-wide)",
+      await tryPublish(agCreds, `$JS.API.CONSUMER.DELETE.KV_${membersBucket(space)}.oc_agent-escape-probe_1`, agId.id) === "denied");
+    check("delete the presence STREAM itself DENIED (consumer cleanup is not bucket destruction)",
+      await tryPublish(agCreds, `$JS.API.STREAM.DELETE.${PKV}`, agId.id) === "denied");
   }
 
   console.log("deprovisioner (ephemeral, TARGET-PINNED teardown — deletes ONE agent's local-principal footprint, nothing else):");
@@ -289,12 +328,17 @@ try {
   const tgtDm = `$JS.API.CONSUMER.DELETE.${DM}.${dmDurable(DEV_OWNER, dpvTarget.id, dpvTargetUid)}`;
   const tgtDlv = `$JS.API.CONSUMER.DELETE.${DLV}.${dlvDurable(DEV_OWNER, dpvTarget.id, dpvTargetUid)}`;
   const tgtAcl = `$KV.${aclBucket(space)}.${aclKey(dpvTargetPrincipal, dpvTargetUid)}`;
+  const tgtPresenceWatch = `$JS.API.CONSUMER.DELETE.${PKV}.${agentKvWatchConsumerName("presence", DEV_OWNER, dpvTarget.id, dpvTargetUid)}`;
+  const tgtChannelWatch = `$JS.API.CONSUMER.DELETE.${AGENT_CHKV}.${agentKvWatchConsumerName("channels", DEV_OWNER, dpvTarget.id, dpvTargetUid)}`;
   check("DELETE the TARGET's dm_local-<id> durable ALLOWED", await tryPublish(dpvCreds, tgtDm, dpv.id) === "allowed");
   check("DELETE the TARGET's dlv_local-<id> durable ALLOWED", await tryPublish(dpvCreds, tgtDlv, dpv.id) === "allowed");
+  check("DELETE the TARGET's presence watcher ALLOWED", await tryPublish(dpvCreds, tgtPresenceWatch, dpv.id) === "allowed");
+  check("DELETE the TARGET's channel watcher ALLOWED", await tryPublish(dpvCreds, tgtChannelWatch, dpv.id) === "allowed");
   check("purge the TARGET's ACL row ($KV.<acl>.<id>) ALLOWED", await tryPublish(dpvCreds, tgtAcl, dpv.id) === "allowed");
   // Target-PINNED: a PEER's local-principal footprint (durable + ACL row) is out of reach — the grants name the target.
   check("DELETE a PEER's dm_local-<id> durable DENIED (target-pinned)", await tryPublish(dpvCreds, `$JS.API.CONSUMER.DELETE.${DM}.${dmDurable(DEV_OWNER, sup.id, dpvTargetUid)}`, dpv.id) === "denied");
   check("DELETE a PEER's dlv_local-<id> durable DENIED (target-pinned)", await tryPublish(dpvCreds, `$JS.API.CONSUMER.DELETE.${DLV}.${dlvDurable(DEV_OWNER, sup.id, dpvTargetUid)}`, dpv.id) === "denied");
+  check("DELETE a PEER's presence watcher DENIED (target-pinned)", await tryPublish(dpvCreds, `$JS.API.CONSUMER.DELETE.${PKV}.${agentKvWatchConsumerName("presence", DEV_OWNER, sup.id, dpvTargetUid)}`, dpv.id) === "denied");
   check("purge a PEER's ACL row DENIED (target-pinned)", await tryPublish(dpvCreds, `$KV.${aclBucket(space)}.${aclKey(supPrincipal, dpvTargetUid)}`, dpv.id) === "denied");
   // D15 (SPEC 13.1): the SAME alias under a DIFFERENT lifecycle — the same-name successor's names —
   // is equally out of reach: the grants pin (principal, lifecycleUid) by EXACT name, so a stale or

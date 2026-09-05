@@ -276,7 +276,9 @@ const SEAMS: Seam[] = [
   // actor with bearer+sentinel and an explicit plaintext-broker `tls: false` decision.
   // 102/75 -> 104/77: the boot-self-heal live smoke opens two explicit plaintext-broker
   // connections so the stale-lease and successor paths share the same bounded fixture.
-  { fn: "standaloneConnectOpts", key: "tls", sites: 104, untypecheckedSites: 77 },
+  // 104/77 -> 106/79: the user-auth cold-rebind smoke opens two explicit plaintext-broker
+  // connections, both with tls: false.
+  { fn: "standaloneConnectOpts", key: "tls", sites: 106, untypecheckedSites: 79 },
 ];
 
 /**

@@ -36,6 +36,7 @@ import {
   type JetStreamManager,
   type ConsumerMessages,
   type ConsumerInfo,
+  type ConsumerConfig,
   type JsMsg,
 } from "@nats-io/jetstream";
 import { type PushConsumer } from "@nats-io/jetstream";
@@ -119,6 +120,7 @@ import {
   assertInboxConnId,
   type ParsedSubject,
   presenceBucket,
+  channelBucket,
   membershipBucket,
   MEMBERSHIP_FEED_KEY,
   principalKey,
@@ -126,6 +128,8 @@ import {
   assertLifecycleToken,
   mintLifecycleUid,
   lifecycleNameKey,
+  agentKvWatchConsumerName,
+  agentKvWatchDeliverySubject,
   DEV_OWNER,
   spacePrefix,
   spaceWildcard,
@@ -218,6 +222,12 @@ export interface EndpointOptions {
   watchChannels?: boolean;
   /** Create inbound stream consumers (DM / chat / anycast). Default true; a pure observer sets false. */
   consume?: boolean;
+  /** Use lifecycle-pinned public-KV watcher names even when this endpoint's presentation kind is
+   *  not `agent`. Set only for a lifecycle-bound agent-profile credential (for example the
+   *  user-mode CLI's invisible transient observer); service credentials such as manager/delivery
+   *  do not carry these exact CREATE/INFO/DELETE rows. `card.kind: "agent"` enables this
+   *  automatically. */
+  lifecyclePinnedKvWatches?: boolean;
   /** Initial per-channel attention overrides to publish in presence from the first heartbeat (the
    *  connector's file-default seed). Mirror only — never read back into delivery. */
   channelModes?: Record<string, ChannelMode>;
@@ -309,6 +319,120 @@ type MembershipFeedWatch = {
   rejectStop?: (err: unknown) => void;
 };
 
+type AgentKvWatch = {
+  bucket: Bucket;
+  stream: string;
+  name: string;
+  iter?: ConsumerMessages;
+};
+
+/** Canonical, security-sensitive shape of an authenticated agent's public-KV watcher. Creation is
+ * trusted provisioning work because JetStream accepts the push destination in the request body;
+ * the agent later verifies and binds this exact shape without holding consumer CREATE. */
+function agentKvWatchConfig(
+  bucket: Bucket,
+  space: string,
+  kind: "presence" | "channels",
+  owner: string,
+  actor: string,
+  lifecycleUid: string,
+): ConsumerConfig {
+  const name = agentKvWatchConsumerName(kind, owner, actor, lifecycleUid);
+  const config = bucket._buildCC(">", KvWatchInclude.LastValue, { headers_only: false }) as ConsumerConfig;
+  config.name = name;
+  config.durable_name = name;
+  config.deliver_subject = agentKvWatchDeliverySubject(space, kind, owner, actor, lifecycleUid);
+  config.ack_policy = AckPolicy.Explicit;
+  config.ack_wait = nanos(250);
+  // Provisioning necessarily precedes the agent subscription. Redeliver an initial snapshot missed
+  // in that short gap promptly, then back off so a never-launched/crashed agent cannot hot-loop it.
+  config.backoff = [nanos(250), nanos(1_000), nanos(5_000), nanos(30_000)];
+  config.inactive_threshold = nanos(5 * 60_000);
+  config.num_replicas = 1;
+  config.max_deliver = -1;
+  config.max_ack_pending = 1024;
+  return config;
+}
+
+function assertAgentKvWatchConfig(actual: ConsumerConfig, expected: ConsumerConfig): void {
+  const fields: (keyof ConsumerConfig)[] = [
+    "name", "durable_name", "filter_subject", "deliver_subject", "deliver_policy", "ack_policy",
+  ];
+  for (const field of fields) {
+    if (actual[field] !== expected[field])
+      throw new Error(`trusted-provisioned KV watcher ${String(expected.name)} has unsafe ${String(field)} config`);
+  }
+}
+
+const consumerMissing = (err: unknown): boolean =>
+  (err as { code?: number }).code === 404 || /(consumer|stream) not found/i.test((err as Error).message);
+
+async function deleteNamedAgentKvWatchConsumer(bucket: Bucket, name: string): Promise<void> {
+  try {
+    const deleted = await bucket.jsm.consumers.delete(bucket.stream, name);
+    if (!deleted) throw new Error(`JetStream refused to delete pinned KV watcher ${name}`);
+  } catch (err) {
+    if (consumerMissing(err)) return;
+    throw err;
+  }
+}
+
+/** Ensure an interactive user actor's two lifecycle-owned public-KV watchers exist before its
+ * bearer is released. A canonical bound consumer is retained for a live operator connection, and
+ * an unbound consumer whose snapshot is still pending is retained across the short provision→bind
+ * handoff. An unbound, fully-acknowledged consumer belongs to an abandoned process and is replaced
+ * so the next process receives a fresh LastPerSubject snapshot. Pre-cut or malformed consumers are
+ * also replaced by the trusted provisioner. */
+export async function ensureAgentKvWatches(
+  nc: NatsConnection,
+  space: string,
+  owner: string,
+  actor: string,
+  lifecycleUid: string,
+): Promise<void> {
+  const kvm = new Kvm(nc);
+  const watches: [Bucket, "presence" | "channels"][] = [
+    [await kvm.open(presenceBucket(space)) as Bucket, "presence"],
+    [await kvm.open(channelBucket(space)) as Bucket, "channels"],
+  ];
+  for (const [bucket, kind] of watches) {
+    if (!(bucket instanceof Bucket)) throw new Error("agent KV watch provisioning needs the @nats-io/kv Bucket implementation");
+    const config = agentKvWatchConfig(bucket, space, kind, owner, actor, lifecycleUid);
+    const name = String(config.name);
+    let existing: ConsumerInfo | undefined;
+    try {
+      existing = await bucket.jsm.consumers.info(bucket.stream, name);
+    } catch (err) {
+      if (!consumerMissing(err)) throw err;
+    }
+    if (existing) {
+      let canonical = false;
+      try {
+        assertAgentKvWatchConfig(existing.config, config);
+        canonical = true;
+      } catch { /* malformed/pre-cut: replace below */ }
+      // `push_bound` is the broker's current-interest signal for a push consumer. Pending or
+      // ack-pending state marks the initial provision→bind handoff (or work a live process has not
+      // settled yet), so retain it too. Only the fully-drained + unbound state can have lost the
+      // LastPerSubject snapshot across an ungraceful process exit.
+      if (canonical && (existing.push_bound === true || existing.num_pending > 0 || existing.num_ack_pending > 0))
+        continue;
+      await deleteNamedAgentKvWatchConsumer(bucket, name);
+    }
+    try {
+      await bucket.jsm.consumers.add(bucket.stream, config);
+    } catch (addError) {
+      // A concurrent exchange for this lifecycle may have won the same canonical create.
+      try {
+        const winner = await bucket.jsm.consumers.info(bucket.stream, name);
+        assertAgentKvWatchConfig(winner.config, config);
+      } catch {
+        throw addError;
+      }
+    }
+  }
+}
+
 export class CotalEndpoint extends EventEmitter {
   readonly card: AgentCard;
   readonly space: string;
@@ -347,6 +471,11 @@ export class CotalEndpoint extends EventEmitter {
   private jsm?: JetStreamManager;
   private kv?: KV;
   private channelKv?: KV;
+  /** Trusted-provisioned, lifecycle-pinned public-KV watchers for an authenticated agent. Their
+   *  stable names and fixed delivery rails let the broker grant only INFO/ACK/DELETE plus exact
+   *  subscribe; unlike generated ordered consumers, agents never receive CREATE or peer-delete. */
+  private presenceAgentWatch?: AgentKvWatch;
+  private channelAgentWatch?: AgentKvWatch;
   /** Plane-3 durable-membership registry KV — lazily opened by the privileged delivery daemon (or a
    *  short-lived provisioner). */
   private membersKv?: KV;
@@ -476,6 +605,8 @@ export class CotalEndpoint extends EventEmitter {
   readonly actorIsEphemeral: boolean;
   /** This incarnation's lifecycle UID (opts.lifecycleUid) — see {@link EndpointOptions.lifecycleUid}. */
   private readonly ownLifecycleUid?: string;
+  /** Explicit agent-profile watcher selection for non-agent presentation endpoints. */
+  private readonly lifecyclePinnedKvWatches: boolean;
   /** Per-endpoint-name {@link resolveService} cache for {@link invokeService} — dropped on a
    *  `failed-precondition` currency refusal (the described incarnation was superseded). */
   private readonly resolvedServices = new Map<string, ResolvedService>();
@@ -599,6 +730,7 @@ export class CotalEndpoint extends EventEmitter {
         : this.authed
           ? undefined
           : mintLifecycleUid();
+    this.lifecyclePinnedKvWatches = opts.lifecyclePinnedKvWatches === true;
     // `card.id` is the principal DOT-FORM `<owner>.<actor>` — the wire identity every `from.id` carries;
     // principalKey validates both tokens.
     const principal = principalKey(this.owner, this.actor);
@@ -1012,6 +1144,10 @@ export class CotalEndpoint extends EventEmitter {
       clearInterval(this.sweepTimer);
       this.sweepTimer = undefined;
     }
+    for (const watch of [this.presenceAgentWatch, this.channelAgentWatch]) {
+      try { watch?.iter?.stop(); } catch { /* already closed with the connection */ }
+      if (watch) watch.iter = undefined;
+    }
     for (const msgs of this.streamMsgs) {
       try {
         msgs.stop();
@@ -1030,10 +1166,15 @@ export class CotalEndpoint extends EventEmitter {
     this.chatSubs.clear();
     this.chatSubDenied.clear();
     this.confirmingChatSubs.clear();
-    this.roster.clear();
+    // Ack-explicit lifecycle watchers survive a transport rebuild. Keep their materialized current-
+    // state maps while the fresh connection rebinds; the durable then redelivers anything missed.
+    // A brand-new process starts empty after provisioning recreates LastPerSubject consumers.
+    if (!this.usesLifecyclePinnedAgentWatch()) this.roster.clear();
     this.joinSeq.clear();
-    this.channelConfigs.clear();
-    this.channelDefaults = {};
+    if (!this.usesLifecyclePinnedAgentWatch()) {
+      this.channelConfigs.clear();
+      this.channelDefaults = {};
+    }
     for (const watch of this.membershipFeedWatches)
       watch.arm = watch.arm.catch(() => {}).then(() => this.disarmMembershipWatch(watch));
   }
@@ -1194,6 +1335,7 @@ export class CotalEndpoint extends EventEmitter {
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     if (this.bearerTimer) clearTimeout(this.bearerTimer);
     if (this.credsTimer) clearTimeout(this.credsTimer);
+    let agentWatchCleanupError: unknown;
     for (const watch of this.membershipFeedWatches) {
       watch.stopped = true;
       watch.arm = watch.arm.catch(() => {}).then(async () => {
@@ -1220,6 +1362,14 @@ export class CotalEndpoint extends EventEmitter {
       }
     }
     try {
+      await Promise.all([
+        this.deleteAgentKvWatch(this.presenceAgentWatch),
+        this.deleteAgentKvWatch(this.channelAgentWatch),
+      ]);
+    } catch (err) {
+      agentWatchCleanupError = err;
+    }
+    try {
       if (this.doRegister) {
         this.status = "offline";
         await this.publishPresence();
@@ -1232,6 +1382,7 @@ export class CotalEndpoint extends EventEmitter {
     } catch {
       /* ignore */
     }
+    if (agentWatchCleanupError) throw agentWatchCleanupError;
   }
 
   // ---- messaging -----------------------------------------------------------
@@ -2686,6 +2837,25 @@ export class CotalEndpoint extends EventEmitter {
   async provisionDlvInbox(owner: string, actor: string, lifecycleUid: string): Promise<void> {
     const jsm = await this.manager();
     await jsm.consumers.add(dlvStream(this.space), dlvDurableConfig(this.space, owner, actor, lifecycleUid));
+  }
+
+  /** Privileged: replace this lifecycle's two public-KV watchers with canonical fixed-destination
+   * push consumers. Replacement is intentionally provisioning-time, before the agent connects: it
+   * gives a fresh process a LastPerSubject snapshot and removes any stale or malicious config under
+   * the lifecycle name. In-process reconnects only bind the retained ack-explicit consumers. */
+  async provisionAgentKvWatches(owner: string, actor: string, lifecycleUid: string): Promise<void> {
+    if (!this.nc) throw new Error("endpoint not started");
+    const kvm = new Kvm(this.nc);
+    const watches: [Bucket, "presence" | "channels"][] = [
+      [await kvm.open(presenceBucket(this.space)) as Bucket, "presence"],
+      [await kvm.open(channelBucket(this.space)) as Bucket, "channels"],
+    ];
+    for (const [bucket, kind] of watches) {
+      if (!(bucket instanceof Bucket)) throw new Error("agent KV watch provisioning needs the @nats-io/kv Bucket implementation");
+      const config = agentKvWatchConfig(bucket, this.space, kind, owner, actor, lifecycleUid);
+      await this.deleteNamedAgentKvWatch(bucket, String(config.name));
+      await bucket.jsm.consumers.add(bucket.stream, config);
+    }
   }
 
   /**
@@ -4322,10 +4492,91 @@ export class CotalEndpoint extends EventEmitter {
     await this.kv.put(this.card.id, JSON.stringify(record));
   }
 
+  private usesLifecyclePinnedAgentWatch(): boolean {
+    // Most callers declare the credential class through `kind: agent`. User-mode interactive
+    // callers are also minted through the agent profile but legitimately present as `endpoint`
+    // (for example the CLI's invisible transient roster observer), so their composition root opts
+    // in explicitly. Never infer from lifecycleUid alone: managers and other service endpoints
+    // have lifecycle UIDs but do not carry this agent-only DELETE authority. Deliberately do NOT
+    // test ownLifecycleUid here: selecting this path first lets startLifecyclePinnedAgentWatch's
+    // requireLifecycleUid fail loud instead of silently falling back to generated oc_* consumers.
+    return this.authed
+      && (this.card.kind === "agent" || this.lifecyclePinnedKvWatches);
+  }
+
+  /**
+   * Delete only one lifecycle-owned public-KV watcher. Trusted provisioning uses this before
+   * recreating a fresh LastPerSubject snapshot; graceful agent stop uses its exact-name grant.
+   * No generated consumer name or agent-side bucket-wide delete grant exists.
+   */
+  private async deleteNamedAgentKvWatch(bucket: Bucket, name: string): Promise<void> {
+    await deleteNamedAgentKvWatchConsumer(bucket, name);
+  }
+
+  private async deleteAgentKvWatch(watch: AgentKvWatch | undefined): Promise<void> {
+    if (!watch) return;
+    try { watch.iter?.stop(); } catch { /* already closed */ }
+    watch.iter = undefined;
+    if (!this.nc || this.nc.isClosed()) return;
+    await this.deleteNamedAgentKvWatch(watch.bucket, watch.name);
+  }
+
+  /**
+   * Bind one trusted-provisioned, lifecycle-owned push consumer for an authenticated agent's public
+   * KV watch. The stock `kv.watch()` cannot be used here: it generates `oc_<nuid>_<serial>` names,
+   * which forces a bucket-wide DELETE grant for reset/stop cleanup. The provisioner pins the
+   * consumer's delivery subject; the agent verifies the security-sensitive shape and receives only
+   * bind/ack/cleanup rights. Ack-explicit delivery plus retained current-state maps closes reconnect
+   * gaps.
+   */
+  private async startLifecyclePinnedAgentWatch(
+    bucket: KV,
+    kind: "presence" | "channels",
+    onEntry: (entry: KvWatchEntry) => void,
+    onHydrated?: () => void,
+  ): Promise<void> {
+    if (!(bucket instanceof Bucket)) throw new Error("agent KV watch needs the @nats-io/kv Bucket implementation");
+    const uid = this.requireLifecycleUid(`the authenticated ${kind} KV watch`);
+    const config = agentKvWatchConfig(bucket, this.space, kind, this.owner, this.actor, uid);
+    const name = String(config.name);
+    const provisioned = await bucket.jsm.consumers.info(bucket.stream, name);
+    assertAgentKvWatchConfig(provisioned.config, config);
+
+    const consumer = await bucket.js.consumers.getPushConsumer(bucket.stream, name);
+    const info = await consumer.info(true);
+    let pending = info.num_pending + info.num_ack_pending;
+    const state: AgentKvWatch = { bucket, stream: info.stream_name, name: info.name };
+    if (kind === "presence") this.presenceAgentWatch = state;
+    else this.channelAgentWatch = state;
+
+    const iter = await consumer.consume({ callback: (msg) => {
+      const isUpdate = pending === 0 || --pending === 0;
+      onEntry(bucket.jmToWatchEntry(msg, isUpdate));
+      msg.ack();
+    } });
+    state.iter = iter;
+    if (pending === 0) onHydrated?.();
+    void (async () => {
+      for await (const status of iter.status()) {
+        if (status.type !== "heartbeats_missed" || this.stopped || this.reconnecting) continue;
+        this.emit("error", new Error(`${kind} KV watcher missed JetStream heartbeats - reconnecting its endpoint to replay current state`));
+        void this.reconnect().catch((err) => this.emit("error", err as Error));
+        break;
+      }
+    })();
+  }
+
   private async startPresenceWatch(): Promise<void> {
     if (!this.kv) return;
     let hydrated!: () => void;
     this.presenceSnapshot = new Promise<void>((resolve) => { hydrated = resolve; });
+    if (this.usesLifecyclePinnedAgentWatch()) {
+      await this.startLifecyclePinnedAgentWatch(this.kv, "presence", (entry) => {
+        this.handleKvEntry(entry);
+        if (entry.isUpdate) hydrated();
+      }, hydrated);
+      return;
+    }
     const iter = await this.kv.watch();
     void (async () => {
       let ready = false;
@@ -4346,6 +4597,10 @@ export class CotalEndpoint extends EventEmitter {
    *  policy then falls back to the default), never a fault. */
   private async startChannelWatch(): Promise<void> {
     if (!this.channelKv) return;
+    if (this.usesLifecyclePinnedAgentWatch()) {
+      await this.startLifecyclePinnedAgentWatch(this.channelKv, "channels", (entry) => this.handleChannelEntry(entry));
+      return;
+    }
     const iter = await this.channelKv.watch();
     void (async () => {
       for await (const e of iter) this.handleChannelEntry(e);

@@ -101,6 +101,7 @@ const noop = {
   reissueAcl: async () => {},
   provisionDmInbox: async () => {},
   provisionDlvInbox: async () => {},
+  provisionAgentKvWatches: async () => {},
   provisionTaskQueue: async () => {},
 };
 

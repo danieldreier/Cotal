@@ -1,0 +1,88 @@
+{
+  "suite": "packages/core/smoke/agent-watch-cleanup-auth.smoke.ts",
+  "guard": "trusted provisioning fixes lifecycle-owned public-KV delivery rails; agents bind, ack, and clean up without CREATE or pull-delivery authority, and cannot relay own KV writes to a foreign inbox",
+  "command": "corepack pnpm --filter @cotal-ai/core build && PATH=/workspace/state/tools/nats-server-v2.12.12-b:$PATH corepack pnpm smoke:manager-split && PATH=/workspace/state/tools/nats-server-v2.12.12-b:$PATH corepack pnpm smoke:agent-watch-cleanup:auth",
+  "completionMarker": "MANAGER-SPLIT SMOKE",
+  "proveWith": "node scripts/mutation-proof.mjs --config packages/core/smoke/mutations/agent-watch-cleanup.json",
+  "why": [
+    "JetStream push deliver_subject and pull reply subjects are caller-selected destinations, so",
+    "even exact-name consumer CREATE/MSG.NEXT grants are publish-confused-deputy authority. The",
+    "ephemeral provisioner creates fixed-rail lifecycle consumers; the agent receives exact bind,",
+    "ack, subscribe, and cleanup only. The real-broker exploit cell proves permitted own-KV bytes",
+    "cannot be forwarded to a foreign private inbox, and the matrix pins every positive/negative row."
+  ],
+  "mutations": [
+    {
+      "name": "drop the agent presence-watch consumer cleanup grant",
+      "file": "packages/core/src/provision.ts",
+      "find": "    `$JS.API.CONSUMER.DELETE.${KV}.${presenceWatchD}`,\n    `$JS.ACK.${KV}.${presenceWatchD}.>`,",
+      "replace": "    `$JS.ACK.${KV}.${presenceWatchD}.>`,",
+      "expectRed": "delete OWN lifecycle-pinned presence watcher ALLOWED",
+      "cell": "delete OWN lifecycle-pinned presence watcher ALLOWED",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
+    },
+    {
+      "name": "drop the agent channel-registry-watch consumer cleanup grant",
+      "file": "packages/core/src/provision.ts",
+      "find": "    `$JS.API.CONSUMER.DELETE.${CHKV}.${channelWatchD}`,\n    `$JS.ACK.${CHKV}.${channelWatchD}.>`,",
+      "replace": "    `$JS.ACK.${CHKV}.${channelWatchD}.>`,",
+      "expectRed": "delete OWN lifecycle-pinned channel-registry watcher ALLOWED",
+      "cell": "delete OWN lifecycle-pinned channel-registry watcher ALLOWED",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
+    },
+    {
+      "name": "ignore explicit lifecycle-pinned watcher selection for a non-agent presentation endpoint",
+      "file": "packages/core/src/endpoint.ts",
+      "find": "      && (this.card.kind === \"agent\" || this.lifecyclePinnedKvWatches);",
+      "replace": "      && this.card.kind === \"agent\";",
+      "expectRed": "real endpoint starts both lifecycle-pinned public-KV watchers",
+      "cell": "real endpoint starts both lifecycle-pinned public-KV watchers",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
+    },
+    {
+      "name": "skip trusted provisioning of the public-KV watchers",
+      "file": "packages/core/src/provision.ts",
+      "find": "  await provisioner.provisionAgentKvWatches(pr.owner, pr.actor, uid);\n",
+      "replace": "",
+      "expectRed": "trusted provisioner pins the presence watcher delivery rail",
+      "cell": "trusted provisioner pins the presence watcher delivery rail",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
+    },
+    {
+      "name": "reintroduce exact-name agent watcher CREATE and remove its explicit create deny",
+      "file": "packages/core/src/provision.ts",
+      "find": "  return { pub: { allow: pubAllow, deny: pubDeny }, sub: { allow: [inbox, deliveryReplies, ...kvWatchDelivery, ...subChat, ...epSub] } };",
+      "replace": "  return { pub: { allow: [...pubAllow, `$JS.API.CONSUMER.CREATE.${KV}.${presenceWatchD}.>`], deny: pubDeny.filter((subject) => !subject.includes(`CONSUMER.CREATE.${KV}`) && !subject.includes(`CONSUMER.DURABLE.CREATE.${KV}`)) }, sub: { allow: [inbox, deliveryReplies, ...kvWatchDelivery, ...subChat, ...epSub] } };",
+      "expectRed": "CREATE OWN exact presence watcher DENIED (deliver_subject is body-controlled)",
+      "cell": "CREATE OWN exact presence watcher DENIED (deliver_subject is body-controlled)",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
+    },
+    {
+      "name": "replace the lifecycle-fixed push destination with an actor inbox",
+      "file": "packages/core/src/endpoint.ts",
+      "find": "  config.deliver_subject = agentKvWatchDeliverySubject(space, kind, owner, actor, lifecycleUid);",
+      "replace": "  config.deliver_subject = `_INBOX_${actor}.watcher`;",
+      "expectRed": "trusted provisioner pins the presence watcher delivery rail",
+      "cell": "trusted provisioner pins the presence watcher delivery rail",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
+    },
+    {
+      "name": "clear acknowledged public-KV state during an in-process reconnect",
+      "file": "packages/core/src/endpoint.ts",
+      "find": "    if (!this.usesLifecyclePinnedAgentWatch()) {\n      this.channelConfigs.clear();\n      this.channelDefaults = {};\n    }",
+      "replace": "    this.channelConfigs.clear();\n    this.channelDefaults = {};",
+      "expectRed": "acknowledged channel state remains materialized across reconnect",
+      "cell": "acknowledged channel state remains materialized across reconnect",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
+    },
+    {
+      "name": "drop acknowledgements from lifecycle public-KV watchers",
+      "file": "packages/core/src/endpoint.ts",
+      "find": "      msg.ack();\n",
+      "replace": "",
+      "expectRed": "channel watcher acknowledges the materialized update",
+      "cell": "channel watcher acknowledges the materialized update",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build"
+    }
+  ]
+}

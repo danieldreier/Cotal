@@ -106,9 +106,11 @@ const {
   CotalEndpoint, createSpaceAuth, isReachable, mintCreds, newIdentity, serverConfig,
   setupSpaceStreams, principalKey, registry, spaceWildcard, clearChannel, mintLifecycleUid, eventChannel,
   resolveService, invokeCommand, standaloneConnectOpts, EpEnvelopeError, epAuthBucket,
-  mintMembershipObserverCreds, observePlaneLivenessWithCreds,
+  mintMembershipObserverCreds, observePlaneLivenessWithCreds, agentKvWatchConsumerName,
+  presenceBucket, channelBucket, ensureAgentKvWatches,
 } = await import("@cotal-ai/core");
 const { connect: rawConnect } = await import("@nats-io/transport-node");
+const { jetstreamManager } = await import("@nats-io/jetstream");
 const { Kvm } = await import("@nats-io/kv");
 const { createHash } = await import("node:crypto");
 const { decodeJwt } = await import("jose");
@@ -194,6 +196,19 @@ const CHILD = [
   "function bearer(){return new Promise((res,rej)=>{cp.execFile(argv[0],argv.slice(1),{maxBuffer:1<<20,timeout:30000},(e,so,se)=>{if(e)return rej(new Error(((se||'').toString().trim())||e.message));const t=(so||'').toString().trim();t?res(t):rej(new Error('empty bearer'));});});}",
   "import(pathToFileURL(process.env.CORE_DIST).href).then(async(m)=>{",
   "const ep=new m.CotalEndpoint({space:process.env.COTAL_SPACE,servers:process.env.COTAL_SERVERS,bearer:bearer,sentinelCreds:sentinel,lifecycleUid:process.env.COTAL_LIFECYCLE_UID,channels:[],consume:false,registerPresence:true,watchPresence:false,card:{name:process.env.COTAL_NAME,owner:process.env.COTAL_OWNER,actor:process.env.COTAL_ACTOR,kind:'agent'}});",
+  "ep.on('error',()=>{});await ep.start();",
+  "setInterval(()=>{},1000);",
+  "}).catch((e)=>{console.error(e&&e.message||String(e));process.exit(1);});",
+].join("\n");
+
+// A real transient roster observer in its own process. The parent deliberately SIGKILLs it after
+// both lifecycle-pinned watchers have drained and acknowledged their LastPerSubject snapshots, then
+// performs another human exchange for the same long-lived CLI lifecycle. That is the production
+// cold-rebind boundary: no stop() cleanup runs, and no synthetic consumer state is injected.
+const TRANSIENT_WATCHER_CHILD = [
+  "const {pathToFileURL}=require('node:url');",
+  "import(pathToFileURL(process.env.CORE_DIST).href).then(async(m)=>{",
+  "const ep=new m.CotalEndpoint({space:process.env.COTAL_SPACE,servers:process.env.COTAL_SERVERS,bearer:process.env.COTAL_WATCH_BEARER,sentinelCreds:process.env.COTAL_WATCH_SENTINEL,lifecycleUid:process.env.COTAL_LIFECYCLE_UID,lifecyclePinnedKvWatches:true,channels:[],consume:false,registerPresence:false,watchPresence:true,watchChannels:true,ttlMs:60000,card:{name:'crash-observer',kind:'endpoint'}});",
   "ep.on('error',()=>{});await ep.start();",
   "setInterval(()=>{},1000);",
   "}).catch((e)=>{console.error(e&&e.message||String(e));process.exit(1);});",
@@ -371,6 +386,8 @@ let broker: ChildProcess | undefined;
 let authChild: ChildProcess | undefined;
 let managerStopped = false;
 let observer: InstanceType<typeof CotalEndpoint> | undefined;
+let crashedObserver: ChildProcess | undefined;
+let watchProbe: Awaited<ReturnType<typeof rawConnect>> | undefined;
 let shortEp: InstanceType<typeof CotalEndpoint> | undefined;
 const ctlEps: Array<InstanceType<typeof CotalEndpoint>> = []; // section O control callers, closed in finally
 try {
@@ -451,8 +468,39 @@ try {
   const alphaToken = readFileSync(incFiles("alpha").actorToken, "utf8").trim(); // capture for D + F
   // Witness the presence join on the OPERATOR's OWN user bearer (login → exchange → connect), watching the roster.
   const opCreds = await cotalAuthProvider.userCredentials({ store, dir, space: SPACE, actor: "cli" });
+  const opClaims = JSON.parse(Buffer.from(opCreds.bearer.split(".")[1], "base64url").toString("utf8")) as { act: { lifecycleUid: string } };
+  watchProbe = await rawConnect({
+    servers: SERVER,
+    ...standaloneConnectOpts({ creds: await mintCreds(auth, newIdentity(), "provisioner"), tls: false }),
+    maxReconnectAttempts: 0,
+  });
+  const watchJsm = await jetstreamManager(watchProbe);
+  let interactiveWatches = false;
+  let watchCreated: string[] = [];
+  try {
+    const uid = opClaims.act.lifecycleUid;
+    const infos = await Promise.all([
+      watchJsm.consumers.info(`KV_${presenceBucket(SPACE)}`, agentKvWatchConsumerName("presence", OWNER, "cli", uid)),
+      watchJsm.consumers.info(`KV_${channelBucket(SPACE)}`, agentKvWatchConsumerName("channels", OWNER, "cli", uid)),
+    ]);
+    watchCreated = infos.map((info) => info.created);
+    interactiveWatches = true;
+  } catch { /* the named check below owns the failure */ }
+  check("human exchange pre-provisions both lifecycle-pinned CLI public-KV watchers", interactiveWatches);
+  // Keep the rest of this broad lifecycle smoke discriminating when the mutation above removes the
+  // auth-service ensure: record the named red, then repair only the fixture so later cells still run.
+  if (!interactiveWatches) {
+    await ensureAgentKvWatches(watchProbe, SPACE, OWNER, "cli", opClaims.act.lifecycleUid);
+    const infos = await Promise.all([
+      watchJsm.consumers.info(`KV_${presenceBucket(SPACE)}`, agentKvWatchConsumerName("presence", OWNER, "cli", opClaims.act.lifecycleUid)),
+      watchJsm.consumers.info(`KV_${channelBucket(SPACE)}`, agentKvWatchConsumerName("channels", OWNER, "cli", opClaims.act.lifecycleUid)),
+    ]);
+    watchCreated = infos.map((info) => info.created);
+  }
   observer = new CotalEndpoint({
     space: SPACE, servers: SERVER, bearer: opCreds.bearer, sentinelCreds: opCreds.sentinelCreds,
+    lifecycleUid: opClaims.act.lifecycleUid,
+    lifecyclePinnedKvWatches: true,
     channels: [], consume: false, registerPresence: false, watchPresence: true,
     card: { name: "observer", kind: "endpoint" },
   });
@@ -460,6 +508,101 @@ try {
   await observer.start();
   const seen = await until(() => observer!.getRoster().some((p) => p.card.id === alphaPrincipal && p.card.name === "alpha"));
   check("observer (operator user bearer) sees alpha join as the owner.actor principal", seen, observer.getRoster().map((p) => p.card.id));
+  await cotalAuthProvider.userCredentials({ store, dir, space: SPACE, actor: "cli" });
+  const uid = opClaims.act.lifecycleUid;
+  const watchCreatedAfterRenewal = await Promise.all([
+    watchJsm.consumers.info(`KV_${presenceBucket(SPACE)}`, agentKvWatchConsumerName("presence", OWNER, "cli", uid)),
+    watchJsm.consumers.info(`KV_${channelBucket(SPACE)}`, agentKvWatchConsumerName("channels", OWNER, "cli", uid)),
+  ]).then((infos) => infos.map((info) => info.created));
+  check("a second human exchange retains both live watcher consumers instead of resetting them",
+    watchCreated.length === 2 && JSON.stringify(watchCreatedAfterRenewal) === JSON.stringify(watchCreated),
+    { before: watchCreated, after: watchCreatedAfterRenewal });
+
+  // A graceful stop removes the first observer's consumers. Recreate them through the real human
+  // exchange, let an isolated transient process fully ACK a stable roster row, then kill it without
+  // stop(). The next exchange must distinguish this abandoned canonical consumer from the live
+  // consumer above and recreate LastPerSubject state for the next command.
+  await observer.stop();
+  observer = undefined;
+  const coldPrincipal = principalKey(OWNER, "coldrebind").key;
+  const coldIdentity = newIdentity();
+  const coldCreds = await mintCreds(auth, coldIdentity, "agent", {
+    principal: { owner: OWNER, actor: "coldrebind" },
+    lifecycleUid: mintLifecycleUid(),
+    subscribe: [], allowSubscribe: [], allowPublish: [], durableMembership: false,
+  });
+  const coldNc = await rawConnect({
+    servers: SERVER,
+    ...standaloneConnectOpts({ creds: coldCreds, tls: false }),
+    maxReconnectAttempts: 0,
+  });
+  const presenceKv = await new Kvm(coldNc).open(presenceBucket(SPACE));
+  await presenceKv.put(coldPrincipal, JSON.stringify({
+    card: { id: coldPrincipal, owner: OWNER, actor: "coldrebind", name: "cold-rebind-proof", kind: "agent" },
+    status: "idle",
+    ts: Date.now(),
+  }));
+  await coldNc.drain();
+  const crashCreds = await cotalAuthProvider.userCredentials({ store, dir, space: SPACE, actor: "cli" });
+  // The first mutation deliberately removes auth-service provisioning. Its named red was recorded
+  // above; repair the fixture again after the graceful stop so the independent live-retain and
+  // abandoned-rebind assertions still run to the suite's terminal marker.
+  if (!interactiveWatches)
+    await ensureAgentKvWatches(watchProbe, SPACE, OWNER, "cli", uid);
+  crashedObserver = spawn(process.execPath, ["-e", TRANSIENT_WATCHER_CHILD], {
+    env: {
+      ...launchEnv(),
+      CORE_DIST: coreDist,
+      COTAL_SPACE: SPACE,
+      COTAL_SERVERS: SERVER,
+      COTAL_LIFECYCLE_UID: uid,
+      COTAL_WATCH_BEARER: crashCreds.bearer,
+      COTAL_WATCH_SENTINEL: crashCreds.sentinelCreds,
+    },
+    stdio: "ignore",
+  });
+  const watchInfos = async () => Promise.all([
+    watchJsm.consumers.info(`KV_${presenceBucket(SPACE)}`, agentKvWatchConsumerName("presence", OWNER, "cli", uid)),
+    watchJsm.consumers.info(`KV_${channelBucket(SPACE)}`, agentKvWatchConsumerName("channels", OWNER, "cli", uid)),
+  ]);
+  let crashDrained = false;
+  for (let attempt = 0; attempt < 80 && !crashDrained; attempt++) {
+    const infos = await watchInfos();
+    crashDrained = infos.every((info) => info.push_bound === true && info.num_pending === 0 && info.num_ack_pending === 0);
+    if (!crashDrained) await wait(50);
+  }
+  check("the doomed transient observer binds and acknowledges both watcher snapshots", crashDrained);
+  await killPid(crashedObserver.pid);
+  crashedObserver = undefined;
+  let crashDetached = false;
+  let detachedInfos = await watchInfos();
+  for (let attempt = 0; attempt < 160 && !crashDetached; attempt++) {
+    detachedInfos = await watchInfos();
+    crashDetached = detachedInfos.every((info) => info.push_bound !== true && info.num_pending === 0 && info.num_ack_pending === 0);
+    if (!crashDetached) await wait(50);
+  }
+  check("SIGKILL leaves both acknowledged canonical watchers unbound", crashDetached,
+    detachedInfos.map((info) => ({ name: info.name, pushBound: info.push_bound, pending: info.num_pending, ackPending: info.num_ack_pending })));
+  const createdBeforeColdRebind = (await watchInfos()).map((info) => info.created);
+  const reboundCreds = await cotalAuthProvider.userCredentials({ store, dir, space: SPACE, actor: "cli" });
+  const createdAfterColdRebind = (await watchInfos()).map((info) => info.created);
+  check("a human exchange replaces both abandoned watcher snapshots before cold rebind",
+    createdBeforeColdRebind.length === 2
+      && createdAfterColdRebind.every((created, index) => created !== createdBeforeColdRebind[index]),
+    { before: createdBeforeColdRebind, after: createdAfterColdRebind });
+  observer = new CotalEndpoint({
+    space: SPACE, servers: SERVER, bearer: reboundCreds.bearer, sentinelCreds: reboundCreds.sentinelCreds,
+    lifecycleUid: uid, lifecyclePinnedKvWatches: true, ttlMs: 60_000,
+    channels: [], consume: false, registerPresence: false, watchPresence: true, watchChannels: true,
+    card: { name: "cold-rebind-observer", kind: "endpoint" },
+  });
+  observer.on("error", () => {});
+  await observer.start();
+  const coldReplayed = await until(() => observer!.getRoster().some((p) => p.card.id === coldPrincipal), 1500);
+  check("a cold transient rebind replays the acknowledged LastPerSubject roster snapshot", coldReplayed,
+    observer.getRoster().map((p) => p.card.id));
+  await watchProbe.drain();
+  watchProbe = undefined;
   // `mesh !== "absent"` accepted ANY other string, so a row carrying a value no roster can produce
   // read as live. The reach is a cast through `unknown`, which severs the local view from the real
   // return type, so no width declared above can catch that: the closed set has to be asserted here.
@@ -1372,6 +1515,8 @@ try {
   process.exitCode = 1;
 } finally {
   try { await observer?.stop(); } catch { /* */ }
+  try { await killPid(crashedObserver?.pid); } catch { /* */ }
+  try { await watchProbe?.drain(); } catch { /* */ }
   try { await shortEp?.stop(); } catch { /* */ }
   for (const e of ctlEps) { try { await e.stop(); } catch { /* */ } }
   if (manager && !managerStopped) await manager.stop().catch(() => {});
