@@ -1,6 +1,6 @@
 {
   "suite": "implementations/auth/smoke/user-spawn.smoke.ts",
-  "guard": "a human bearer is released only after its lifecycle-pinned public-KV watchers exist, and repeated exchanges retain canonical live consumers",
+  "guard": "a human bearer is released only after its lifecycle-pinned public-KV watchers exist; repeated exchanges retain bound or undrained consumers, while a fully-drained unbound consumer is replaced for cold replay",
   "command": "corepack pnpm --filter @cotal-ai/core build && corepack pnpm --filter @cotal-ai/auth build && PATH=/workspace/state/tools/nats-server-v2.12.12-b:$PATH corepack pnpm smoke:user-spawn:live",
   "progressPattern": "^  [✓✗]",
   "minTicks": 8,
@@ -10,7 +10,8 @@
     "Interactive CLI bearers use the agent profile's lifecycle-pinned public-KV watch rails even",
     "though their presentation card is an endpoint. The auth service must therefore use its",
     "ephemeral trusted provisioner before releasing the bearer, while preserving an already-safe",
-    "consumer so overlapping commands and bearer refreshes do not reset a live observer."
+    "bound or undrained consumer so overlapping commands and bearer refreshes do not reset a live",
+    "observer, but must replace an unbound fully-acknowledged consumer left by an ungraceful exit."
   ],
   "mutations": [
     {
@@ -25,10 +26,19 @@
     {
       "name": "reset a canonical live watcher on every bearer exchange",
       "file": "packages/core/src/endpoint.ts",
-      "find": "        assertAgentKvWatchConfig(existing.config, config);\n        continue;",
-      "replace": "        assertAgentKvWatchConfig(existing.config, config);\n        await deleteNamedAgentKvWatchConsumer(bucket, name);",
+      "find": "      if (canonical && (existing.push_bound === true || existing.num_pending > 0 || existing.num_ack_pending > 0))\n        continue;",
+      "replace": "      if (canonical && (existing.num_pending > 0 || existing.num_ack_pending > 0))\n        continue;",
       "expectRed": "✗ FAIL: a second human exchange retains both live watcher consumers instead of resetting them",
       "cell": "a second human exchange retains both live watcher consumers instead of resetting them",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build && corepack pnpm --filter @cotal-ai/auth build"
+    },
+    {
+      "name": "retain an abandoned fully-acknowledged watcher instead of restoring its LastPerSubject snapshot",
+      "file": "packages/core/src/endpoint.ts",
+      "find": "      if (canonical && (existing.push_bound === true || existing.num_pending > 0 || existing.num_ack_pending > 0))\n        continue;",
+      "replace": "      if (canonical)\n        continue;",
+      "expectRed": "✗ FAIL: a human exchange replaces both abandoned watcher snapshots before cold rebind",
+      "cell": "a human exchange replaces both abandoned watcher snapshots before cold rebind",
       "afterRestore": "corepack pnpm --filter @cotal-ai/core build && corepack pnpm --filter @cotal-ai/auth build"
     }
   ]

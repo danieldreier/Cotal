@@ -378,9 +378,11 @@ async function deleteNamedAgentKvWatchConsumer(bucket: Bucket, name: string): Pr
 }
 
 /** Ensure an interactive user actor's two lifecycle-owned public-KV watchers exist before its
- * bearer is released. A canonical existing consumer is retained so concurrent/renewed operator
- * connections do not reset one another's snapshot; a pre-cut or malformed consumer under the
- * lifecycle name is replaced by the trusted provisioner. */
+ * bearer is released. A canonical bound consumer is retained for a live operator connection, and
+ * an unbound consumer whose snapshot is still pending is retained across the short provision→bind
+ * handoff. An unbound, fully-acknowledged consumer belongs to an abandoned process and is replaced
+ * so the next process receives a fresh LastPerSubject snapshot. Pre-cut or malformed consumers are
+ * also replaced by the trusted provisioner. */
 export async function ensureAgentKvWatches(
   nc: NatsConnection,
   space: string,
@@ -404,12 +406,18 @@ export async function ensureAgentKvWatches(
       if (!consumerMissing(err)) throw err;
     }
     if (existing) {
+      let canonical = false;
       try {
         assertAgentKvWatchConfig(existing.config, config);
+        canonical = true;
+      } catch { /* malformed/pre-cut: replace below */ }
+      // `push_bound` is the broker's current-interest signal for a push consumer. Pending or
+      // ack-pending state marks the initial provision→bind handoff (or work a live process has not
+      // settled yet), so retain it too. Only the fully-drained + unbound state can have lost the
+      // LastPerSubject snapshot across an ungraceful process exit.
+      if (canonical && (existing.push_bound === true || existing.num_pending > 0 || existing.num_ack_pending > 0))
         continue;
-      } catch {
-        await deleteNamedAgentKvWatchConsumer(bucket, name);
-      }
+      await deleteNamedAgentKvWatchConsumer(bucket, name);
     }
     try {
       await bucket.jsm.consumers.add(bucket.stream, config);

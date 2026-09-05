@@ -66,8 +66,10 @@ normative shapes are [SPEC Appendix B](../SPEC.md#appendix-b-profile-acls); in b
 
 Interactive user actors also receive the `agent` profile. Before the auth service releases one of
 their bearers, it uses a short-lived trusted provisioner to ensure the lifecycle-pinned presence and
-channel watchers exist with their fixed delivery rails. A canonical existing watcher is retained,
-so overlapping CLI commands and bearer refreshes do not reset one another's live observer.
+channel watchers exist with their fixed delivery rails. A canonical bound or not-yet-drained watcher
+is retained, so overlapping CLI commands and bearer refreshes do not reset one another's live
+observer. A fully acknowledged watcher left unbound by an ungraceful exit is replaced before the
+next bearer is returned, giving the next process a fresh current-state snapshot.
 
 **An agent's channel scope is three verbs**: `subscribe` (reads at boot),
 `allowSubscribe` (read ACL), `allowPublish` (post ACL, default-deny), declared in its
