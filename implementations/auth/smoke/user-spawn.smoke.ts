@@ -544,6 +544,11 @@ try {
   }));
   await coldNc.drain();
   const crashCreds = await cotalAuthProvider.userCredentials({ store, dir, space: SPACE, actor: "cli" });
+  // The first mutation deliberately removes auth-service provisioning. Its named red was recorded
+  // above; repair the fixture again after the graceful stop so the independent live-retain and
+  // abandoned-rebind assertions still run to the suite's terminal marker.
+  if (!interactiveWatches)
+    await ensureAgentKvWatches(watchProbe, SPACE, OWNER, "cli", uid);
   crashedObserver = spawn(process.execPath, ["-e", TRANSIENT_WATCHER_CHILD], {
     env: {
       ...launchEnv(),
