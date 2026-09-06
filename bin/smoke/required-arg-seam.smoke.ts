@@ -278,7 +278,9 @@ const SEAMS: Seam[] = [
   // connections so the stale-lease and successor paths share the same bounded fixture.
   // 104/77 -> 106/79: the user-auth cold-rebind smoke opens two explicit plaintext-broker
   // connections, both with tls: false.
-  { fn: "standaloneConnectOpts", key: "tls", sites: 106, untypecheckedSites: 79 },
+  // 106/79 -> 107/80: the deterministic post-crash pending-traffic regression opens one more
+  // explicit plaintext-broker connection, also with tls: false.
+  { fn: "standaloneConnectOpts", key: "tls", sites: 107, untypecheckedSites: 80 },
 ];
 
 /**
