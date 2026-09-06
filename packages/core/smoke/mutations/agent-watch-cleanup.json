@@ -60,7 +60,7 @@
     {
       "name": "replace the lifecycle-fixed push destination with an actor inbox",
       "file": "packages/core/src/endpoint.ts",
-      "find": "  config.deliver_subject = agentKvWatchDeliverySubject(space, kind, owner, actor, lifecycleUid);",
+      "find": "  config.deliver_subject = agentKvWatchDeliverySubject(space, kind, owner, actor, watchUid);",
       "replace": "  config.deliver_subject = `_INBOX_${actor}.watcher`;",
       "expectRed": "trusted provisioner pins the presence watcher delivery rail",
       "cell": "trusted provisioner pins the presence watcher delivery rail",
