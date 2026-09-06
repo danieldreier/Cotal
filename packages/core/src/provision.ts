@@ -691,6 +691,11 @@ export interface MintPrincipal {
    *  dm/dlv/chathist grants are lifecycle-keyed EXACT names, so a credential cannot name another
    *  incarnation's resources. Other profiles ignore it. */
   lifecycleUid?: string;
+  /** Optional per-connection public-KV watcher UID. User-auth callout connections derive this
+   * from their validated client inbox nonce so overlapping processes never share deletion
+   * authority or one LastPerSubject snapshot. Static/dev mints omit it and keep lifecycle-owned
+   * watchers because their provisioned connection identity is already fixed. */
+  kvWatchUid?: string;
 }
 
 /** Resolve a {@link MintPrincipal} for the STATIC/dev mint path from an {@link Identity} + optional
@@ -1094,8 +1099,11 @@ export function permissionsFor(
   const uid = assertLifecycleToken(pr.lifecycleUid);
   const chatHistD = chatHistDurable(pr.owner, pr.actor, uid), dmD = dmDurable(pr.owner, pr.actor, uid);
   const DLV = dlvStream(space), dlvD = dlvDurable(pr.owner, pr.actor, uid); // Plane-3 per-member delivery (bind-only)
-  const presenceWatchD = agentKvWatchConsumerName("presence", pr.owner, pr.actor, uid);
-  const channelWatchD = agentKvWatchConsumerName("channels", pr.owner, pr.actor, uid);
+  const watchUid = pr.kvWatchUid !== undefined
+    ? assertLifecycleToken(pr.kvWatchUid, "agent KV watcher uid")
+    : uid;
+  const presenceWatchD = agentKvWatchConsumerName("presence", pr.owner, pr.actor, watchUid);
+  const channelWatchD = agentKvWatchConsumerName("channels", pr.owner, pr.actor, watchUid);
   const svcD = opts.role ? taskDurable(opts.role) : undefined;
   const pubAllow = [
     // peer publish — owner+actor identity + channel scope, built from the real builders. Default-deny:
@@ -1271,8 +1279,8 @@ export function permissionsFor(
   // Manager control replies ride the v0.4 ep reply rail (in `epSub`, keyed on the caller triple) —
   // the `ctl.<tier>.<id>.reply.>` subtrees are gone with the ctl rail (1d).
   const kvWatchDelivery = [
-    agentKvWatchDeliverySubject(space, "presence", pr.owner, pr.actor, uid),
-    agentKvWatchDeliverySubject(space, "channels", pr.owner, pr.actor, uid),
+    agentKvWatchDeliverySubject(space, "presence", pr.owner, pr.actor, watchUid),
+    agentKvWatchDeliverySubject(space, "channels", pr.owner, pr.actor, watchUid),
   ];
   return { pub: { allow: pubAllow, deny: pubDeny }, sub: { allow: [inbox, deliveryReplies, ...kvWatchDelivery, ...subChat, ...epSub] } };
 }

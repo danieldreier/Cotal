@@ -14,7 +14,7 @@
  * Presence lives in a JetStream KV bucket, not a subject (see presenceBucket()).
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 const ILLEGAL = /[^A-Za-z0-9_-]/g;
 
@@ -202,6 +202,21 @@ export function mintLifecycleUid(): string {
   return assertLifecycleToken(BigInt(`0x${randomBytes(20).toString("hex")}`).toString(36).padStart(26, "0"));
 }
 
+/** Derive the bounded watcher-instance UID for one user-auth broker connection. The callout and
+ * endpoint both know the client-chosen, grammar-checked inbox nonce before the connection is
+ * admitted; hashing it keeps consumer/resource names bounded while preserving a one-to-one
+ * connection ownership boundary. This is deliberately NOT a lifecycle UID even though it uses the
+ * same safe alphabet/width accepted by the existing watcher-name builders. */
+export function agentKvWatchConnectionUid(connId: string): string {
+  return assertLifecycleToken(
+    createHash("sha256")
+      .update(`cotal-agent-kv-watch\0${assertInboxConnId(connId)}`)
+      .digest("hex")
+      .slice(0, 32),
+    "agent KV watcher connection uid",
+  );
+}
+
 /** The lifecycle-scoped JetStream-name form `<owner>-<actor>-<lifecycleUid>` (SPEC §13.1 "the UID is
  *  part of the resource NAME"). Injective: owner/actor tokens ban `-` (see {@link principalKey}), the
  *  UID is `[a-z0-9]` (dash-free), and `-` is the sole separator. */
@@ -209,11 +224,11 @@ export function lifecycleNameKey(owner: string, actor: string, lifecycleUid: str
   return `${principalKey(owner, actor).name}-${assertLifecycleToken(lifecycleUid)}`;
 }
 
-/** Exact lifecycle-owned name for an agent's public KV watcher. Unlike nats.js's generated
+/** Exact trusted-instance name for an agent's public KV watcher. Unlike nats.js's generated
  * `oc_<nuid>_<serial>` ordered-consumer names, this stable name is known when the credential is
- * minted, so CREATE/INFO/DELETE can be broker-pinned to one incarnation without granting an agent
- * availability authority over a peer's watcher. The kind byte keeps the presence and channel
- * registry consumers distinct while the lifecycle key keeps successors distinct. */
+ * minted, so CREATE/INFO/DELETE can be broker-pinned without granting an agent availability
+ * authority over a peer's watcher. Static/dev callers pass their lifecycle UID; user-auth callers
+ * pass the bounded connection UID derived from their validated inbox nonce. */
 export function agentKvWatchConsumerName(
   kind: "presence" | "channels",
   owner: string,
@@ -223,10 +238,10 @@ export function agentKvWatchConsumerName(
   return `kvw-${kind === "presence" ? "p" : "c"}-${lifecycleNameKey(owner, actor, lifecycleUid)}`;
 }
 
-/** Fixed, lifecycle-owned delivery rail for a trusted-provisioned public-KV watcher. JetStream
+/** Fixed, instance-owned delivery rail for a trusted-provisioned public-KV watcher. JetStream
  * push delivery is a confused-deputy boundary: `deliver_subject` comes from the consumer-create
  * request body and broker delivery bypasses the creator's publish permissions. Naming the rail
- * from the same principal + lifecycle tuple as the consumer lets the provisioner pin it before
+ * from the same principal + watcher-instance tuple as the consumer lets the provisioner pin it before
  * the untrusted agent connects; the agent receives only an exact subscribe grant for this rail. */
 export function agentKvWatchDeliverySubject(
   space: string,

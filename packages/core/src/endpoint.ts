@@ -128,6 +128,7 @@ import {
   assertLifecycleToken,
   mintLifecycleUid,
   lifecycleNameKey,
+  agentKvWatchConnectionUid,
   agentKvWatchConsumerName,
   agentKvWatchDeliverySubject,
   DEV_OWNER,
@@ -222,8 +223,8 @@ export interface EndpointOptions {
   watchChannels?: boolean;
   /** Create inbound stream consumers (DM / chat / anycast). Default true; a pure observer sets false. */
   consume?: boolean;
-  /** Use lifecycle-pinned public-KV watcher names even when this endpoint's presentation kind is
-   *  not `agent`. Set only for a lifecycle-bound agent-profile credential (for example the
+  /** Use trusted-pinned public-KV watcher names even when this endpoint's presentation kind is
+   *  not `agent`. Set only for an agent-profile credential (for example the
    *  user-mode CLI's invisible transient observer); service credentials such as manager/delivery
    *  do not carry these exact CREATE/INFO/DELETE rows. `card.kind: "agent"` enables this
    *  automatically. */
@@ -335,13 +336,13 @@ function agentKvWatchConfig(
   kind: "presence" | "channels",
   owner: string,
   actor: string,
-  lifecycleUid: string,
+  watchUid: string,
 ): ConsumerConfig {
-  const name = agentKvWatchConsumerName(kind, owner, actor, lifecycleUid);
+  const name = agentKvWatchConsumerName(kind, owner, actor, watchUid);
   const config = bucket._buildCC(">", KvWatchInclude.LastValue, { headers_only: false }) as ConsumerConfig;
   config.name = name;
   config.durable_name = name;
-  config.deliver_subject = agentKvWatchDeliverySubject(space, kind, owner, actor, lifecycleUid);
+  config.deliver_subject = agentKvWatchDeliverySubject(space, kind, owner, actor, watchUid);
   config.ack_policy = AckPolicy.Explicit;
   config.ack_wait = nanos(250);
   // Provisioning necessarily precedes the agent subscription. Redeliver an initial snapshot missed
@@ -377,19 +378,17 @@ async function deleteNamedAgentKvWatchConsumer(bucket: Bucket, name: string): Pr
   }
 }
 
-/** Ensure an interactive user actor's two lifecycle-owned public-KV watchers exist before its
- * bearer is released. A canonical push-bound consumer is retained for a live operator connection.
- * Every unbound consumer is stale or ambiguous and is replaced so the next process receives a
- * fresh LastPerSubject snapshot; pending counts cannot distinguish the initial provision→bind
- * handoff from ordinary traffic that arrived after a bound process crashed. The auth service
- * coalesces simultaneous ensures for one lifecycle, and the fixed name/rail lets a pending client
- * bind the replacement. Pre-cut or malformed consumers are also replaced by the provisioner. */
+/** Ensure one trusted watcher's two fixed-rail public-KV consumers exist before its connection is
+ * admitted. A canonical push-bound consumer is retained for a reconnect already in flight; every
+ * unbound, pre-cut, or malformed consumer at that same watcher UID is replaced so the process gets
+ * a fresh LastPerSubject snapshot. User-auth callers supply a connection-derived UID, so separate
+ * live processes never share this ownership decision. */
 export async function ensureAgentKvWatches(
   nc: NatsConnection,
   space: string,
   owner: string,
   actor: string,
-  lifecycleUid: string,
+  watchUid: string,
 ): Promise<void> {
   const kvm = new Kvm(nc);
   const watches: [Bucket, "presence" | "channels"][] = [
@@ -398,7 +397,7 @@ export async function ensureAgentKvWatches(
   ];
   for (const [bucket, kind] of watches) {
     if (!(bucket instanceof Bucket)) throw new Error("agent KV watch provisioning needs the @nats-io/kv Bucket implementation");
-    const config = agentKvWatchConfig(bucket, space, kind, owner, actor, lifecycleUid);
+    const config = agentKvWatchConfig(bucket, space, kind, owner, actor, watchUid);
     const name = String(config.name);
     let existing: ConsumerInfo | undefined;
     try {
@@ -471,7 +470,7 @@ export class CotalEndpoint extends EventEmitter {
   private jsm?: JetStreamManager;
   private kv?: KV;
   private channelKv?: KV;
-  /** Trusted-provisioned, lifecycle-pinned public-KV watchers for an authenticated agent. Their
+  /** Trusted-provisioned, instance-pinned public-KV watchers for an authenticated agent. Their
    *  stable names and fixed delivery rails let the broker grant only INFO/ACK/DELETE plus exact
    *  subscribe; unlike generated ordered consumers, agents never receive CREATE or peer-delete. */
   private presenceAgentWatch?: AgentKvWatch;
@@ -4505,8 +4504,8 @@ export class CotalEndpoint extends EventEmitter {
   }
 
   /**
-   * Delete only one lifecycle-owned public-KV watcher. Trusted provisioning uses this before
-   * recreating a fresh LastPerSubject snapshot; graceful agent stop uses its exact-name grant.
+   * Delete only one instance-owned public-KV watcher. Trusted provisioning uses this before
+   * recreating a fresh LastPerSubject snapshot; graceful endpoint stop uses its exact-name grant.
    * No generated consumer name or agent-side bucket-wide delete grant exists.
    */
   private async deleteNamedAgentKvWatch(bucket: Bucket, name: string): Promise<void> {
@@ -4522,7 +4521,7 @@ export class CotalEndpoint extends EventEmitter {
   }
 
   /**
-   * Bind one trusted-provisioned, lifecycle-owned push consumer for an authenticated agent's public
+   * Bind one trusted-provisioned, instance-owned push consumer for an authenticated agent's public
    * KV watch. The stock `kv.watch()` cannot be used here: it generates `oc_<nuid>_<serial>` names,
    * which forces a bucket-wide DELETE grant for reset/stop cleanup. The provisioner pins the
    * consumer's delivery subject; the agent verifies the security-sensitive shape and receives only
@@ -4536,8 +4535,12 @@ export class CotalEndpoint extends EventEmitter {
     onHydrated?: () => void,
   ): Promise<void> {
     if (!(bucket instanceof Bucket)) throw new Error("agent KV watch needs the @nats-io/kv Bucket implementation");
-    const uid = this.requireLifecycleUid(`the authenticated ${kind} KV watch`);
-    const config = agentKvWatchConfig(bucket, this.space, kind, this.owner, this.actor, uid);
+    const lifecycleUid = this.requireLifecycleUid(`the authenticated ${kind} KV watch`);
+    // A user-auth callout provisions watcher resources per broker connection, from the exact same
+    // validated inbox nonce the endpoint supplied as its connection name. Static/dev credentials
+    // retain their pre-provisioned lifecycle-owned watcher names.
+    const watchUid = this.userMode ? agentKvWatchConnectionUid(this.connId) : lifecycleUid;
+    const config = agentKvWatchConfig(bucket, this.space, kind, this.owner, this.actor, watchUid);
     const name = String(config.name);
     const provisioned = await bucket.jsm.consumers.info(bucket.stream, name);
     assertAgentKvWatchConfig(provisioned.config, config);

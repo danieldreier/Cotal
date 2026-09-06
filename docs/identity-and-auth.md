@@ -64,14 +64,15 @@ normative shapes are [SPEC Appendix B](../SPEC.md#appendix-b-profile-acls); in b
 | **admin** | Elevated *read-only* god-view: sees DMs and anycast live, still writes nothing. A deliberate opt-in (`cotal web`). |
 | operator-side | Narrow single-purpose creds for the machinery (supervising, provisioning, teardown, delivery); the reference implementation splits these so no one connection can read every DM *and* delete every stream ([security model](security.md)). |
 
-Interactive user actors also receive the `agent` profile. Before the auth service releases one of
-their bearers, it uses a short-lived trusted provisioner to ensure the lifecycle-pinned presence and
-channel watchers exist with their fixed delivery rails. Only a canonical push-bound watcher is
-retained, so overlapping CLI commands and bearer refreshes do not reset a live observer. Every
-unbound watcher is replaced before the next bearer is returned: a pending count may be ordinary
-traffic received after an ungraceful exit, not proof of a live handoff. Simultaneous exchanges for
-one lifecycle are coalesced, and the fixed name and rail let a pending client bind the replacement
-and receive a fresh current-state snapshot.
+Interactive user actors also receive the `agent` profile. Their bearer exchange proves the actor and
+lifecycle, but the watcher pair is created at the later broker-auth callout, when the concrete
+connection's validated inbox nonce is known. The auth service derives a bounded watcher UID from
+that nonce and uses a short-lived trusted provisioner to create fixed delivery rails before releasing
+the broker JWT. Each overlapping command therefore owns a distinct LastPerSubject snapshot and exact
+INFO/ACK/DELETE authority; stopping one cannot delete another's watchers. A graceful stop deletes its
+own pair, while a crashed pair expires through its inactivity threshold and a cold process receives a
+fresh connection-owned snapshot. Static/dev agents, whose provisioned connection identity is fixed,
+continue to use lifecycle-owned watcher pairs.
 
 **An agent's channel scope is three verbs**: `subscribe` (reads at boot),
 `allowSubscribe` (read ACL), `allowPublish` (post ACL, default-deny), declared in its

@@ -5,11 +5,12 @@
 ---
 
 Replace authenticated agents' generated public-KV watch consumers with trusted-provisioned,
-lifecycle-owned consumers whose push destinations are fixed before the agent connects. Agent
+instance-owned consumers whose push destinations are fixed before the agent connects. Agent
 credentials can bind, acknowledge, and delete only those exact presence and channel watchers; they
 cannot use consumer create or pull replies to relay permitted KV bytes onto a foreign private inbox.
-The user-auth service ensures the interactive CLI actor's fixed watchers before releasing a bearer
-and preserves canonical push-bound consumers across overlapping commands and bearer refreshes. It
-replaces every unbound consumer because post-crash traffic can make an abandoned watcher pending;
-simultaneous lifecycle ensures are coalesced, and the fixed name and rail let the next CLI process
-bind the replacement and receive a fresh current-state snapshot.
+For user-auth clients, the auth callout derives a distinct watcher UID from each validated connection
+nonce and provisions that fixed-rail pair before releasing the broker JWT. Overlapping commands
+therefore bind independent LastPerSubject snapshots, and a predecessor can delete only its own pair
+on graceful stop. A crashed connection's pair expires by inactivity while a cold rebind receives a
+fresh pair, even when ordinary traffic is pending on the abandoned consumers. Static/dev agents keep
+their lifecycle-owned provisioned pair.
