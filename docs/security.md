@@ -81,9 +81,9 @@ The guarantees, at a glance, each enforced by the broker per
   Agents receive only exact bind/ack/delete and subscribe grants—never consumer create or pull
   delivery—so JetStream cannot be used as a confused deputy to relay their allowed KV writes onto
   another principal's private inbox. For interactive user actors, the auth service performs that
-  trusted ensure before returning a bearer, preserves an already-canonical bound or undrained
-  watcher, and replaces an unbound fully-acknowledged watcher so a process restart replays current
-  state.
+  trusted ensure before returning a bearer, preserves an already-canonical push-bound watcher, and
+  replaces every unbound watcher so post-crash traffic cannot hide an incomplete LastPerSubject
+  snapshot. Simultaneous lifecycle ensures are coalesced and reuse the fixed name and rail.
 - **Transport secrecy (optional)**: `cotals://` enforces TLS for the hop to the broker.
   It protects that hop, not the broker itself.
 

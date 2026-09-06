@@ -9,6 +9,7 @@ lifecycle-owned consumers whose push destinations are fixed before the agent con
 credentials can bind, acknowledge, and delete only those exact presence and channel watchers; they
 cannot use consumer create or pull replies to relay permitted KV bytes onto a foreign private inbox.
 The user-auth service ensures the interactive CLI actor's fixed watchers before releasing a bearer
-and preserves canonical bound or undrained consumers across overlapping commands and bearer
-refreshes. It replaces fully acknowledged, unbound consumers after an ungraceful process exit so
-the next CLI process receives a fresh current-state snapshot.
+and preserves canonical push-bound consumers across overlapping commands and bearer refreshes. It
+replaces every unbound consumer because post-crash traffic can make an abandoned watcher pending;
+simultaneous lifecycle ensures are coalesced, and the fixed name and rail let the next CLI process
+bind the replacement and receive a fresh current-state snapshot.

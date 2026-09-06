@@ -578,11 +578,39 @@ try {
   let detachedInfos = await watchInfos();
   for (let attempt = 0; attempt < 160 && !crashDetached; attempt++) {
     detachedInfos = await watchInfos();
-    crashDetached = detachedInfos.every((info) => info.push_bound !== true && info.num_pending === 0 && info.num_ack_pending === 0);
+    crashDetached = detachedInfos.every((info) => info.push_bound !== true && info.num_ack_pending === 0);
     if (!crashDetached) await wait(50);
   }
-  check("SIGKILL leaves both acknowledged canonical watchers unbound", crashDetached,
+  check("SIGKILL leaves both acknowledged canonical watchers unbound (later traffic may already be pending)", crashDetached,
     detachedInfos.map((info) => ({ name: info.name, pushBound: info.push_bound, pending: info.num_pending, ackPending: info.num_ack_pending })));
+  // A pending count does not prove that an unbound watcher is still in its initial provision→bind
+  // handoff. Ordinary traffic can arrive after a process ACKs its snapshot and crashes. Publish a
+  // different principal's normal presence row so the abandoned presence watcher becomes pending
+  // while the pre-crash coldPrincipal row remains unchanged and already acknowledged.
+  const postCrashPrincipal = principalKey(OWNER, "postcrash").key;
+  const postCrashCreds = await mintCreds(auth, newIdentity(), "agent", {
+    principal: { owner: OWNER, actor: "postcrash" },
+    lifecycleUid: mintLifecycleUid(),
+    subscribe: [], allowSubscribe: [], allowPublish: [], durableMembership: false,
+  });
+  const postCrashNc = await rawConnect({
+    servers: SERVER,
+    ...standaloneConnectOpts({ creds: postCrashCreds, tls: false }),
+    maxReconnectAttempts: 0,
+  });
+  const postCrashPresenceKv = await new Kvm(postCrashNc).open(presenceBucket(SPACE));
+  await postCrashPresenceKv.put(postCrashPrincipal, JSON.stringify({
+    card: { id: postCrashPrincipal, owner: OWNER, actor: "postcrash", name: "post-crash-traffic", kind: "agent" },
+    status: "idle",
+    ts: Date.now(),
+  }));
+  await postCrashNc.drain();
+  const postCrashTrafficInfos = await watchInfos();
+  check("ordinary post-SIGKILL traffic makes the abandoned presence watcher pending while channels stay drained",
+    postCrashTrafficInfos[0].push_bound !== true && postCrashTrafficInfos[0].num_pending > 0
+      && postCrashTrafficInfos[1].push_bound !== true && postCrashTrafficInfos[1].num_pending === 0
+      && postCrashTrafficInfos.every((info) => info.num_ack_pending === 0),
+    postCrashTrafficInfos.map((info) => ({ name: info.name, pushBound: info.push_bound, pending: info.num_pending, ackPending: info.num_ack_pending })));
   const createdBeforeColdRebind = (await watchInfos()).map((info) => info.created);
   const reboundCreds = await cotalAuthProvider.userCredentials({ store, dir, space: SPACE, actor: "cli" });
   const createdAfterColdRebind = (await watchInfos()).map((info) => info.created);

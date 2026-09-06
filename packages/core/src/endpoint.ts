@@ -378,11 +378,12 @@ async function deleteNamedAgentKvWatchConsumer(bucket: Bucket, name: string): Pr
 }
 
 /** Ensure an interactive user actor's two lifecycle-owned public-KV watchers exist before its
- * bearer is released. A canonical bound consumer is retained for a live operator connection, and
- * an unbound consumer whose snapshot is still pending is retained across the short provision→bind
- * handoff. An unbound, fully-acknowledged consumer belongs to an abandoned process and is replaced
- * so the next process receives a fresh LastPerSubject snapshot. Pre-cut or malformed consumers are
- * also replaced by the trusted provisioner. */
+ * bearer is released. A canonical push-bound consumer is retained for a live operator connection.
+ * Every unbound consumer is stale or ambiguous and is replaced so the next process receives a
+ * fresh LastPerSubject snapshot; pending counts cannot distinguish the initial provision→bind
+ * handoff from ordinary traffic that arrived after a bound process crashed. The auth service
+ * coalesces simultaneous ensures for one lifecycle, and the fixed name/rail lets a pending client
+ * bind the replacement. Pre-cut or malformed consumers are also replaced by the provisioner. */
 export async function ensureAgentKvWatches(
   nc: NatsConnection,
   space: string,
@@ -411,11 +412,10 @@ export async function ensureAgentKvWatches(
         assertAgentKvWatchConfig(existing.config, config);
         canonical = true;
       } catch { /* malformed/pre-cut: replace below */ }
-      // `push_bound` is the broker's current-interest signal for a push consumer. Pending or
-      // ack-pending state marks the initial provision→bind handoff (or work a live process has not
-      // settled yet), so retain it too. Only the fully-drained + unbound state can have lost the
-      // LastPerSubject snapshot across an ungraceful process exit.
-      if (canonical && (existing.push_bound === true || existing.num_pending > 0 || existing.num_ack_pending > 0))
+      // `push_bound` is the broker's current-interest signal for a push consumer and the only
+      // state here that proves a live subscriber. Pending/ack-pending is not an ownership signal:
+      // ordinary traffic can make an abandoned consumer pending after its process has crashed.
+      if (canonical && existing.push_bound === true)
         continue;
       await deleteNamedAgentKvWatchConsumer(bucket, name);
     }
