@@ -280,7 +280,10 @@ const SEAMS: Seam[] = [
   // connections, both with tls: false.
   // 106/79 -> 107/80: the deterministic post-crash pending-traffic regression opens one more
   // explicit plaintext-broker connection, also with tls: false.
-  { fn: "standaloneConnectOpts", key: "tls", sites: 107, untypecheckedSites: 80 },
+  // 107/80 -> 111/84: the bounded watcher-allocation regression opens four explicit raw-bearer
+  // connections: the concurrent capacity burst, the post-restart overflow probe, the half-pair
+  // refusal probe, and the both-gone capacity-reuse probe. All four state tls: false.
+  { fn: "standaloneConnectOpts", key: "tls", sites: 111, untypecheckedSites: 84 },
 ];
 
 /**
