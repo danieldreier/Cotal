@@ -29,7 +29,7 @@ import { jetstreamManager } from "@nats-io/jetstream";
 import {
   isReachable, createSpaceAuth, mintCreds, serverConfig, newIdentity, setupSpaceStreams,
   openAclRegistry, readAcl, dmStream, dlvStream, dmDurable, dlvDurable, DEV_OWNER, principalKey,
-  mintLifecycleUid, presenceBucket,
+  mintLifecycleUid, presenceBucket, channelBucket, agentKvWatchConsumerName,
 } from "@cotal-ai/core";
 import type { Connector, LaunchOpts, LaunchSpec } from "@cotal-ai/core";
 import { Manager } from "../src/manager.js";
@@ -69,6 +69,7 @@ const srv = spawn("nats-server", ["-c", join(dir, "server.conf")], { stdio: "ign
 const releaseBroker = teardownOnSignal(srv, dir);
 
 const DM = dmStream(space), DLV = dlvStream(space);
+const PRESENCE = `KV_${presenceBucket(space)}`, CHANNELS = `KV_${channelBucket(space)}`;
 const provId = newIdentity();
 const provCreds = await mintCreds(auth, provId, "provisioner");
 
@@ -96,10 +97,19 @@ async function until(f: () => Promise<boolean>, want: boolean, ms = 8000): Promi
   return (await f()) === want;
 }
 /** Does the whole local-principal footprint exist? (dm_local- + dlv_local- + acl + creds file) */
-async function footprint(id: string, uid: string, name: string): Promise<{ dm: boolean; dlv: boolean; acl: boolean; creds: boolean }> {
+async function footprint(id: string, uid: string, name: string): Promise<{
+  dm: boolean;
+  dlv: boolean;
+  presenceWatch: boolean;
+  channelWatch: boolean;
+  acl: boolean;
+  creds: boolean;
+}> {
   return {
     dm: await consumerExists(DM, dmDurable(DEV_OWNER, id, uid)),
     dlv: await consumerExists(DLV, dlvDurable(DEV_OWNER, id, uid)),
+    presenceWatch: await consumerExists(PRESENCE, agentKvWatchConsumerName("presence", DEV_OWNER, id, uid)),
+    channelWatch: await consumerExists(CHANNELS, agentKvWatchConsumerName("channels", DEV_OWNER, id, uid)),
     acl: await aclPresent(id, uid),
     creds: existsSync(credsFile(name, uid)),
   };
@@ -183,6 +193,8 @@ try {
   const fp1 = await footprint(id1, uid1, "w1");
   check("footprint exists after start — dm_ durable", fp1.dm, fp1);
   check("footprint exists after start — dlv_ durable", fp1.dlv, fp1);
+  check("static manager spawn provisions its exact lifecycle presence watcher", fp1.presenceWatch, fp1);
+  check("static manager spawn provisions its exact lifecycle channel watcher", fp1.channelWatch, fp1);
   check("footprint exists after start — read-ACL row", fp1.acl, fp1);
   check("footprint exists after start — creds file", fp1.creds, fp1);
 
@@ -196,6 +208,10 @@ try {
   (mgr as unknown as { opStop: (a: Record<string, unknown>, c: string, admin: boolean) => unknown }).opStop({ name: "w1", graceful: false }, callerId, true);
   check("dm_local- durable gone after despawn", await until(() => consumerExists(DM, dmDurable(DEV_OWNER, id1, uid1)), false), await footprint(id1, uid1, "w1"));
   check("dlv_local- durable gone after despawn", await until(() => consumerExists(DLV, dlvDurable(DEV_OWNER, id1, uid1)), false));
+  check("static manager retirement deletes its exact lifecycle presence watcher",
+    await until(() => consumerExists(PRESENCE, agentKvWatchConsumerName("presence", DEV_OWNER, id1, uid1)), false));
+  check("static manager retirement deletes its exact lifecycle channel watcher",
+    await until(() => consumerExists(CHANNELS, agentKvWatchConsumerName("channels", DEV_OWNER, id1, uid1)), false));
   check("read-ACL row gone after despawn", await until(() => aclPresent(id1, uid1), false));
   check("creds file gone after despawn", await until(async () => existsSync(credsFile("w1", uid1)), false));
 
@@ -271,6 +287,8 @@ try {
   const fp2 = await footprint(id2, uid2, "w2");
   check("w2 dm_ durable gone after stop()", !fp2.dm, fp2);
   check("w2 dlv_ durable gone after stop()", !fp2.dlv, fp2);
+  check("w2 lifecycle presence watcher gone after stop()", !fp2.presenceWatch, fp2);
+  check("w2 lifecycle channel watcher gone after stop()", !fp2.channelWatch, fp2);
   check("w2 read-ACL row gone after stop()", !fp2.acl, fp2);
   check("w2 creds file gone after stop()", !fp2.creds, fp2);
 

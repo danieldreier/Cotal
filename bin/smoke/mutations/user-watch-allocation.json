@@ -1,6 +1,6 @@
 {
-  "suite": "implementations/auth/smoke/user-spawn.smoke.ts (watch-allocation cells) + packages/core/smoke/manager-split-auth.smoke.ts",
-  "guard": "a reusable user bearer cannot amplify connection nonces into unbounded public-KV watcher consumers; retained pairs stay capped across concurrency, lifecycle rotation, and auth-service restart, reclaim requires both exact consumers gone, and user-mode lifecycle teardown gains no authority over an unprovisioned pair",
+  "suite": "implementations/auth/smoke/user-spawn.smoke.ts (watch-allocation cells) + packages/core/smoke/manager-split-auth.smoke.ts + implementations/manager/smoke/lifecycle-e2e.smoke.ts (static watcher teardown cells)",
+  "guard": "a reusable user bearer cannot amplify connection nonces into unbounded public-KV watcher consumers; retained pairs stay capped across concurrency, lifecycle rotation, and auth-service restart; reclaim requires both exact consumers gone; user-mode teardown gains no authority over an unprovisioned pair while static manager retirement still deletes its provisioned lifecycle pair",
   "command": "pnpm --filter @cotal-ai/core build && pnpm --filter @cotal-ai/auth build && pnpm --filter @cotal-ai/manager exec tsc -p tsconfig.json && pnpm smoke:user-spawn:live",
   "completionMarker": "USER-SPAWN SMOKE",
   "proveWith": "node scripts/mutation-proof.mjs --config bin/smoke/mutations/user-watch-allocation.json",
@@ -14,6 +14,8 @@
     "to either-gone and must admit after only the presence half is deleted. Mutation 4 restores the",
     "manager's unbindable lifecycle pair. Mutation 5 is the faster credential-matrix half: a user-mode",
     "deprovisioner must not regain DELETE authority over a pair its lifecycle never provisioned.",
+    "Mutation 6 flips the manager's static/user ownership decision: the real static lifecycle smoke",
+    "must then retain both provisioned watcher consumers after retirement and fail by exact name.",
     "",
     "The build and afterRestore commands are load-bearing: user-spawn imports core/auth/manager dist."
   ],
@@ -51,8 +53,8 @@
     {
       "name": "managed user mode again provisions an unbindable lifecycle watcher pair",
       "file": "implementations/manager/src/manager.ts",
-      "find": "          // User-mode endpoints bind connection-owned watcher pairs created under the auth\n          // callout. A lifecycle-named pair here has no possible binder and only wastes broker\n          // consumers until teardown.\n          lifecycleKvWatches: false,\n",
-      "replace": "          // MUTANT: restore the unbindable lifecycle-named pair.\n          lifecycleKvWatches: true,\n",
+      "find": "          lifecycleKvWatches: false,\n",
+      "replace": "          lifecycleKvWatches: true,\n",
       "expectRed": "a managed user-mode spawn provisions only its bindable connection-owned watcher pair",
       "cell": "a managed user-mode spawn provisions only its bindable connection-owned watcher pair",
       "afterRestore": "pnpm --filter @cotal-ai/manager exec tsc -p tsconfig.json",
@@ -69,6 +71,18 @@
       "cell": "a user-mode deprovisioner is NOT granted delete on an unprovisioned lifecycle presence watcher",
       "afterRestore": "pnpm --filter @cotal-ai/core build",
       "note": "The permission mint and teardown footprint must stay coherent for user mode."
+    },
+    {
+      "name": "static retirement is misclassified as user mode and leaves lifecycle watchers behind",
+      "file": "implementations/manager/src/manager.ts",
+      "find": "    const lifecycleKvWatches = a.userOwner === undefined;\n",
+      "replace": "    const lifecycleKvWatches = false;\n",
+      "command": "pnpm --filter @cotal-ai/core build && pnpm --filter @cotal-ai/workspace build && pnpm --filter @cotal-ai/manager exec tsc -p tsconfig.json && pnpm smoke:lifecycle-e2e",
+      "completionMarker": "LIFECYCLE E2E",
+      "expectRed": "static manager retirement deletes its exact lifecycle presence watcher",
+      "cell": "static manager retirement deletes its exact lifecycle presence watcher",
+      "afterRestore": "pnpm --filter @cotal-ai/manager exec tsc -p tsconfig.json",
+      "note": "Static agents still provision lifecycle watcher pairs; their exact teardown authority must not inherit the user-mode omission."
     }
   ]
 }

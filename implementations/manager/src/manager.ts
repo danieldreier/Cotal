@@ -2764,12 +2764,16 @@ export class Manager {
    *  standing-authority revoke AND the lifecycle retirement both confirm (see {@link driveRetirement}) —
    *  but the deletes here are still lifecycle-uid-pinned so even a replayed/stale teardown can never
    *  reach a same-name successor's footprint (its names embed a different uid). */
-  private async deprovisionBroker(a: { id: string; name: string; lifecycleUid: string }): Promise<void> {
+  private async deprovisionBroker(a: { id: string; name: string; lifecycleUid: string; userOwner?: string }): Promise<void> {
     // LIFECYCLE-PINNED (SPEC 13.1): both the credential's exact-name grants and the delete names
     // carry a.lifecycleUid, so a stale/replayed teardown for this retired incarnation is broker-denied
     // against a same-name successor's footprint (its names embed a different uid).
+    // Static agents provision and bind this lifecycle-owned watcher pair, so their teardown must
+    // retain its exact DELETE grants. User-mode endpoints use connection-owned watcher pairs and
+    // deliberately provision no lifecycle pair; their teardown must not gain authority over one.
+    const lifecycleKvWatches = a.userOwner === undefined;
     const creds = await mintCreds(this.auth!, newIdentity(), "deprovisioner", {
-      deprovisionTarget: { principal: a.id, lifecycleUid: a.lifecycleUid, lifecycleKvWatches: false },
+      deprovisionTarget: { principal: a.id, lifecycleUid: a.lifecycleUid, lifecycleKvWatches },
     });
     // Bound the detached broker teardown so a wedged broker can't leave the deprovision promise pending
     // forever with no log — the timeout rejects into freeSlot's fail-loud `.catch` (paired with the
@@ -2780,7 +2784,7 @@ export class Manager {
         space: this.space,
         targetId: a.id,
         lifecycleUid: a.lifecycleUid,
-        lifecycleKvWatches: false,
+        lifecycleKvWatches,
         creds,
       }),
       DEPROVISION_TIMEOUT_MS,
