@@ -41,8 +41,8 @@
     {
       "name": "half-gone reclaim: one missing consumer is treated as the whole allocation gone",
       "file": "implementations/auth/src/service.ts",
-      "find": "            await jsm.consumers.info(stream, agentKvWatchConsumerName(kind, args.owner, args.actor, watchUid));\n            return false;\n",
-      "replace": "            await jsm.consumers.info(stream, agentKvWatchConsumerName(kind, args.owner, args.actor, watchUid));\n            continue;\n",
+      "find": "            if (!missing) throw err;\n",
+      "replace": "            if (!missing) throw err;\n            return true;\n",
       "expectRed": "one surviving consumer keeps its allocation occupied (reclaim requires BOTH exact names gone)",
       "cell": "one surviving consumer keeps its allocation occupied (reclaim requires BOTH exact names gone)",
       "afterRestore": "pnpm --filter @cotal-ai/auth build",
