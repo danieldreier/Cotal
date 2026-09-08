@@ -71,6 +71,7 @@ try {
     space,
     token: { key: publicKey as never, issuer: ISS },
     authorizeActor: () => { throw new Error(DENY_REASON); }, // deny EVERY actor, with a non-ASCII reason
+    prepareConnection: () => {},
     permissionsFor: calloutPermissions(() => ({ allowSubscribe: ["general"], allowPublish: ["general"], lifecycleUid: smokeUid, scope: [] })),
     log: (l) => calloutLog.push(l),
   });

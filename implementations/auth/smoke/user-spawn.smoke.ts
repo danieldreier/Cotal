@@ -107,8 +107,10 @@ const {
   setupSpaceStreams, principalKey, registry, spaceWildcard, clearChannel, mintLifecycleUid, eventChannel,
   resolveService, invokeCommand, standaloneConnectOpts, EpEnvelopeError, epAuthBucket,
   mintMembershipObserverCreds, observePlaneLivenessWithCreds,
+  presenceBucket, channelBucket, agentKvWatchConsumerName,
 } = await import("@cotal-ai/core");
 const { connect: rawConnect } = await import("@nats-io/transport-node");
+const { jetstreamManager } = await import("@nats-io/jetstream");
 const { Kvm } = await import("@nats-io/kv");
 const { createHash } = await import("node:crypto");
 const { decodeJwt } = await import("jose");
@@ -117,6 +119,7 @@ const {
   cotalAuthProvider, establishIdpSession, fetchIdpJwt, grantActor, loadCalloutAuth, loadAuthServiceInfo,
   actorLedgerDir, managedActorLedgerDir, ledgerRowFilename, deriveOwnerForIdpSubject, loadOwnerSecret, loadPinnedIdp,
 } = await import("@cotal-ai/auth");
+const { AGENT_KV_WATCH_ALLOCATION_LIMIT } = await import("../src/watch-allocation.js");
 // @cotal-ai/manager + @cotal-ai/connector-core are not deps of @cotal-ai/auth. Drive the REAL Manager
 // from its built dist by relative path (shares the one @cotal-ai/core registry instance — dist — so the
 // in-process `e2e` connector + the auth provider are visible to it); inline the tiny launch-env mapping
@@ -160,6 +163,7 @@ const until = async (cond: () => boolean, ms = 8000): Promise<boolean> => {
 const SELF = process.argv[1]; // this smoke file — the bearer/auth-service re-exec target (matches the manager's argv[1])
 const { pickFreePort } = await import("./_free-port.js");
 const PORT = await pickFreePort();
+const MONITOR_PORT = await pickFreePort();
 const SERVER = `nats://127.0.0.1:${PORT}`;
 const SPACE = `uspawn-${Math.floor(Math.random() * 1e6)}`;
 const CLIENT_ID = "cotal-cli";
@@ -194,6 +198,19 @@ const CHILD = [
   "function bearer(){return new Promise((res,rej)=>{cp.execFile(argv[0],argv.slice(1),{maxBuffer:1<<20,timeout:30000},(e,so,se)=>{if(e)return rej(new Error(((se||'').toString().trim())||e.message));const t=(so||'').toString().trim();t?res(t):rej(new Error('empty bearer'));});});}",
   "import(pathToFileURL(process.env.CORE_DIST).href).then(async(m)=>{",
   "const ep=new m.CotalEndpoint({space:process.env.COTAL_SPACE,servers:process.env.COTAL_SERVERS,bearer:bearer,sentinelCreds:sentinel,lifecycleUid:process.env.COTAL_LIFECYCLE_UID,channels:[],consume:false,registerPresence:true,watchPresence:false,card:{name:process.env.COTAL_NAME,owner:process.env.COTAL_OWNER,actor:process.env.COTAL_ACTOR,kind:'agent'}});",
+  "ep.on('error',()=>{});await ep.start();",
+  "setInterval(()=>{},1000);",
+  "}).catch((e)=>{console.error(e&&e.message||String(e));process.exit(1);});",
+].join("\n");
+
+// A real transient roster observer in its own process. The parent deliberately SIGKILLs it after
+// both connection-owned watchers have drained and acknowledged their LastPerSubject snapshots, then
+// starts another human connection under the same long-lived CLI lifecycle. That is the production
+// cold-rebind boundary: no stop() cleanup runs, and no synthetic consumer state is injected.
+const TRANSIENT_WATCHER_CHILD = [
+  "const {pathToFileURL}=require('node:url');",
+  "import(pathToFileURL(process.env.CORE_DIST).href).then(async(m)=>{",
+  "const ep=new m.CotalEndpoint({space:process.env.COTAL_SPACE,servers:process.env.COTAL_SERVERS,bearer:process.env.COTAL_WATCH_BEARER,sentinelCreds:process.env.COTAL_WATCH_SENTINEL,lifecycleUid:process.env.COTAL_LIFECYCLE_UID,lifecyclePinnedKvWatches:true,channels:[],consume:false,registerPresence:false,watchPresence:true,watchChannels:true,ttlMs:60000,card:{name:'crash-observer',kind:'endpoint'}});",
   "ep.on('error',()=>{});await ep.start();",
   "setInterval(()=>{},1000);",
   "}).catch((e)=>{console.error(e&&e.message||String(e));process.exit(1);});",
@@ -371,6 +388,9 @@ let broker: ChildProcess | undefined;
 let authChild: ChildProcess | undefined;
 let managerStopped = false;
 let observer: InstanceType<typeof CotalEndpoint> | undefined;
+let overlapObserver: InstanceType<typeof CotalEndpoint> | undefined;
+let crashedObserver: ChildProcess | undefined;
+let watchProbe: Awaited<ReturnType<typeof rawConnect>> | undefined;
 let shortEp: InstanceType<typeof CotalEndpoint> | undefined;
 const ctlEps: Array<InstanceType<typeof CotalEndpoint>> = []; // section O control callers, closed in finally
 try {
@@ -389,7 +409,9 @@ try {
     idpUrl: base,
   });
   const jsDir = mkdtempSync(join(tmpdir(), "cotal-uspawn-js-"));
-  writeFileSync(join(root, "server.conf"), serverConfig(auth, [auth], { transport: { kind: "plaintext" }, port: PORT, storeDir: jsDir, extraAccounts: prepared.extraAccounts }));
+  writeFileSync(join(root, "server.conf"),
+    serverConfig(auth, [auth], { transport: { kind: "plaintext" }, port: PORT, storeDir: jsDir, extraAccounts: prepared.extraAccounts })
+      + `\nhttp: "127.0.0.1:${MONITOR_PORT}"\n`);
   broker = spawn("nats-server", ["-c", join(root, "server.conf")], { stdio: "ignore" });
   let up = false;
   for (let i = 0; i < 50 && !up; i++) { up = await isReachable(SERVER); if (!up) await wait(200); }
@@ -451,15 +473,353 @@ try {
   const alphaToken = readFileSync(incFiles("alpha").actorToken, "utf8").trim(); // capture for D + F
   // Witness the presence join on the OPERATOR's OWN user bearer (login → exchange → connect), watching the roster.
   const opCreds = await cotalAuthProvider.userCredentials({ store, dir, space: SPACE, actor: "cli" });
+  const opClaims = JSON.parse(Buffer.from(opCreds.bearer.split(".")[1], "base64url").toString("utf8")) as { act: { lifecycleUid: string } };
+  watchProbe = await rawConnect({
+    servers: SERVER,
+    ...standaloneConnectOpts({ creds: await mintCreds(auth, newIdentity(), "provisioner"), tls: false }),
+    maxReconnectAttempts: 0,
+  });
+  type WatchInfo = {
+    name: string;
+    created: string;
+    push_bound?: boolean;
+    num_pending: number;
+    num_ack_pending: number;
+  };
+  type Jsz = {
+    account_details?: {
+      stream_detail?: { name: string; consumer_detail?: WatchInfo[] }[];
+    }[];
+  };
+  const actorWatchPrefix = (actor: string, kind: "presence" | "channels") =>
+    `kvw-${kind === "presence" ? "p" : "c"}-${principalKey(OWNER, actor).name}-`;
+  const listActorWatches = async (actor: string, kind: "presence" | "channels"): Promise<WatchInfo[]> => {
+    const stream = `KV_${kind === "presence" ? presenceBucket(SPACE) : channelBucket(SPACE)}`;
+    const out: WatchInfo[] = [];
+    const jsz = await (await fetch(
+      `http://127.0.0.1:${MONITOR_PORT}/jsz?consumers=true&streams=true&accounts=true`,
+    )).json() as Jsz;
+    for (const account of jsz.account_details ?? [])
+      for (const candidate of account.stream_detail ?? [])
+        if (candidate.name === stream)
+          for (const info of candidate.consumer_detail ?? [])
+            if (info.name.startsWith(actorWatchPrefix(actor, kind))) out.push(info);
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  };
+  const listCliWatches = (kind: "presence" | "channels") => listActorWatches("cli", kind);
+  const listBothCliWatches = () => Promise.all([listCliWatches("presence"), listCliWatches("channels")]);
+  const alphaLifecycleUid = incUid("alpha");
+  const alphaWatches = await Promise.all([listActorWatches("alpha", "presence"), listActorWatches("alpha", "channels")]);
+  check("a managed user-mode spawn provisions only its bindable connection-owned watcher pair",
+    alphaWatches.every((infos, i) => infos.length === 1 && infos[0].name !== agentKvWatchConsumerName(
+      i === 0 ? "presence" : "channels", OWNER, "alpha", alphaLifecycleUid,
+    )), alphaWatches.map((infos) => infos.map((info) => info.name)));
+  const beforeFirstConnect = await listBothCliWatches();
+  check("a human exchange releases no shared lifecycle watcher before a concrete broker connection exists",
+    beforeFirstConnect.every((infos) => infos.length === 0), beforeFirstConnect.map((infos) => infos.map((info) => info.name)));
+
+  // A valid bearer must not be a broker-resource amplifier. A raw callout connection deliberately
+  // never constructs CotalEndpoint, so it never subscribes either trusted watcher delivery rail:
+  // every pair below stays unbound. The auth service must admit only a bounded number for one
+  // (principal, lifecycle), remember that bound across its own restart, then reclaim capacity as
+  // soon as the exact consumers are gone. The monitor is harness-only observability; no production
+  // profile gains CONSUMER.LIST.
+  const unboundConnections: import("@nats-io/transport-node").NatsConnection[] = [];
+  const burst: Array<"admitted" | "denied"> = [];
+  for (let offset = 0; offset < AGENT_KV_WATCH_ALLOCATION_LIMIT + 8; offset += 4) {
+    burst.push(...await Promise.all(Array.from({ length: 4 }, async () => {
+      try {
+        const nc = await rawConnect({
+          servers: SERVER,
+          ...standaloneConnectOpts({ bearer: opCreds.bearer, sentinelCreds: opCreds.sentinelCreds, tls: false }),
+          maxReconnectAttempts: 0,
+        });
+        unboundConnections.push(nc);
+        return "admitted" as const;
+      } catch {
+        return "denied" as const;
+      }
+    })));
+  }
+  const cappedWatches = await listBothCliWatches();
+  // Four concurrent requests exercise the per-actor async serialization without exceeding NATS's
+  // own callout timeout; ten batches then drive past the durable ceiling.
+  check("concurrent nonce bursts admit exactly the documented number of unbound watcher pairs",
+    unboundConnections.length === AGENT_KV_WATCH_ALLOCATION_LIMIT
+      && burst.filter((result) => result === "denied").length === 8
+      && cappedWatches.every((infos) => infos.length === AGENT_KV_WATCH_ALLOCATION_LIMIT && infos.every((info) => info.push_bound !== true)),
+    { burst, watches: cappedWatches.map((infos) => infos.map((info) => ({ name: info.name, pushBound: info.push_bound }))) });
+  await killPid(authChild.pid);
+  // The auth service holds a fail-closed plane claim. A SIGKILLed predecessor is reclaimable only
+  // while the real delivery liveness oracle can prove its broker connections GONE; this is the same
+  // restart boundary exercised later in section E, kept here so the capacity assertion cannot be
+  // satisfied by process-local memory.
+  const allocationOracleObserverCreds = await mintMembershipObserverCreds(auth, newIdentity());
+  const allocationOracleId = newIdentity();
+  const allocationOracle = new CotalEndpoint({
+    space: SPACE, servers: SERVER, creds: await mintCreds(auth, allocationOracleId, "delivery"),
+    card: { id: allocationOracleId.id, name: "allocation-oracle", role: "delivery", kind: "endpoint" },
+    channels: [], consume: false, registerPresence: false, watchPresence: false,
+  });
+  allocationOracle.on("error", () => {});
+  await allocationOracle.start();
+  await allocationOracle.startPlane3(() => undefined, {
+    planeConnLiveness: (query) => observePlaneLivenessWithCreds({
+      servers: SERVER, observerCreds: allocationOracleObserverCreds, accountId: auth.account.pub,
+      query: query as import("@cotal-ai/core").PlaneLivenessQuery,
+    }),
+  });
+  authChild = spawnAuthService();
+  await waitAuthReady();
+  await allocationOracle.stop();
+  let overflowError = "";
+  try {
+    const overflow = await rawConnect({
+      servers: SERVER,
+      ...standaloneConnectOpts({ bearer: opCreds.bearer, sentinelCreds: opCreds.sentinelCreds, tls: false }),
+      maxReconnectAttempts: 0,
+    });
+    unboundConnections.push(overflow);
+  } catch (err) {
+    overflowError = (err as Error).message;
+  }
+  // nats-server intentionally exposes only the generic signed-callout denial to a connecting
+  // client ("Authorization Violation"), not the daemon's private diagnostic. The preceding exact
+  // counts plus a healthy restarted service make any rejection here discriminating; the old code
+  // admits it and leaves overflowError empty.
+  check("the unbound watcher allocation limit survives an auth-service restart and refuses one more pair",
+    overflowError.length > 0, overflowError || "the overflow connection was admitted");
+  for (const nc of unboundConnections) await nc.drain().catch(() => nc.close());
+  const watcherAdmin = await jetstreamManager(watchProbe);
+  const presenceStream = `KV_${presenceBucket(SPACE)}`;
+  for (const info of await listCliWatches("presence"))
+    await watcherAdmin.consumers.delete(presenceStream, info.name);
+  let partialPairError = "";
+  try {
+    const partial = await rawConnect({
+      servers: SERVER,
+      ...standaloneConnectOpts({ bearer: opCreds.bearer, sentinelCreds: opCreds.sentinelCreds, tls: false }),
+      maxReconnectAttempts: 0,
+    });
+    await partial.drain();
+  } catch (err) {
+    partialPairError = (err as Error).message;
+  }
+  check("one surviving consumer keeps its allocation occupied (reclaim requires BOTH exact names gone)",
+    partialPairError.length > 0 && (await listCliWatches("channels")).length === AGENT_KV_WATCH_ALLOCATION_LIMIT,
+    partialPairError || "a half-deleted allocation was reclaimed");
+  const channelStream = `KV_${channelBucket(SPACE)}`;
+  for (const info of await listCliWatches("channels"))
+    await watcherAdmin.consumers.delete(channelStream, info.name);
+  const reclaimed = await rawConnect({
+    servers: SERVER,
+    ...standaloneConnectOpts({ bearer: opCreds.bearer, sentinelCreds: opCreds.sentinelCreds, tls: false }),
+    maxReconnectAttempts: 0,
+  });
+  await reclaimed.drain();
+  for (const info of await listCliWatches("presence"))
+    await watcherAdmin.consumers.delete(presenceStream, info.name);
+  for (const info of await listCliWatches("channels"))
+    await watcherAdmin.consumers.delete(channelStream, info.name);
+  check("deleted unbound pairs are reconciled out of the allocation ledger and capacity is reusable",
+    (await listBothCliWatches()).every((infos) => infos.length === 0));
+
   observer = new CotalEndpoint({
     space: SPACE, servers: SERVER, bearer: opCreds.bearer, sentinelCreds: opCreds.sentinelCreds,
-    channels: [], consume: false, registerPresence: false, watchPresence: true,
+    lifecycleUid: opClaims.act.lifecycleUid,
+    lifecyclePinnedKvWatches: true,
+    channels: [], consume: false, registerPresence: false, watchPresence: true, watchChannels: true,
     card: { name: "observer", kind: "endpoint" },
   });
   observer.on("error", () => {});
   await observer.start();
+  const firstConnectionWatches = await listBothCliWatches();
+  check("the auth callout pre-provisions one fixed-rail watcher pair for the first connection",
+    firstConnectionWatches.every((infos) => infos.length === 1 && infos[0].push_bound === true),
+    firstConnectionWatches.map((infos) => infos.map((info) => ({ name: info.name, pushBound: info.push_bound }))));
   const seen = await until(() => observer!.getRoster().some((p) => p.card.id === alphaPrincipal && p.card.name === "alpha"));
   check("observer (operator user bearer) sees alpha join as the owner.actor principal", seen, observer.getRoster().map((p) => p.card.id));
+  const overlapCreds = await cotalAuthProvider.userCredentials({ store, dir, space: SPACE, actor: "cli" });
+  const uid = opClaims.act.lifecycleUid;
+  const afterSecondExchange = await listBothCliWatches();
+  check("a second human exchange does not mutate the first connection's live watcher pair",
+    afterSecondExchange.every((infos, index) =>
+      infos.length === 1 && infos[0].name === firstConnectionWatches[index][0].name && infos[0].created === firstConnectionWatches[index][0].created),
+    afterSecondExchange.map((infos) => infos.map((info) => ({ name: info.name, created: info.created }))));
+
+  // Two overlapping CLI commands share one interactive lifecycle but have different broker
+  // connections. Bind the successor before the predecessor exits and prove each gets its own
+  // trusted-provisioned LastPerSubject pair. The updates arrive only after predecessor stop, so a
+  // successor that merely inherited any predecessor-local state cannot satisfy the final cell.
+  overlapObserver = new CotalEndpoint({
+    space: SPACE, servers: SERVER, bearer: overlapCreds.bearer, sentinelCreds: overlapCreds.sentinelCreds,
+    lifecycleUid: uid, lifecyclePinnedKvWatches: true, ttlMs: 60_000,
+    channels: [], consume: false, registerPresence: false, watchPresence: true, watchChannels: true,
+    card: { name: "overlap-successor", kind: "endpoint" },
+  });
+  overlapObserver.on("error", () => {});
+  let overlapStartError: unknown;
+  try { await overlapObserver.start(); } catch (err) { overlapStartError = err; }
+  const overlapWatches = await listBothCliWatches();
+  check("an overlapping successor binds a distinct, complete watcher pair while the predecessor stays live",
+    overlapStartError === undefined && overlapWatches.every((infos, index) =>
+      infos.length === 2 && infos.every((info) => info.push_bound === true)
+        && infos.some((info) => info.name === firstConnectionWatches[index][0].name)),
+    {
+      error: overlapStartError instanceof Error ? overlapStartError.message : overlapStartError,
+      watches: overlapWatches.map((infos) => infos.map((info) => ({ name: info.name, pushBound: info.push_bound }))),
+    });
+  const successorWatchNames = overlapWatches.map((infos, index) =>
+    infos.find((info) => info.name !== firstConnectionWatches[index][0].name)?.name);
+  // Keep the broad smoke running under the deliberate shared-UID mutation: record the named red,
+  // close both colliding endpoints, then reconnect the successor after the predecessor is gone.
+  // Production never takes this repair arm because distinct connection UIDs bind concurrently.
+  if (overlapStartError !== undefined) {
+    await overlapObserver.stop().catch(() => {});
+    overlapObserver = undefined;
+    await observer.stop().catch(() => {});
+    observer = undefined;
+    overlapObserver = new CotalEndpoint({
+      space: SPACE, servers: SERVER, bearer: overlapCreds.bearer, sentinelCreds: overlapCreds.sentinelCreds,
+      lifecycleUid: uid, lifecyclePinnedKvWatches: true, ttlMs: 60_000,
+      channels: [], consume: false, registerPresence: false, watchPresence: true, watchChannels: true,
+      card: { name: "overlap-successor-repair", kind: "endpoint" },
+    });
+    overlapObserver.on("error", () => {});
+    await overlapObserver.start();
+  }
+  if (observer) {
+    await observer.stop();
+    observer = undefined;
+  }
+  const afterPredecessorStop = await listBothCliWatches();
+  check("a graceful predecessor stop deletes only its own pair and leaves the successor pair bound",
+    afterPredecessorStop.every((infos, index) =>
+      infos.length === 1 && infos[0].name === successorWatchNames[index] && infos[0].push_bound === true),
+    afterPredecessorStop.map((infos) => infos.map((info) => ({ name: info.name, pushBound: info.push_bound }))));
+  const coldPrincipal = principalKey(OWNER, "coldrebind").key;
+  const coldIdentity = newIdentity();
+  const coldCreds = await mintCreds(auth, coldIdentity, "agent", {
+    principal: { owner: OWNER, actor: "coldrebind" },
+    lifecycleUid: mintLifecycleUid(),
+    subscribe: [], allowSubscribe: [], allowPublish: [], durableMembership: false,
+  });
+  const coldNc = await rawConnect({
+    servers: SERVER,
+    ...standaloneConnectOpts({ creds: coldCreds, tls: false }),
+    maxReconnectAttempts: 0,
+  });
+  const handoffPresenceKv = await new Kvm(coldNc).open(presenceBucket(SPACE));
+  const handoffChannelKv = await new Kvm(watchProbe).open(channelBucket(SPACE));
+  await handoffPresenceKv.put(coldPrincipal, JSON.stringify({
+    card: { id: coldPrincipal, owner: OWNER, actor: "coldrebind", name: "cold-rebind-proof", kind: "agent" },
+    status: "idle",
+    ts: Date.now(),
+  }));
+  await coldNc.drain();
+  const handoffChannel = "handoff-proof";
+  await handoffChannelKv.put(handoffChannel, JSON.stringify({ description: "published after predecessor stop" }));
+  const handoffDelivered = await until(() =>
+    overlapObserver!.getRoster().some((entry) => entry.card.id === coldPrincipal)
+      && overlapObserver!.getChannelConfig(handoffChannel)?.description === "published after predecessor stop",
+    1500);
+  check("the live successor receives presence and channel updates published after its predecessor stops",
+    handoffDelivered,
+    {
+      roster: overlapObserver.getRoster().map((entry) => entry.card.id),
+      channel: overlapObserver.getChannelConfig(handoffChannel),
+    });
+  await overlapObserver.stop();
+  overlapObserver = undefined;
+  const afterBothStop = await listBothCliWatches();
+  check("both graceful commands leave no connection-owned watcher behind",
+    afterBothStop.every((infos) => infos.length === 0), afterBothStop.map((infos) => infos.map((info) => info.name)));
+
+  // Let an isolated transient process fully ACK a stable roster row, then kill it without stop().
+  // Its connection-owned pair remains until inactive cleanup, but the next connection gets a new
+  // pair and therefore a complete LastPerSubject snapshot regardless of traffic on the abandoned one.
+  const crashCreds = await cotalAuthProvider.userCredentials({ store, dir, space: SPACE, actor: "cli" });
+  crashedObserver = spawn(process.execPath, ["-e", TRANSIENT_WATCHER_CHILD], {
+    env: {
+      ...launchEnv(),
+      CORE_DIST: coreDist,
+      COTAL_SPACE: SPACE,
+      COTAL_SERVERS: SERVER,
+      COTAL_LIFECYCLE_UID: uid,
+      COTAL_WATCH_BEARER: crashCreds.bearer,
+      COTAL_WATCH_SENTINEL: crashCreds.sentinelCreds,
+    },
+    stdio: "ignore",
+  });
+  const watchInfos = async (): Promise<WatchInfo[]> => (await listBothCliWatches()).flat();
+  let crashDrained = false;
+  for (let attempt = 0; attempt < 80 && !crashDrained; attempt++) {
+    const infos = await watchInfos();
+    crashDrained = infos.length === 2
+      && infos.every((info) => info.push_bound === true && info.num_pending === 0 && info.num_ack_pending === 0);
+    if (!crashDrained) await wait(50);
+  }
+  check("the doomed transient observer binds and acknowledges both watcher snapshots", crashDrained);
+  const crashedWatchNames = (await watchInfos()).map((info) => info.name).sort();
+  await killPid(crashedObserver.pid);
+  crashedObserver = undefined;
+  let crashDetached = false;
+  let detachedInfos = await watchInfos();
+  for (let attempt = 0; attempt < 160 && !crashDetached; attempt++) {
+    detachedInfos = await watchInfos();
+    crashDetached = detachedInfos.every((info) => info.push_bound !== true && info.num_ack_pending === 0);
+    if (!crashDetached) await wait(50);
+  }
+  check("SIGKILL leaves both acknowledged canonical watchers unbound (later traffic may already be pending)", crashDetached,
+    detachedInfos.map((info) => ({ name: info.name, pushBound: info.push_bound, pending: info.num_pending, ackPending: info.num_ack_pending })));
+  // A pending count does not prove that an unbound watcher is still in its initial provision→bind
+  // handoff. Ordinary traffic can arrive after a process ACKs its snapshot and crashes. Publish a
+  // different principal's normal presence row so the abandoned presence watcher becomes pending
+  // while the pre-crash coldPrincipal row remains unchanged and already acknowledged.
+  const postCrashPrincipal = principalKey(OWNER, "postcrash").key;
+  const postCrashCreds = await mintCreds(auth, newIdentity(), "agent", {
+    principal: { owner: OWNER, actor: "postcrash" },
+    lifecycleUid: mintLifecycleUid(),
+    subscribe: [], allowSubscribe: [], allowPublish: [], durableMembership: false,
+  });
+  const postCrashNc = await rawConnect({
+    servers: SERVER,
+    ...standaloneConnectOpts({ creds: postCrashCreds, tls: false }),
+    maxReconnectAttempts: 0,
+  });
+  const postCrashPresenceKv = await new Kvm(postCrashNc).open(presenceBucket(SPACE));
+  await postCrashPresenceKv.put(postCrashPrincipal, JSON.stringify({
+    card: { id: postCrashPrincipal, owner: OWNER, actor: "postcrash", name: "post-crash-traffic", kind: "agent" },
+    status: "idle",
+    ts: Date.now(),
+  }));
+  await postCrashNc.drain();
+  const postCrashTrafficInfos = await watchInfos();
+  check("ordinary post-SIGKILL traffic makes one abandoned watcher pending while its sibling stays drained",
+    postCrashTrafficInfos.length === 2
+      && postCrashTrafficInfos.filter((info) => info.num_pending > 0).length === 1
+      && postCrashTrafficInfos.every((info) => info.push_bound !== true && info.num_ack_pending === 0),
+    postCrashTrafficInfos.map((info) => ({ name: info.name, pushBound: info.push_bound, pending: info.num_pending, ackPending: info.num_ack_pending })));
+  const reboundCreds = await cotalAuthProvider.userCredentials({ store, dir, space: SPACE, actor: "cli" });
+  observer = new CotalEndpoint({
+    space: SPACE, servers: SERVER, bearer: reboundCreds.bearer, sentinelCreds: reboundCreds.sentinelCreds,
+    lifecycleUid: uid, lifecyclePinnedKvWatches: true, ttlMs: 60_000,
+    channels: [], consume: false, registerPresence: false, watchPresence: true, watchChannels: true,
+    card: { name: "cold-rebind-observer", kind: "endpoint" },
+  });
+  observer.on("error", () => {});
+  await observer.start();
+  const reboundWatchInfos = await watchInfos();
+  const reboundNames = reboundWatchInfos.filter((info) => info.push_bound === true).map((info) => info.name).sort();
+  check("a cold rebind owns a distinct bound watcher pair without inheriting either abandoned consumer",
+    reboundWatchInfos.length === 4 && reboundNames.length === 2
+      && reboundNames.every((name) => !crashedWatchNames.includes(name)),
+    reboundWatchInfos.map((info) => ({ name: info.name, pushBound: info.push_bound, pending: info.num_pending })));
+  const coldReplayed = await until(() => observer!.getRoster().some((p) => p.card.id === coldPrincipal), 1500);
+  check("a cold transient rebind replays the acknowledged LastPerSubject roster snapshot", coldReplayed,
+    observer.getRoster().map((p) => p.card.id));
+  await watchProbe.drain();
+  watchProbe = undefined;
   // `mesh !== "absent"` accepted ANY other string, so a row carrying a value no roster can produce
   // read as live. The reach is a cast through `unknown`, which severs the local view from the real
   // return type, so no width declared above can catch that: the closed set has to be asserted here.
@@ -1372,6 +1732,9 @@ try {
   process.exitCode = 1;
 } finally {
   try { await observer?.stop(); } catch { /* */ }
+  try { await overlapObserver?.stop(); } catch { /* */ }
+  try { await killPid(crashedObserver?.pid); } catch { /* */ }
+  try { await watchProbe?.drain(); } catch { /* */ }
   try { await shortEp?.stop(); } catch { /* */ }
   for (const e of ctlEps) { try { await e.stop(); } catch { /* */ } }
   if (manager && !managerStopped) await manager.stop().catch(() => {});

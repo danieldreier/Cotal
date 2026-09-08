@@ -276,7 +276,14 @@ const SEAMS: Seam[] = [
   // actor with bearer+sentinel and an explicit plaintext-broker `tls: false` decision.
   // 102/75 -> 104/77: the boot-self-heal live smoke opens two explicit plaintext-broker
   // connections so the stale-lease and successor paths share the same bounded fixture.
-  { fn: "standaloneConnectOpts", key: "tls", sites: 104, untypecheckedSites: 77 },
+  // 104/77 -> 106/79: the user-auth cold-rebind smoke opens two explicit plaintext-broker
+  // connections, both with tls: false.
+  // 106/79 -> 107/80: the deterministic post-crash pending-traffic regression opens one more
+  // explicit plaintext-broker connection, also with tls: false.
+  // 107/80 -> 111/84: the bounded watcher-allocation regression opens four explicit raw-bearer
+  // connections: the concurrent capacity burst, the post-restart overflow probe, the half-pair
+  // refusal probe, and the both-gone capacity-reuse probe. All four state tls: false.
+  { fn: "standaloneConnectOpts", key: "tls", sites: 111, untypecheckedSites: 84 },
 ];
 
 /**

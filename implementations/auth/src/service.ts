@@ -55,7 +55,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { connect, credsAuthenticator, type NatsConnection } from "@nats-io/transport-node";
 import { jetstreamManager } from "@nats-io/jetstream";
 import { Kvm } from "@nats-io/kv";
-import { admissionMediatorGrants, EpEnvelopeError, ensureAuthorityStores, isReachable, type ParsedArgs, type SecretStore } from "@cotal-ai/core";
+import { admissionMediatorGrants, agentKvWatchConnectionUid, agentKvWatchConsumerName, channelBucket, ensureAgentKvWatches, EpEnvelopeError, ensureAuthorityStores, isReachable, permissionsFor, presenceBucket, type ParsedArgs, type SecretStore } from "@cotal-ai/core";
 import { findCotalRoot, userAuthStateDir, workspaceSecretStore } from "@cotal-ai/workspace";
 import { decodeJwt } from "jose";
 import { startAuthCallout } from "./callout.js";
@@ -94,6 +94,7 @@ import {
   saveAuthServiceInfo,
   spaceIssuer,
 } from "./store.js";
+import { AgentKvWatchAllocationLedger } from "./watch-allocation.js";
 
 /** JWKS max-age seconds — the cache contract's knob. Exported so a rotation tool can compute the
  *  retire floor (max-age + max bearer TTL) from it. */
@@ -117,6 +118,78 @@ const PUBLIC_MAX_IN_FLIGHT = 64; // global concurrent-admission cap on the publi
 const PUBLIC_DEADLINE_MS = 10_000; // hard wall-clock deadline per public request
 
 type Values = Record<string, string | undefined>;
+
+function provisionerGrants(space: string, connId: string): { publish: string[]; subscribe: string[] } {
+  const permissions = permissionsFor(
+    "provisioner",
+    space,
+    { owner: "local", actor: connId, connId },
+    {},
+  ) as { pub?: { allow?: unknown }; sub?: { allow?: unknown } };
+  const publish = permissions.pub?.allow;
+  const subscribe = permissions.sub?.allow;
+  if (!Array.isArray(publish) || !publish.every((v) => typeof v === "string")
+    || !Array.isArray(subscribe) || !subscribe.every((v) => typeof v === "string"))
+    throw new Error("auth-service: core provisioner profile did not produce string publish/subscribe grants");
+  return { publish, subscribe } as { publish: string[]; subscribe: string[] };
+}
+
+/** One ephemeral trusted provisioner per watcher-instance ensure. Coalesce duplicate admission for
+ * the same actor/lifecycle/connection tuple. The account signing seed is already resident in this
+ * service for callout credential minting; the short-lived connection adds no stronger authority
+ * and closes before the broker JWT leaves the callout. */
+function interactiveWatchProvisioner(opts: {
+  server: string;
+  space: string;
+  dir: string;
+  dataAccount: { pub: string; signingSeed: string };
+  log: (line: string) => void;
+}): (args: { owner: string; actor: string; lifecycleUid: string; watchUid: string }) => Promise<void> {
+  const inFlight = new Map<string, Promise<void>>();
+  const allocations = new AgentKvWatchAllocationLedger(opts.dir);
+  return (args) => {
+    const key = JSON.stringify([args.owner, args.actor, args.lifecycleUid, args.watchUid]);
+    const existing = inFlight.get(key);
+    if (existing) return existing;
+    const run = allocations.prepare(args, async () => {
+      const client = await openAuthorityClient({
+        server: opts.server,
+        space: opts.space,
+        dataAccount: opts.dataAccount,
+        label: `cotal:auth-watch-provision:${opts.space}`,
+        grants: (connId) => provisionerGrants(opts.space, connId),
+        log: opts.log,
+        noReconnect: true,
+      });
+      const jsm = await jetstreamManager(client.nc);
+      const pairGone = async (watchUid: string): Promise<boolean> => {
+        for (const [kind, stream] of [
+          ["presence", `KV_${presenceBucket(opts.space)}`],
+          ["channels", `KV_${channelBucket(opts.space)}`],
+        ] as const) {
+          try {
+            await jsm.consumers.info(stream, agentKvWatchConsumerName(kind, args.owner, args.actor, watchUid));
+            return false;
+          } catch (err) {
+            const missing = (err as { code?: number }).code === 404 || /(consumer|stream) not found/i.test((err as Error).message);
+            if (!missing) throw err;
+          }
+        }
+        return true;
+      };
+      return {
+        pairGone,
+        ensurePair: () => ensureAgentKvWatches(client.nc, opts.space, args.owner, args.actor, args.watchUid),
+        close: () => client.close(),
+      };
+    });
+    inFlight.set(key, run);
+    void run.finally(() => {
+      if (inFlight.get(key) === run) inFlight.delete(key);
+    }).catch(() => {});
+    return run;
+  };
+}
 
 /** The service's AUTHORITY PLANE (R1, SPEC 13.1): the two self-minted data-account connections
  *  behind (a) the composed connect authorizer — the file-ledger arm PLUS the credential deny-new
@@ -485,6 +558,13 @@ export async function runAuthService(args: ParsedArgs, store?: SecretStore): Pro
     authenticator: credsAuthenticator(new TextEncoder().encode(callout.calloutCreds)),
     name: `cotal:auth-service:${space}`,
   });
+  const ensureWatches = interactiveWatchProvisioner({
+    server,
+    space,
+    dir,
+    dataAccount: { pub: keys.dataAccount.pub, signingSeed: keys.dataAccount.signingSeed },
+    log: (line) => console.error(line),
+  });
   startAuthCallout(nc as never, {
     xkeySeed: callout.xkey.seed,
     authAccount: { pub: callout.account.pub, signingSeed: callout.account.signingSeed },
@@ -493,6 +573,20 @@ export async function runAuthService(args: ParsedArgs, store?: SecretStore): Pro
     token: { key: issuer.localKeySet(), issuer: issuer.issuer },
     authorizeActor: plane.authorizeConnect,
     permissionsFor: calloutPermissions(ledgerAclResolver(dir)),
+    prepareConnection: async (validated, connId) => {
+      // Elevated views do not carry the agent watcher grants. Every ordinary user-auth process
+      // gets its own trusted-provisioned LastPerSubject pair before its broker JWT is released.
+      if (validated.act.view !== undefined) return;
+      const lifecycleUid = validated.act.lifecycleUid;
+      if (typeof lifecycleUid !== "string" || !lifecycleUid)
+        throw new Error("auth-service: cannot prepare agent KV watchers without a lifecycleUid");
+      await ensureWatches({
+        owner: validated.owner,
+        actor: validated.act.actor,
+        lifecycleUid,
+        watchUid: agentKvWatchConnectionUid(connId),
+      });
+    },
     log: (l) => console.error(l),
   });
   // The subscription must be ON the broker before readiness is signaled — an `up` that recorded a
