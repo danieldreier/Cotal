@@ -2429,6 +2429,10 @@ export class Manager {
           subscribe: opts.subscribe,
           allowSubscribe: opts.allowSubscribe,
           role: opts.role,
+          // User-mode endpoints bind connection-owned watcher pairs created under the auth
+          // callout. A lifecycle-named pair here has no possible binder and only wastes broker
+          // consumers until teardown.
+          lifecycleKvWatches: false,
         }),
       );
       // The store holds the source of truth; the bearer re-exec (`--token-file`) and the launch's
@@ -2765,13 +2769,20 @@ export class Manager {
     // carry a.lifecycleUid, so a stale/replayed teardown for this retired incarnation is broker-denied
     // against a same-name successor's footprint (its names embed a different uid).
     const creds = await mintCreds(this.auth!, newIdentity(), "deprovisioner", {
-      deprovisionTarget: { principal: a.id, lifecycleUid: a.lifecycleUid },
+      deprovisionTarget: { principal: a.id, lifecycleUid: a.lifecycleUid, lifecycleKvWatches: false },
     });
     // Bound the detached broker teardown so a wedged broker can't leave the deprovision promise pending
     // forever with no log — the timeout rejects into freeSlot's fail-loud `.catch` (paired with the
     // helper's own fail-fast connect). The durables/ACL row still fall to space teardown as a backstop.
     await withTimeout(
-      deprovisionAgent({ servers: this.servers ?? DEFAULT_SERVER, space: this.space, targetId: a.id, lifecycleUid: a.lifecycleUid, creds }),
+      deprovisionAgent({
+        servers: this.servers ?? DEFAULT_SERVER,
+        space: this.space,
+        targetId: a.id,
+        lifecycleUid: a.lifecycleUid,
+        lifecycleKvWatches: false,
+        creds,
+      }),
       DEPROVISION_TIMEOUT_MS,
       `deprovision ${a.name} (${a.id}): broker teardown timed out`,
     );

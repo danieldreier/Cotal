@@ -632,13 +632,18 @@ DM and TASK confidentiality, and the CHAT read boundary, close the leak paths:
    two `kvw-{p|c}-<owner>-<actor>-<watchUid>` public-KV watchers. Each KV watcher is a push consumer whose
    destination is fixed to its instance-owned `kvwatch.{p|c}` rail before the agent connects; the
    agent verifies and binds it with INFO/ACK and an exact subscription, never CREATE/MSG.NEXT. Agents
-   launched through a manager retain their lifecycle-owned provisioned pair. For every ordinary
-   user-auth connection, the trusted auth callout MUST derive a bounded watcher UID from the already
-   validated client inbox nonce and ensure that connection's canonical pair before releasing its
-   broker JWT. Distinct live connections under one actor lifecycle MUST therefore receive distinct
-   watcher names, complete LastPerSubject snapshots, and exact deletion grants. A graceful stop may
-   delete only its connection's pair; an ungraceful leftover expires by inactivity and MUST NOT be
-   inherited by a later cold connection, regardless of its pending counts.
+   launched with static credentials retain their lifecycle-owned provisioned pair. For every ordinary
+   user-auth connection (interactive or manager-launched), the trusted auth callout MUST derive a
+   bounded watcher UID from the already validated client inbox nonce and ensure that connection's
+   canonical pair before releasing its broker JWT. The callout MUST persist an allocation before
+   creating either consumer, MUST admit no more than 32 retained pairs per canonical actor across
+   lifecycle rotation and auth-service restart, and MUST reclaim an allocation only after exact-name
+   Consumer INFO proves both consumers absent. This reconciliation MUST NOT require CONSUMER.LIST.
+   Distinct live connections under one actor lifecycle MUST therefore receive distinct watcher names,
+   complete LastPerSubject snapshots, and exact deletion grants. A graceful stop may delete only its
+   connection's pair; an ungraceful leftover expires by inactivity and MUST NOT be inherited by a
+   later cold connection, regardless of its pending counts. A user-mode manager MUST NOT additionally
+   provision or authorize teardown of an unbindable lifecycle-named watcher pair.
    bind their own `dm_…-<uid>`/`svc_<role>`/`dlv_…-<uid>` only (never create); the mixed pre-auth
    fan-out store is read by a trusted reader, not the agent (§8, item 5).
    Those bare/multi-filter create forms are not granted to agents (default-deny), with explicit

@@ -84,7 +84,10 @@ The guarantees, at a glance, each enforced by the broker per
   user-auth connection, the auth callout derives a distinct bounded watcher UID from the validated
   client inbox nonce and performs the trusted ensure before releasing the broker JWT. Overlapping
   commands therefore have independent current-state snapshots and deletion authority; crashed
-  pairs expire by inactivity rather than being inherited by a cold connection.
+  pairs expire by inactivity rather than being inherited by a cold connection. A durable reservation
+  ledger caps retained pairs at 32 per actor across auth-service restarts and lifecycle rotation;
+  reclaim uses exact Consumer INFO for both names, never broad consumer-list authority. User-mode
+  manager provisioning does not create an unbindable lifecycle-named pair alongside them.
 - **Transport secrecy (optional)**: `cotals://` enforces TLS for the hop to the broker.
   It protects that hop, not the broker itself.
 

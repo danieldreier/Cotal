@@ -297,13 +297,16 @@ export interface DeprovisionTarget {
   principal: string;
   /** The retired/target incarnation's lifecycle UID — the successor's differs by construction. */
   lifecycleUid: string;
+  /** Whether this lifecycle was provisioned with lifecycle-named public-KV watchers. Defaults true.
+   *  User-mode managers set false because their callout creates connection-owned pairs instead. */
+  lifecycleKvWatches?: boolean;
 }
 
 /** Resolve a deprovision target to its `(owner, actor, lifecycleUid)` triple. Shared by the
  *  deprovisioner permission pin and the teardown helper so they can't diverge. */
-export function deprovisionTargetPrincipal(target: DeprovisionTarget): { owner: string; actor: string; lifecycleUid: string } {
+export function deprovisionTargetPrincipal(target: DeprovisionTarget): { owner: string; actor: string; lifecycleUid: string; lifecycleKvWatches?: boolean } {
   const pr = parsePrincipalKey(target.principal) ?? { owner: DEV_OWNER, actor: target.principal };
-  return { ...pr, lifecycleUid: assertLifecycleToken(target.lifecycleUid) };
+  return { ...pr, lifecycleUid: assertLifecycleToken(target.lifecycleUid), lifecycleKvWatches: target.lifecycleKvWatches };
 }
 
 export function parsePrincipalKey(key: string): { owner: string; actor: string } | null {

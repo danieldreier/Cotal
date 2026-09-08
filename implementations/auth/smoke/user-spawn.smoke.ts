@@ -107,9 +107,10 @@ const {
   setupSpaceStreams, principalKey, registry, spaceWildcard, clearChannel, mintLifecycleUid, eventChannel,
   resolveService, invokeCommand, standaloneConnectOpts, EpEnvelopeError, epAuthBucket,
   mintMembershipObserverCreds, observePlaneLivenessWithCreds,
-  presenceBucket, channelBucket,
+  presenceBucket, channelBucket, agentKvWatchConsumerName,
 } = await import("@cotal-ai/core");
 const { connect: rawConnect } = await import("@nats-io/transport-node");
+const { jetstreamManager } = await import("@nats-io/jetstream");
 const { Kvm } = await import("@nats-io/kv");
 const { createHash } = await import("node:crypto");
 const { decodeJwt } = await import("jose");
@@ -118,6 +119,7 @@ const {
   cotalAuthProvider, establishIdpSession, fetchIdpJwt, grantActor, loadCalloutAuth, loadAuthServiceInfo,
   actorLedgerDir, managedActorLedgerDir, ledgerRowFilename, deriveOwnerForIdpSubject, loadOwnerSecret, loadPinnedIdp,
 } = await import("@cotal-ai/auth");
+const { AGENT_KV_WATCH_ALLOCATION_LIMIT } = await import("../src/watch-allocation.js");
 // @cotal-ai/manager + @cotal-ai/connector-core are not deps of @cotal-ai/auth. Drive the REAL Manager
 // from its built dist by relative path (shares the one @cotal-ai/core registry instance — dist — so the
 // in-process `e2e` connector + the auth provider are visible to it); inline the tiny launch-env mapping
@@ -489,9 +491,9 @@ try {
       stream_detail?: { name: string; consumer_detail?: WatchInfo[] }[];
     }[];
   };
-  const cliWatchPrefix = (kind: "presence" | "channels") =>
-    `kvw-${kind === "presence" ? "p" : "c"}-${principalKey(OWNER, "cli").name}-`;
-  const listCliWatches = async (kind: "presence" | "channels"): Promise<WatchInfo[]> => {
+  const actorWatchPrefix = (actor: string, kind: "presence" | "channels") =>
+    `kvw-${kind === "presence" ? "p" : "c"}-${principalKey(OWNER, actor).name}-`;
+  const listActorWatches = async (actor: string, kind: "presence" | "channels"): Promise<WatchInfo[]> => {
     const stream = `KV_${kind === "presence" ? presenceBucket(SPACE) : channelBucket(SPACE)}`;
     const out: WatchInfo[] = [];
     const jsz = await (await fetch(
@@ -501,13 +503,127 @@ try {
       for (const candidate of account.stream_detail ?? [])
         if (candidate.name === stream)
           for (const info of candidate.consumer_detail ?? [])
-            if (info.name.startsWith(cliWatchPrefix(kind))) out.push(info);
+            if (info.name.startsWith(actorWatchPrefix(actor, kind))) out.push(info);
     return out.sort((a, b) => a.name.localeCompare(b.name));
   };
+  const listCliWatches = (kind: "presence" | "channels") => listActorWatches("cli", kind);
   const listBothCliWatches = () => Promise.all([listCliWatches("presence"), listCliWatches("channels")]);
+  const alphaLifecycleUid = incUid("alpha");
+  const alphaWatches = await Promise.all([listActorWatches("alpha", "presence"), listActorWatches("alpha", "channels")]);
+  check("a managed user-mode spawn provisions only its bindable connection-owned watcher pair",
+    alphaWatches.every((infos, i) => infos.length === 1 && infos[0].name !== agentKvWatchConsumerName(
+      i === 0 ? "presence" : "channels", OWNER, "alpha", alphaLifecycleUid,
+    )), alphaWatches.map((infos) => infos.map((info) => info.name)));
   const beforeFirstConnect = await listBothCliWatches();
   check("a human exchange releases no shared lifecycle watcher before a concrete broker connection exists",
     beforeFirstConnect.every((infos) => infos.length === 0), beforeFirstConnect.map((infos) => infos.map((info) => info.name)));
+
+  // A valid bearer must not be a broker-resource amplifier. A raw callout connection deliberately
+  // never constructs CotalEndpoint, so it never subscribes either trusted watcher delivery rail:
+  // every pair below stays unbound. The auth service must admit only a bounded number for one
+  // (principal, lifecycle), remember that bound across its own restart, then reclaim capacity as
+  // soon as the exact consumers are gone. The monitor is harness-only observability; no production
+  // profile gains CONSUMER.LIST.
+  const unboundConnections: import("@nats-io/transport-node").NatsConnection[] = [];
+  const burst: Array<"admitted" | "denied"> = [];
+  for (let offset = 0; offset < AGENT_KV_WATCH_ALLOCATION_LIMIT + 8; offset += 4) {
+    burst.push(...await Promise.all(Array.from({ length: 4 }, async () => {
+      try {
+        const nc = await rawConnect({
+          servers: SERVER,
+          ...standaloneConnectOpts({ bearer: opCreds.bearer, sentinelCreds: opCreds.sentinelCreds, tls: false }),
+          maxReconnectAttempts: 0,
+        });
+        unboundConnections.push(nc);
+        return "admitted" as const;
+      } catch {
+        return "denied" as const;
+      }
+    })));
+  }
+  const cappedWatches = await listBothCliWatches();
+  // Four concurrent requests exercise the per-actor async serialization without exceeding NATS's
+  // own callout timeout; ten batches then drive past the durable ceiling.
+  check("concurrent nonce bursts admit exactly the documented number of unbound watcher pairs",
+    unboundConnections.length === AGENT_KV_WATCH_ALLOCATION_LIMIT
+      && burst.filter((result) => result === "denied").length === 8
+      && cappedWatches.every((infos) => infos.length === AGENT_KV_WATCH_ALLOCATION_LIMIT && infos.every((info) => info.push_bound !== true)),
+    { burst, watches: cappedWatches.map((infos) => infos.map((info) => ({ name: info.name, pushBound: info.push_bound }))) });
+  await killPid(authChild.pid);
+  // The auth service holds a fail-closed plane claim. A SIGKILLed predecessor is reclaimable only
+  // while the real delivery liveness oracle can prove its broker connections GONE; this is the same
+  // restart boundary exercised later in section E, kept here so the capacity assertion cannot be
+  // satisfied by process-local memory.
+  const allocationOracleObserverCreds = await mintMembershipObserverCreds(auth, newIdentity());
+  const allocationOracleId = newIdentity();
+  const allocationOracle = new CotalEndpoint({
+    space: SPACE, servers: SERVER, creds: await mintCreds(auth, allocationOracleId, "delivery"),
+    card: { id: allocationOracleId.id, name: "allocation-oracle", role: "delivery", kind: "endpoint" },
+    channels: [], consume: false, registerPresence: false, watchPresence: false,
+  });
+  allocationOracle.on("error", () => {});
+  await allocationOracle.start();
+  await allocationOracle.startPlane3(() => undefined, {
+    planeConnLiveness: (query) => observePlaneLivenessWithCreds({
+      servers: SERVER, observerCreds: allocationOracleObserverCreds, accountId: auth.account.pub,
+      query: query as import("@cotal-ai/core").PlaneLivenessQuery,
+    }),
+  });
+  authChild = spawnAuthService();
+  await waitAuthReady();
+  await allocationOracle.stop();
+  let overflowError = "";
+  try {
+    const overflow = await rawConnect({
+      servers: SERVER,
+      ...standaloneConnectOpts({ bearer: opCreds.bearer, sentinelCreds: opCreds.sentinelCreds, tls: false }),
+      maxReconnectAttempts: 0,
+    });
+    unboundConnections.push(overflow);
+  } catch (err) {
+    overflowError = (err as Error).message;
+  }
+  // nats-server intentionally exposes only the generic signed-callout denial to a connecting
+  // client ("Authorization Violation"), not the daemon's private diagnostic. The preceding exact
+  // counts plus a healthy restarted service make any rejection here discriminating; the old code
+  // admits it and leaves overflowError empty.
+  check("the unbound watcher allocation limit survives an auth-service restart and refuses one more pair",
+    overflowError.length > 0, overflowError || "the overflow connection was admitted");
+  for (const nc of unboundConnections) await nc.drain().catch(() => nc.close());
+  const watcherAdmin = await jetstreamManager(watchProbe);
+  const presenceStream = `KV_${presenceBucket(SPACE)}`;
+  for (const info of await listCliWatches("presence"))
+    await watcherAdmin.consumers.delete(presenceStream, info.name);
+  let partialPairError = "";
+  try {
+    const partial = await rawConnect({
+      servers: SERVER,
+      ...standaloneConnectOpts({ bearer: opCreds.bearer, sentinelCreds: opCreds.sentinelCreds, tls: false }),
+      maxReconnectAttempts: 0,
+    });
+    await partial.drain();
+  } catch (err) {
+    partialPairError = (err as Error).message;
+  }
+  check("one surviving consumer keeps its allocation occupied (reclaim requires BOTH exact names gone)",
+    partialPairError.length > 0 && (await listCliWatches("channels")).length === AGENT_KV_WATCH_ALLOCATION_LIMIT,
+    partialPairError || "a half-deleted allocation was reclaimed");
+  const channelStream = `KV_${channelBucket(SPACE)}`;
+  for (const info of await listCliWatches("channels"))
+    await watcherAdmin.consumers.delete(channelStream, info.name);
+  const reclaimed = await rawConnect({
+    servers: SERVER,
+    ...standaloneConnectOpts({ bearer: opCreds.bearer, sentinelCreds: opCreds.sentinelCreds, tls: false }),
+    maxReconnectAttempts: 0,
+  });
+  await reclaimed.drain();
+  for (const info of await listCliWatches("presence"))
+    await watcherAdmin.consumers.delete(presenceStream, info.name);
+  for (const info of await listCliWatches("channels"))
+    await watcherAdmin.consumers.delete(channelStream, info.name);
+  check("deleted unbound pairs are reconciled out of the allocation ledger and capacity is reusable",
+    (await listBothCliWatches()).every((infos) => infos.length === 0));
+
   observer = new CotalEndpoint({
     space: SPACE, servers: SERVER, bearer: opCreds.bearer, sentinelCreds: opCreds.sentinelCreds,
     lifecycleUid: opClaims.act.lifecycleUid,

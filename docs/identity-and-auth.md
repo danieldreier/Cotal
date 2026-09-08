@@ -72,7 +72,11 @@ the broker JWT. Each overlapping command therefore owns a distinct LastPerSubjec
 INFO/ACK/DELETE authority; stopping one cannot delete another's watchers. A graceful stop deletes its
 own pair, while a crashed pair expires through its inactivity threshold and a cold process receives a
 fresh connection-owned snapshot. Static/dev agents, whose provisioned connection identity is fixed,
-continue to use lifecycle-owned watcher pairs.
+continue to use lifecycle-owned watcher pairs. The auth service durably reserves each user-auth pair
+before broker creation and admits at most 32 retained pairs per actor, including across lifecycle
+rotation and auth-service restart. A later admission reclaims a slot only after exact Consumer INFO
+proves both named consumers gone; it needs no broad consumer listing grant. Manager-launched user-mode
+agents use only these bindable connection-owned pairs, not an additional lifecycle pair.
 
 **An agent's channel scope is three verbs**: `subscribe` (reads at boot),
 `allowSubscribe` (read ACL), `allowPublish` (post ACL, default-deny), declared in its

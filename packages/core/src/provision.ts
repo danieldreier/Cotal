@@ -643,6 +643,11 @@ export interface ProvisionOpts extends MintOpts {
    *  is not written here — the agent self-joins its durable channels via the daemon's `ctl.delivery` op at
    *  connect. */
   durableMembership?: boolean;
+  /** Pre-create lifecycle-named public-KV watcher consumers (default true). Static credentials bind
+   *  that lifecycle pair. User-auth credentials instead bind a connection-owned pair provisioned
+   *  by the auth callout, so their manager path sets this false rather than allocating two consumers
+   *  that no endpoint can ever use. */
+  lifecycleKvWatches?: boolean;
 }
 
 /** The privileged onboarding ops a launcher needs at spawn — implemented by a connected, permissive
@@ -765,7 +770,8 @@ export async function provisionAgentDurables(
       );
   await provisioner.provisionDmInbox(pr.owner, pr.actor, uid);
   await provisioner.provisionDlvInbox(pr.owner, pr.actor, uid);
-  await provisioner.provisionAgentKvWatches(pr.owner, pr.actor, uid);
+  if (opts.lifecycleKvWatches !== false)
+    await provisioner.provisionAgentKvWatches(pr.owner, pr.actor, uid);
   // Record the agent's read ACL in the durable registry (the same act as baking it into the JWT) so the
   // server-side delivery daemon can re-authorize this agent's durable entries + validate its runtime
   // durable-joins — it holds no in-memory ledger. The agent SELF-JOINS its durable boot channels via the
@@ -2104,8 +2110,10 @@ function deprovisionerPermissions(space: string, pr: MintPrincipal, deprovisionT
         // replayed teardown is broker-DENIED there (SPEC 13.1 / Appendix "deprovisioner").
         `$JS.API.CONSUMER.DELETE.${DM}.${dmDurable(t.owner, t.actor, t.lifecycleUid)}`,
         `$JS.API.CONSUMER.DELETE.${DLV}.${dlvDurable(t.owner, t.actor, t.lifecycleUid)}`,
-        `$JS.API.CONSUMER.DELETE.${PKV}.${agentKvWatchConsumerName("presence", t.owner, t.actor, t.lifecycleUid)}`,
-        `$JS.API.CONSUMER.DELETE.${CHKV}.${agentKvWatchConsumerName("channels", t.owner, t.actor, t.lifecycleUid)}`,
+        ...(t.lifecycleKvWatches === false ? [] : [
+          `$JS.API.CONSUMER.DELETE.${PKV}.${agentKvWatchConsumerName("presence", t.owner, t.actor, t.lifecycleUid)}`,
+          `$JS.API.CONSUMER.DELETE.${CHKV}.${agentKvWatchConsumerName("channels", t.owner, t.actor, t.lifecycleUid)}`,
+        ]),
         // Purge the target lifecycle's read-ACL row (own-target exact key only — the reader then treats
         // it as an unknown owner). `kvm.open` binds the pre-created bucket; the purge rides
         // `$KV.<aclBucket>.<key>`.

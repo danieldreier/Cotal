@@ -55,7 +55,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { connect, credsAuthenticator, type NatsConnection } from "@nats-io/transport-node";
 import { jetstreamManager } from "@nats-io/jetstream";
 import { Kvm } from "@nats-io/kv";
-import { admissionMediatorGrants, agentKvWatchConnectionUid, ensureAgentKvWatches, EpEnvelopeError, ensureAuthorityStores, isReachable, permissionsFor, type ParsedArgs, type SecretStore } from "@cotal-ai/core";
+import { admissionMediatorGrants, agentKvWatchConnectionUid, agentKvWatchConsumerName, channelBucket, ensureAgentKvWatches, EpEnvelopeError, ensureAuthorityStores, isReachable, permissionsFor, presenceBucket, type ParsedArgs, type SecretStore } from "@cotal-ai/core";
 import { findCotalRoot, userAuthStateDir, workspaceSecretStore } from "@cotal-ai/workspace";
 import { decodeJwt } from "jose";
 import { startAuthCallout } from "./callout.js";
@@ -94,6 +94,7 @@ import {
   saveAuthServiceInfo,
   spaceIssuer,
 } from "./store.js";
+import { AgentKvWatchAllocationLedger } from "./watch-allocation.js";
 
 /** JWKS max-age seconds — the cache contract's knob. Exported so a rotation tool can compute the
  *  retire floor (max-age + max bearer TTL) from it. */
@@ -140,15 +141,17 @@ function provisionerGrants(space: string, connId: string): { publish: string[]; 
 function interactiveWatchProvisioner(opts: {
   server: string;
   space: string;
+  dir: string;
   dataAccount: { pub: string; signingSeed: string };
   log: (line: string) => void;
 }): (args: { owner: string; actor: string; lifecycleUid: string; watchUid: string }) => Promise<void> {
   const inFlight = new Map<string, Promise<void>>();
+  const allocations = new AgentKvWatchAllocationLedger(opts.dir);
   return (args) => {
     const key = JSON.stringify([args.owner, args.actor, args.lifecycleUid, args.watchUid]);
     const existing = inFlight.get(key);
     if (existing) return existing;
-    const run = (async () => {
+    const run = allocations.prepare(args, async () => {
       const client = await openAuthorityClient({
         server: opts.server,
         space: opts.space,
@@ -158,12 +161,28 @@ function interactiveWatchProvisioner(opts: {
         log: opts.log,
         noReconnect: true,
       });
-      try {
-        await ensureAgentKvWatches(client.nc, opts.space, args.owner, args.actor, args.watchUid);
-      } finally {
-        await client.close();
-      }
-    })();
+      const jsm = await jetstreamManager(client.nc);
+      const pairGone = async (watchUid: string): Promise<boolean> => {
+        for (const [kind, stream] of [
+          ["presence", `KV_${presenceBucket(opts.space)}`],
+          ["channels", `KV_${channelBucket(opts.space)}`],
+        ] as const) {
+          try {
+            await jsm.consumers.info(stream, agentKvWatchConsumerName(kind, args.owner, args.actor, watchUid));
+            return false;
+          } catch (err) {
+            const missing = (err as { code?: number }).code === 404 || /(consumer|stream) not found/i.test((err as Error).message);
+            if (!missing) throw err;
+          }
+        }
+        return true;
+      };
+      return {
+        pairGone,
+        ensurePair: () => ensureAgentKvWatches(client.nc, opts.space, args.owner, args.actor, args.watchUid),
+        close: () => client.close(),
+      };
+    });
     inFlight.set(key, run);
     void run.finally(() => {
       if (inFlight.get(key) === run) inFlight.delete(key);
@@ -542,6 +561,7 @@ export async function runAuthService(args: ParsedArgs, store?: SecretStore): Pro
   const ensureWatches = interactiveWatchProvisioner({
     server,
     space,
+    dir,
     dataAccount: { pub: keys.dataAccount.pub, signingSeed: keys.dataAccount.signingSeed },
     log: (line) => console.error(line),
   });

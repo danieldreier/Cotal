@@ -727,6 +727,9 @@ export async function deprovisionAgent(opts: {
   space: string;
   targetId: string;
   lifecycleUid: string;
+  /** Match the provisioned footprint. Defaults true; user-auth manager lifecycles have only
+   *  connection-owned watcher pairs, which age out independently through their bounded ledger. */
+  lifecycleKvWatches?: boolean;
   creds?: string;
 }): Promise<void> {
   const nc = await connect({
@@ -743,12 +746,18 @@ export async function deprovisionAgent(opts: {
     // The target is a full principal dot-form (user-mode agent) or a bare static actor id under the
     // local owner, PLUS the exact lifecycle uid being torn down — the SAME resolution the
     // deprovisioner cred's permission pin used, so the delete names and the grant can't diverge.
-    const t = deprovisionTargetPrincipal({ principal: opts.targetId, lifecycleUid: opts.lifecycleUid });
+    const t = deprovisionTargetPrincipal({
+      principal: opts.targetId,
+      lifecycleUid: opts.lifecycleUid,
+      lifecycleKvWatches: opts.lifecycleKvWatches,
+    });
     const jsm = await jetstreamManager(nc);
     await deleteConsumerIdempotent(jsm, dmStream(opts.space), dmDurable(t.owner, t.actor, t.lifecycleUid));
     await deleteConsumerIdempotent(jsm, dlvStream(opts.space), dlvDurable(t.owner, t.actor, t.lifecycleUid));
-    await deleteConsumerIdempotent(jsm, `KV_${presenceBucket(opts.space)}`, agentKvWatchConsumerName("presence", t.owner, t.actor, t.lifecycleUid));
-    await deleteConsumerIdempotent(jsm, `KV_${channelBucket(opts.space)}`, agentKvWatchConsumerName("channels", t.owner, t.actor, t.lifecycleUid));
+    if (t.lifecycleKvWatches !== false) {
+      await deleteConsumerIdempotent(jsm, `KV_${presenceBucket(opts.space)}`, agentKvWatchConsumerName("presence", t.owner, t.actor, t.lifecycleUid));
+      await deleteConsumerIdempotent(jsm, `KV_${channelBucket(opts.space)}`, agentKvWatchConsumerName("channels", t.owner, t.actor, t.lifecycleUid));
+    }
     await deleteAcl(await openAclRegistry(nc, opts.space), principalKey(t.owner, t.actor).key, t.lifecycleUid);
   } finally {
     await nc.drain();

@@ -1,0 +1,74 @@
+{
+  "suite": "implementations/auth/smoke/user-spawn.smoke.ts (watch-allocation cells) + packages/core/smoke/manager-split-auth.smoke.ts",
+  "guard": "a reusable user bearer cannot amplify connection nonces into unbounded public-KV watcher consumers; retained pairs stay capped across concurrency, lifecycle rotation, and auth-service restart, reclaim requires both exact consumers gone, and user-mode lifecycle teardown gains no authority over an unprovisioned pair",
+  "command": "pnpm --filter @cotal-ai/core build && pnpm --filter @cotal-ai/auth build && pnpm --filter @cotal-ai/manager exec tsc -p tsconfig.json && pnpm smoke:user-spawn:live",
+  "completionMarker": "USER-SPAWN SMOKE",
+  "proveWith": "node scripts/mutation-proof.mjs --config bin/smoke/mutations/user-watch-allocation.json",
+  "why": [
+    "The live suite uses a real nats-server, real auth callout, real manager, and raw bearer",
+    "connections that never construct CotalEndpoint. The monitor is harness-only observability;",
+    "no production credential receives CONSUMER.LIST.",
+    "",
+    "Mutations 1 and 2 independently remove the capacity test and the durable reserve-before-create",
+    "fence. Either must let the 40-nonce burst retain more than 32 pairs. Mutation 3 weakens BOTH-gone",
+    "to either-gone and must admit after only the presence half is deleted. Mutation 4 restores the",
+    "manager's unbindable lifecycle pair. Mutation 5 is the faster credential-matrix half: a user-mode",
+    "deprovisioner must not regain DELETE authority over a pair its lifecycle never provisioned.",
+    "",
+    "The build and afterRestore commands are load-bearing: user-spawn imports core/auth/manager dist."
+  ],
+  "mutations": [
+    {
+      "name": "capacity removed: every fresh connection nonce can reserve another watcher pair",
+      "file": "implementations/auth/src/watch-allocation.ts",
+      "find": "        if (rows.length >= AGENT_KV_WATCH_ALLOCATION_LIMIT)\n",
+      "replace": "        if (false && rows.length >= AGENT_KV_WATCH_ALLOCATION_LIMIT)\n",
+      "expectRed": "concurrent nonce bursts admit exactly the documented number of unbound watcher pairs",
+      "cell": "concurrent nonce bursts admit exactly the documented number of unbound watcher pairs",
+      "afterRestore": "pnpm --filter @cotal-ai/auth build",
+      "note": "This restores the reported resource-amplification defect directly."
+    },
+    {
+      "name": "reserve-after-never: broker consumers are created without durable allocation rows",
+      "file": "implementations/auth/src/watch-allocation.ts",
+      "find": "        writeAllocation(this.dir, allocation);\n",
+      "replace": "        if (false) writeAllocation(this.dir, allocation);\n",
+      "expectRed": "concurrent nonce bursts admit exactly the documented number of unbound watcher pairs",
+      "cell": "concurrent nonce bursts admit exactly the documented number of unbound watcher pairs",
+      "afterRestore": "pnpm --filter @cotal-ai/auth build",
+      "note": "Without reserve-before-create, concurrent requests all observe spare capacity and leave uncounted consumers."
+    },
+    {
+      "name": "half-gone reclaim: one missing consumer is treated as the whole allocation gone",
+      "file": "implementations/auth/src/service.ts",
+      "find": "            await jsm.consumers.info(stream, agentKvWatchConsumerName(kind, args.owner, args.actor, watchUid));\n            return false;\n",
+      "replace": "            await jsm.consumers.info(stream, agentKvWatchConsumerName(kind, args.owner, args.actor, watchUid));\n            continue;\n",
+      "expectRed": "one surviving consumer keeps its allocation occupied (reclaim requires BOTH exact names gone)",
+      "cell": "one surviving consumer keeps its allocation occupied (reclaim requires BOTH exact names gone)",
+      "afterRestore": "pnpm --filter @cotal-ai/auth build",
+      "note": "A pair is one allocation; either retained member must keep its slot occupied."
+    },
+    {
+      "name": "managed user mode again provisions an unbindable lifecycle watcher pair",
+      "file": "implementations/manager/src/manager.ts",
+      "find": "          // User-mode endpoints bind connection-owned watcher pairs created under the auth\n          // callout. A lifecycle-named pair here has no possible binder and only wastes broker\n          // consumers until teardown.\n          lifecycleKvWatches: false,\n",
+      "replace": "          // MUTANT: restore the unbindable lifecycle-named pair.\n          lifecycleKvWatches: true,\n",
+      "expectRed": "a managed user-mode spawn provisions only its bindable connection-owned watcher pair",
+      "cell": "a managed user-mode spawn provisions only its bindable connection-owned watcher pair",
+      "afterRestore": "pnpm --filter @cotal-ai/manager exec tsc -p tsconfig.json",
+      "note": "The endpoint derives its watcher UID from the connection nonce, so this lifecycle pair has no binder."
+    },
+    {
+      "name": "user-mode teardown regains DELETE authority over an unprovisioned lifecycle watcher pair",
+      "file": "packages/core/src/provision.ts",
+      "find": "        ...(t.lifecycleKvWatches === false ? [] : [\n",
+      "replace": "        ...(false ? [] : [\n",
+      "command": "pnpm --filter @cotal-ai/core build && pnpm smoke:manager-split",
+      "completionMarker": "MANAGER-SPLIT SMOKE",
+      "expectRed": "a user-mode deprovisioner is NOT granted delete on an unprovisioned lifecycle presence watcher",
+      "cell": "a user-mode deprovisioner is NOT granted delete on an unprovisioned lifecycle presence watcher",
+      "afterRestore": "pnpm --filter @cotal-ai/core build",
+      "note": "The permission mint and teardown footprint must stay coherent for user mode."
+    }
+  ]
+}

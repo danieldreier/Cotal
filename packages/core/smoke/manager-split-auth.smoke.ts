@@ -193,6 +193,10 @@ try {
   const dpvTarget = newIdentity();
   const dpvTargetUid = mintLifecycleUid(); // the ONE retired incarnation this teardown cred may name (SPEC 13.1)
   const dpvCreds = await mintCreds(auth, dpv, "deprovisioner", { deprovisionTarget: { principal: dpvTarget.id, lifecycleUid: dpvTargetUid } });
+  const userDpv = newIdentity();
+  const userDpvCreds = await mintCreds(auth, userDpv, "deprovisioner", {
+    deprovisionTarget: { principal: dpvTarget.id, lifecycleUid: dpvTargetUid, lifecycleKvWatches: false },
+  });
   const op = newIdentity();
   const opCreds = await mintCreds(auth, op, "operator");
   // PR 1.5 CLI-surface profiles (the last `manager` mints, now scoped).
@@ -335,6 +339,12 @@ try {
   check("DELETE the TARGET's presence watcher ALLOWED", await tryPublish(dpvCreds, tgtPresenceWatch, dpv.id) === "allowed");
   check("DELETE the TARGET's channel watcher ALLOWED", await tryPublish(dpvCreds, tgtChannelWatch, dpv.id) === "allowed");
   check("purge the TARGET's ACL row ($KV.<acl>.<id>) ALLOWED", await tryPublish(dpvCreds, tgtAcl, dpv.id) === "allowed");
+  check("a user-mode deprovisioner still deletes the TARGET's lifecycle DM durable",
+    await tryPublish(userDpvCreds, tgtDm, userDpv.id) === "allowed");
+  check("a user-mode deprovisioner is NOT granted delete on an unprovisioned lifecycle presence watcher",
+    await tryPublish(userDpvCreds, tgtPresenceWatch, userDpv.id) === "denied");
+  check("a user-mode deprovisioner is NOT granted delete on an unprovisioned lifecycle channel watcher",
+    await tryPublish(userDpvCreds, tgtChannelWatch, userDpv.id) === "denied");
   // Target-PINNED: a PEER's local-principal footprint (durable + ACL row) is out of reach — the grants name the target.
   check("DELETE a PEER's dm_local-<id> durable DENIED (target-pinned)", await tryPublish(dpvCreds, `$JS.API.CONSUMER.DELETE.${DM}.${dmDurable(DEV_OWNER, sup.id, dpvTargetUid)}`, dpv.id) === "denied");
   check("DELETE a PEER's dlv_local-<id> durable DENIED (target-pinned)", await tryPublish(dpvCreds, `$JS.API.CONSUMER.DELETE.${DLV}.${dlvDurable(DEV_OWNER, sup.id, dpvTargetUid)}`, dpv.id) === "denied");
