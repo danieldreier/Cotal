@@ -1,7 +1,7 @@
 {
   "suite": "implementations/auth/smoke/user-spawn.smoke.ts (watch-allocation cells) + packages/core/smoke/manager-split-auth.smoke.ts + implementations/manager/smoke/lifecycle-e2e.smoke.ts (static watcher teardown cells)",
   "guard": "a reusable user bearer cannot amplify connection nonces into unbounded public-KV watcher consumers; retained pairs stay capped across concurrency, lifecycle rotation, and auth-service restart; reclaim requires both exact consumers gone; user-mode teardown gains no authority over an unprovisioned pair while static manager retirement still deletes its provisioned lifecycle pair",
-  "command": "pnpm --filter @cotal-ai/core build && pnpm --filter @cotal-ai/auth build && pnpm --filter @cotal-ai/manager exec tsc -p tsconfig.json && pnpm smoke:user-spawn:live",
+  "command": "pnpm --filter @cotal-ai/core build && pnpm --filter @cotal-ai/workspace build && pnpm --filter @cotal-ai/auth build && pnpm --filter @cotal-ai/manager exec tsc -p tsconfig.json && pnpm smoke:user-spawn:live",
   "completionMarker": "USER-SPAWN SMOKE",
   "proveWith": "node scripts/mutation-proof.mjs --config bin/smoke/mutations/user-watch-allocation.json",
   "why": [
