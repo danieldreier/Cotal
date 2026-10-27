@@ -623,6 +623,7 @@ try {
     await watcherAdmin.consumers.delete(channelStream, info.name);
   check("deleted unbound pairs are reconciled out of the allocation ledger and capacity is reusable",
     (await listBothCliWatches()).every((infos) => infos.length === 0));
+  console.log("USER-WATCH ALLOCATION SECTION COMPLETE");
 
   observer = new CotalEndpoint({
     space: SPACE, servers: SERVER, bearer: opCreds.bearer, sentinelCreds: opCreds.sentinelCreds,

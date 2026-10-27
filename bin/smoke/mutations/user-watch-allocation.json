@@ -25,6 +25,7 @@
       "file": "implementations/auth/src/watch-allocation.ts",
       "find": "        if (rows.length >= AGENT_KV_WATCH_ALLOCATION_LIMIT)\n",
       "replace": "        if (false && rows.length >= AGENT_KV_WATCH_ALLOCATION_LIMIT)\n",
+      "completionMarker": "USER-WATCH ALLOCATION SECTION COMPLETE",
       "expectRed": "concurrent nonce bursts admit exactly the documented number of unbound watcher pairs",
       "cell": "concurrent nonce bursts admit exactly the documented number of unbound watcher pairs",
       "afterRestore": "pnpm --filter @cotal-ai/auth build",
