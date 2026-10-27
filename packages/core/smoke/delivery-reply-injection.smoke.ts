@@ -56,7 +56,7 @@ writeFileSync(join(dir, "server.conf"), serverConfig(auth, [auth], { transport: 
 const srv = spawn("nats-server", ["-c", join(dir, "server.conf")], { stdio: "ignore" });
 const releaseBroker = teardownOnSignal(srv, dir);
 
-const noop = { commitAcl: async () => {}, reissueAcl: async () => {}, provisionDmInbox: async () => {}, provisionDlvInbox: async () => {}, provisionTaskQueue: async () => {} };
+const noop = { commitAcl: async () => {}, reissueAcl: async () => {}, provisionDmInbox: async () => {}, provisionDlvInbox: async () => {}, provisionAgentKvWatches: async () => {}, provisionTaskQueue: async () => {} };
 let daemon: CotalEndpoint | undefined;
 
 try {

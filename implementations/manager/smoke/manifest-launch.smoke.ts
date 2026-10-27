@@ -114,6 +114,7 @@ const fakeHandle = (name: string): AgentHandle => ({ name, kind: "fake", status:
   ref: () => ({ id: "smoke-mgr" }),
   provisionDmInbox: async () => {},
   provisionDlvInbox: async () => {},
+  provisionAgentKvWatches: async () => {},
   commitAcl: async () => {},
   reissueAcl: async () => {},
   provisionTaskQueue: async () => {},

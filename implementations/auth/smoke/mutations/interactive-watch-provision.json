@@ -1,0 +1,28 @@
+{
+  "suite": "implementations/auth/smoke/user-spawn.smoke.ts",
+  "guard": "every ordinary user-auth broker connection receives its own trusted-provisioned fixed-rail public-KV watcher pair before admission, so overlapping commands have complete independent snapshots and one graceful stop cannot delete another connection's consumers",
+  "command": "corepack pnpm --filter @cotal-ai/core build && corepack pnpm --filter @cotal-ai/auth build && PATH=/workspace/state/tools/nats-server-v2.12.12-b:$PATH corepack pnpm smoke:user-spawn:live",
+  "progressPattern": "^  [✓✗]",
+  "minTicks": 8,
+  "completionMarker": "USER-SPAWN SMOKE",
+  "proveWith": "node scripts/mutation-proof.mjs --config implementations/auth/smoke/mutations/interactive-watch-provision.json",
+  "why": [
+    "Interactive CLI bearers use the agent profile's trusted-pinned public-KV watch rails even",
+    "though their presentation card is an endpoint. The auth callout knows the validated client",
+    "inbox nonce before it releases the broker JWT, so it derives a bounded connection UID and",
+    "uses the ephemeral provisioner to create that connection's exact pair. Distinct commands must",
+    "not collapse back to one lifecycle-owned pair: a second live process needs its own complete",
+    "LastPerSubject snapshot, and predecessor stop may delete only predecessor resources."
+  ],
+  "mutations": [
+    {
+      "name": "collapse every user-auth connection back onto one shared watcher uid",
+      "file": "packages/core/src/subjects.ts",
+      "find": "export function agentKvWatchConnectionUid(connId: string): string {\n  return assertLifecycleToken(\n    createHash(\"sha256\")\n      .update(`cotal-agent-kv-watch\\0${assertInboxConnId(connId)}`)\n      .digest(\"hex\")\n      .slice(0, 32),\n    \"agent KV watcher connection uid\",\n  );\n}",
+      "replace": "export function agentKvWatchConnectionUid(connId: string): string {\n  void assertInboxConnId(connId);\n  return \"00000000000000000000000000000000\";\n}",
+      "expectRed": "✗ FAIL: an overlapping successor binds a distinct, complete watcher pair while the predecessor stays live",
+      "cell": "an overlapping successor binds a distinct, complete watcher pair while the predecessor stays live",
+      "afterRestore": "corepack pnpm --filter @cotal-ai/core build && corepack pnpm --filter @cotal-ai/auth build"
+    }
+  ]
+}

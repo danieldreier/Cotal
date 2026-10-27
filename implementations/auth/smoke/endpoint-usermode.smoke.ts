@@ -82,6 +82,7 @@ try {
     space,
     token: { key: publicKey as never, issuer: ISS },
     authorizeActor: () => {},
+    prepareConnection: () => {},
     permissionsFor: calloutPermissions(() => ({ allowSubscribe: ["general"], allowPublish: ["general"], lifecycleUid: smokeUid, scope: [] })),
     log: (l) => { if (/denied|drop|fail/i.test(l)) console.log("  [callout]", l); },
   });

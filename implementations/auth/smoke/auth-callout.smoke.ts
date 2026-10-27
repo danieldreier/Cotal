@@ -115,6 +115,7 @@ try {
   // mint would pass every connect-time check (connect succeeds either way) yet silently disable
   // revocation. Decoding the JWT here is deterministic (no disconnect-timing flake).
   let minted: { jwt: string; principal: string; exp: number } | undefined;
+  let preparedNonce = "";
   calloutNc = await connect({ servers: SERVERS, authenticator: credsAuthenticator(enc(callout.calloutCreds)) });
   startAuthCallout(calloutNc as never, {
     xkeySeed: callout.xkey.seed,
@@ -125,12 +126,16 @@ try {
     authorizeActor: (t) => {
       if (t.act.actor !== "agent_1") throw new Error(`actor ${t.act.actor} not in the spawn ledger`);
     },
+    prepareConnection: (_t, connId) => { preparedNonce = connId; },
     // connId is the client's inbox nonce (req.connect_opts.name) — scope the reply inbox on it, NOT the
     // wide `_INBOX.>`. This is the least-privilege user-mode grant the cutover requires.
-    permissionsFor: (_t, connId) => ({
-      pub: { allow: ["smoke.allowed", `_INBOX_${connId}.>`] },
-      sub: { allow: ["smoke.allowed", `_INBOX_${connId}.>`] },
-    }),
+    permissionsFor: (_t, connId) => {
+      if (preparedNonce !== connId) throw new Error("connection resources were not prepared before permission mint");
+      return {
+        pub: { allow: ["smoke.allowed", `_INBOX_${connId}.>`] },
+        sub: { allow: ["smoke.allowed", `_INBOX_${connId}.>`] },
+      };
+    },
     onMint: (info) => { minted = info; },
     log: () => {},
   });
@@ -154,6 +159,8 @@ try {
   const goodBearer = await bearer();
   const good = await tryConnect(goodBearer);
   check("valid bearer connects via callout", !!good.nc, good.err);
+  check("connection preparation runs before permission mint for the validated inbox nonce",
+    preparedNonce === good.nonce, { preparedNonce, connectedNonce: good.nonce });
   if (good.nc) {
     let got = false;
     try { got = new TextDecoder().decode((await good.nc.request("smoke.allowed", enc("hi"), { timeout: 3000 })).data) === "ack:hi"; } catch { /* denied/timeout */ }

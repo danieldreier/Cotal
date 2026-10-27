@@ -76,6 +76,18 @@ The guarantees, at a glance, each enforced by the broker per
   provisioner-created bind-only consumers, so an agent cannot read someone else's inbox or
   steal another role's work; durable-channel backstop reads are re-authorized by a trusted
   reader ([delivery daemon](delivery-daemon.md)).
+- **Consumer-delivery confinement**: public presence/channel watches are instance-named push
+  consumers created by the ephemeral provisioner with a fixed instance-owned delivery subject.
+  Agents receive only exact bind/ack/delete and subscribe grants—never consumer create or pull
+  delivery—so JetStream cannot be used as a confused deputy to relay their allowed KV writes onto
+  another principal's private inbox. Static/dev agents use lifecycle-owned watcher names. For a
+  user-auth connection, the auth callout derives a distinct bounded watcher UID from the validated
+  client inbox nonce and performs the trusted ensure before releasing the broker JWT. Overlapping
+  commands therefore have independent current-state snapshots and deletion authority; crashed
+  pairs expire by inactivity rather than being inherited by a cold connection. A durable reservation
+  ledger caps retained pairs at 32 per actor across auth-service restarts and lifecycle rotation;
+  reclaim uses exact Consumer INFO for both names, never broad consumer-list authority. User-mode
+  manager provisioning does not create an unbindable lifecycle-named pair alongside them.
 - **Transport secrecy (optional)**: `cotals://` enforces TLS for the hop to the broker.
   It protects that hop, not the broker itself.
 

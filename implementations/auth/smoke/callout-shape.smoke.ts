@@ -80,6 +80,7 @@ async function run(cases: FakeMsg[]) {
     space: "shape",
     token: { key: {} as never, issuer: "https://auth.test" },
     authorizeActor: () => {},
+    prepareConnection: () => {},
     permissionsFor: () => ({}),
     log: () => {},
   }).done;
@@ -95,10 +96,27 @@ try {
     space: "shape",
     token: { key: {} as never, issuer: "i" },
     authorizeActor: () => {},
+    prepareConnection: () => {},
     permissionsFor: () => ({}),
   });
 } catch { threw = true; }
 check("startup refuses an empty xkey seed", threw);
+
+let missingPrepareThrew = false;
+try {
+  startAuthCallout({ subscribe: async function* () {} } as never, {
+    xkeySeed: callout.xkey.seed,
+    authAccount: { pub: callout.account.pub, signingSeed: callout.account.signingSeed },
+    dataAccount: { pub: auth.account.pub, signingSeed: auth.account.signingSeed },
+    space: "shape",
+    token: { key: {} as never, issuer: "i" },
+    authorizeActor: () => {},
+    permissionsFor: () => ({}),
+  } as never);
+} catch (err) {
+  missingPrepareThrew = /prepareConnection is required/.test((err as Error).message);
+}
+check("startup refuses a callout that cannot prepare connection-scoped resources", missingPrepareThrew);
 
 // ---- the NO-RESPONSE shape violations ----
 const noHeader = msg(await sealedRequest(), undefined);

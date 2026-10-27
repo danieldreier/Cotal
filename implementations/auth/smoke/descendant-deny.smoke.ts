@@ -97,6 +97,7 @@ try {
     space,
     token: { key: issuer.localKeySet(), issuer: ISS },
     authorizeActor: plane.authorizeConnect,
+    prepareConnection: () => {},
     permissionsFor: calloutPermissions(ledgerAclResolver(dir)),
     log: quiet,
   });

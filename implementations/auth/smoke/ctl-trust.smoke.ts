@@ -120,6 +120,7 @@ try {
     space,
     token: { key: issuer.localKeySet(), issuer: ISS },
     authorizeActor: ledgerAuthorizeConnect(ledgerDir),
+    prepareConnection: () => {},
     permissionsFor: calloutPermissions(ledgerAclResolver(ledgerDir)),
     log: () => {},
   });

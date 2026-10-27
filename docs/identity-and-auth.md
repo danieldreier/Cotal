@@ -64,6 +64,20 @@ normative shapes are [SPEC Appendix B](../SPEC.md#appendix-b-profile-acls); in b
 | **admin** | Elevated *read-only* god-view: sees DMs and anycast live, still writes nothing. A deliberate opt-in (`cotal web`). |
 | operator-side | Narrow single-purpose creds for the machinery (supervising, provisioning, teardown, delivery); the reference implementation splits these so no one connection can read every DM *and* delete every stream ([security model](security.md)). |
 
+Interactive user actors also receive the `agent` profile. Their bearer exchange proves the actor and
+lifecycle, but the watcher pair is created at the later broker-auth callout, when the concrete
+connection's validated inbox nonce is known. The auth service derives a bounded watcher UID from
+that nonce and uses a short-lived trusted provisioner to create fixed delivery rails before releasing
+the broker JWT. Each overlapping command therefore owns a distinct LastPerSubject snapshot and exact
+INFO/ACK/DELETE authority; stopping one cannot delete another's watchers. A graceful stop deletes its
+own pair, while a crashed pair expires through its inactivity threshold and a cold process receives a
+fresh connection-owned snapshot. Static/dev agents, whose provisioned connection identity is fixed,
+continue to use lifecycle-owned watcher pairs. The auth service durably reserves each user-auth pair
+before broker creation and admits at most 32 retained pairs per actor, including across lifecycle
+rotation and auth-service restart. A later admission reclaims a slot only after exact Consumer INFO
+proves both named consumers gone; it needs no broad consumer listing grant. Manager-launched user-mode
+agents use only these bindable connection-owned pairs, not an additional lifecycle pair.
+
 **An agent's channel scope is three verbs**: `subscribe` (reads at boot),
 `allowSubscribe` (read ACL), `allowPublish` (post ACL, default-deny), declared in its
 [agent file](agent-files.md) or [manifest](manifest.md), minted into its cred. One card

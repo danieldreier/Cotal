@@ -37,6 +37,11 @@ export async function openTransient(
     space: conn.space,
     servers: conn.server,
     ...endpointAuth(conn),
+    // A user-mode Connection's ep caller triple comes from the same bearer whose agent-profile
+    // permissions pin its public-KV watchers. Supplying that lifecycle UID selects those exact
+    // watcher names; static operator creds have no caller triple and retain their ordered watch.
+    lifecycleUid: conn.epCaller?.uid,
+    lifecyclePinnedKvWatches: conn.bearer !== undefined,
     channels: [],
     consume: false,
     registerPresence: false,

@@ -167,6 +167,10 @@ export interface StartAuthCalloutOpts {
    *  nkey pre-connect; core's `assertInboxConnId` rejects a nonce with subject metacharacters, so it
    *  cannot widen the grant. An absent/invalid nonce makes the builder throw → a signed deny. */
   permissionsFor: (t: ValidatedUserToken, connId: string) => Record<string, unknown>;
+  /** Prepare any trusted connection-scoped resources before the data-account JWT is released.
+   * REQUIRED: user-auth agent permissions name per-connection fixed-rail KV watchers, which must
+   * exist before the endpoint can bind without CREATE authority. Throwing denies the connect. */
+  prepareConnection: (t: ValidatedUserToken, connId: string) => void | Promise<void>;
   /** Diagnostics sink (default: console.error). Never carries bearer contents. */
   log?: (line: string) => void;
   /** Audit hook fired on each successful mint, BEFORE the response is sent — the minted user JWT
@@ -188,6 +192,8 @@ export function startAuthCallout(nc: CalloutConnection, opts: StartAuthCalloutOp
   const dec = (u: Uint8Array) => new TextDecoder().decode(u);
   if (!opts.expectedServerIds?.length)
     log("auth callout: WARNING - no expectedServerIds allow-list set; request provenance rests on $SYS system-subject isolation alone (safe single-broker, but set expectedServerIds for hardened/multi-server deploys)");
+  if (typeof opts.prepareConnection !== "function")
+    throw new Error("auth callout: prepareConnection is required so connection-scoped resources exist before authority is released");
 
   const sub = nc.subscribe(AUTH_CALLOUT_SUBJECT, { queue: "cotal-auth-callout" });
 
@@ -268,6 +274,7 @@ export function startAuthCallout(nc: CalloutConnection, opts: StartAuthCalloutOp
         // injected permissionsFor hook (which could be any implementation). assertInboxConnId throws on a
         // missing/wildcard name → the catch below turns it into a signed deny (fail-closed).
         const inboxNonce = assertInboxConnId(req.connect_opts?.name ?? "");
+        await opts.prepareConnection(validated, inboxNonce);
         const perms = opts.permissionsFor(validated, inboxNonce);
         // Stamp the principal into the minted JWT so the live identity is recoverable server-side: the
         // connection's `user_nkey` is a per-connect ephemeral the SERVER generated, not the principal,

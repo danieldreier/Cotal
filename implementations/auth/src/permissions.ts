@@ -5,7 +5,7 @@
  * enforces the token-specific invariants (derived owner, `act.scope` as the single capability authority)
  * and resolves the agent's channel ACL server-side, then hands core a `MintPrincipal`.
  */
-import { permissionsFor, assertDerivedOwnerToken, type MintPrincipal, type MintOpts } from "@cotal-ai/core";
+import { agentKvWatchConnectionUid, permissionsFor, assertDerivedOwnerToken, type MintPrincipal, type MintOpts } from "@cotal-ai/core";
 import { VIEW_REQUIRED_SCOPE } from "./token.js";
 import type { ValidatedUserToken } from "./token.js";
 
@@ -95,7 +95,14 @@ export function calloutPermissions(
     return permissionsFor(
       "agent",
       t.space,
-      { ...principal, lifecycleUid: acl.lifecycleUid },
+      {
+        ...principal,
+        lifecycleUid: acl.lifecycleUid,
+        // User-auth processes choose a distinct, validated connection nonce. Bind public-KV
+        // watcher authority to that connection rather than sharing lifecycle DELETE authority
+        // across overlapping CLI commands.
+        kvWatchUid: agentKvWatchConnectionUid(connId),
+      },
       { ...aclOpts, capabilities: caps },
     );
   };

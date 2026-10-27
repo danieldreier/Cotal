@@ -20,6 +20,7 @@ const ep = new CotalEndpoint({
   lifecycleUid: e.COTAL_LIFECYCLE_UID,
   channels: [],
   consume: e.COTAL_E2E_CONSUME === "1",
+  watchPresence: e.COTAL_E2E_WATCH_PRESENCE !== "0",
   registerPresence: true,
 });
 ep.on("error", (err) => console.error("STUB_ERR", err?.message ?? err));
